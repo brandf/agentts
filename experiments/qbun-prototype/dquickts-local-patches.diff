@@ -1,0 +1,265 @@
+diff --git a/node/core.c b/node/core.c
+index cd22d35..e8da018 100644
+--- a/node/core.c
++++ b/node/core.c
+@@ -2276,6 +2276,11 @@ static int qb_watch_main(QBRuntime *qr, JSValue promise)
+     JSContext *ctx = qr->ctx;
+     JSValue then, args[2], ret;
+ 
++    /* a suspended entry evaluation is not an error: the caller snapshots
++       the runtime and exits (return 2), instead of reporting the
++       suspension marker as an uncaught exception */
++    if (JS_IsException(promise) && JS_IsSuspended(qr->rt))
++        return 2;
+     if (JS_IsException(promise)) {
+         qb_report_exception(ctx);
+         return -1;
+diff --git a/node/crypto.c b/node/crypto.c
+index 06fa76a..9273396 100644
+--- a/node/crypto.c
++++ b/node/crypto.c
+@@ -2888,6 +2888,7 @@ fail:
+ 
+ static int qc_argon2_run(QCJob *j)
+ {
++#if OPENSSL_VERSION_NUMBER >= 0x30200000L
+     QCKdfJob *k = (QCKdfJob *)j;
+     EVP_KDF *kdf;
+     EVP_KDF_CTX *kctx = NULL;
+@@ -2924,6 +2925,11 @@ static int qc_argon2_run(QCJob *j)
+     ok = EVP_KDF_derive(kctx, j->out, k->keylen, params) == 1;
+     EVP_KDF_CTX_free(kctx);
+     return ok ? 0 : -1;
++#else
++    (void)j;
++    return qc_job_fail(j, JS_PLAIN_ERROR, "ERR_CRYPTO_UNSUPPORTED_OPERATION",
++                       "Argon2 is not supported by this OpenSSL build");
++#endif
+ }
+ 
+ /* argon2(variant, message, nonce, secret, ad, parallelism, memory, passes, tagLength, cb) */
+@@ -4851,9 +4857,14 @@ static int qc_sign_init(QCSignJob *s, EVP_MD_CTX *mctx, int verify)
+         md = mdname;
+     }
+     if (s->has_context) {
++#if OPENSSL_VERSION_NUMBER >= 0x30200000L
+         params[0] = OSSL_PARAM_construct_octet_string(OSSL_SIGNATURE_PARAM_CONTEXT_STRING,
+                                                       s->context, s->clen);
+         params[1] = OSSL_PARAM_construct_end();
++#else
++        return qc_job_fail(&s->j, JS_TYPE_ERROR, "ERR_CRYPTO_INVALID_STATE",
++                           "Signature context strings need OpenSSL 3.2 or later");
++#endif
+     }
+     if (verify)
+         r = EVP_DigestVerifyInit_ex(mctx, &pctx, md, NULL, NULL, s->pkey,
+diff --git a/node/http.c b/node/http.c
+index be08e01..e973707 100644
+--- a/node/http.c
++++ b/node/http.c
+@@ -2051,7 +2051,9 @@ static JSValue qh_websocket(JSContext *ctx, JSValueConst this_val, int argc, JSV
+     }
+     curl_easy_setopt(ws->b.easy, CURLOPT_PROTOCOLS_STR, "ws,wss");
+     curl_easy_setopt(ws->b.easy, CURLOPT_CONNECT_ONLY, 2L);
++#if LIBCURL_VERSION_NUM >= 0x080e00
+     curl_easy_setopt(ws->b.easy, CURLOPT_WS_OPTIONS, (long)CURLWS_NOAUTOPONG);
++#endif
+     proxy = qh_get_cstr(ctx, argv[0], "proxy", NULL, &err);
+     if (err) {
+         JS_FreeValue(ctx, obj);
+diff --git a/node/napi.c b/node/napi.c
+index 94e6219..6e7290e 100644
+--- a/node/napi.c
++++ b/node/napi.c
+@@ -43,6 +43,7 @@
+ #include <string.h>
+ 
+ #include "qbun.h"
++#include "../cutils.h" /* BOOL/TRUE/FALSE enum */
+ #include "napi/node_api.h"
+ 
+ #ifndef container_of
+diff --git a/node/tls.c b/node/tls.c
+index cbe4365..e3e4ca2 100644
+--- a/node/tls.c
++++ b/node/tls.c
+@@ -2716,6 +2716,15 @@ static JSValue qb_tls_conn_get_shared_sigalgs(JSContext *ctx, JSValueConst this_
+     return arr;
+ }
+ 
++/* SSL_get0_group_name() is OpenSSL 3.5+; on older releases the
++   group name is unavailable and callers fall back to the key type
++   name (or skip the hybrid-group branch). */
++#if OPENSSL_VERSION_NUMBER < 0x30500000L
++#define QB_SSL_GET0_GROUP_NAME(ssl) (NULL)
++#else
++#define QB_SSL_GET0_GROUP_NAME(ssl) SSL_get0_group_name(ssl)
++#endif
++
+ static JSValue qb_tls_conn_get_ephemeral_key_info(JSContext *ctx, JSValueConst this_val, int argc,
+                                                   JSValueConst *argv)
+ {
+@@ -2748,16 +2757,16 @@ static JSValue qb_tls_conn_get_ephemeral_key_info(JSContext *ctx, JSValueConst t
+             qb_set(ctx, o, "size", JS_NewInt32(ctx, bits));
+         } else {
+             const char *tn = EVP_PKEY_get0_type_name(key);
+-            const char *gn = SSL_get0_group_name(c->ssl);
++            const char *gn = QB_SSL_GET0_GROUP_NAME(c->ssl);
+             qb_set(ctx, o, "type", JS_NewString(ctx, "ECDH"));
+             qb_set(ctx, o, "name", JS_NewString(ctx, gn ? gn : tn ? tn : "unknown"));
+             qb_set(ctx, o, "size", JS_NewInt32(ctx, bits));
+         }
+         EVP_PKEY_free(key);
+-    } else if (SSL_get0_group_name(c->ssl)) {
++    } else if (QB_SSL_GET0_GROUP_NAME(c->ssl)) {
+         /* hybrid post-quantum groups have no peer key object */
+         qb_set(ctx, o, "type", JS_NewString(ctx, "ECDH"));
+-        qb_set(ctx, o, "name", JS_NewString(ctx, SSL_get0_group_name(c->ssl)));
++        qb_set(ctx, o, "name", JS_NewString(ctx, QB_SSL_GET0_GROUP_NAME(c->ssl)));
+     }
+     ERR_clear_error();
+     return o;
+diff --git a/node/worker.c b/node/worker.c
+index 48a0186..3e907c4 100644
+--- a/node/worker.c
++++ b/node/worker.c
+@@ -1798,7 +1798,11 @@ static void qb_worker_handle_cleanup(void *arg)
+         qb_worker_stop_locked(w);
+         uv_mutex_unlock(&w->mutex);
+         if (w->thread_started)
++#if UV_VERSION_MAJOR > 1 || (UV_VERSION_MAJOR == 1 && UV_VERSION_MINOR >= 50)
+             uv_thread_detach(&w->tid);
++#else
++            uv_thread_join(&w->tid); /* libuv < 1.50 has no detach; wait for the stopped thread */
++#endif
+     }
+     qb_worker_handle_finish(wh, 1, 0);
+ }
+@@ -1822,7 +1826,11 @@ static void qb_worker_handle_finalizer(JSRuntime *rt, JSValue val)
+         qb_worker_stop_locked(w);
+         uv_mutex_unlock(&w->mutex);
+         if (w->thread_started)
++#if UV_VERSION_MAJOR > 1 || (UV_VERSION_MAJOR == 1 && UV_VERSION_MINOR >= 50)
+             uv_thread_detach(&w->tid);
++#else
++            uv_thread_join(&w->tid); /* libuv < 1.50 has no detach; wait for the stopped thread */
++#endif
+         qb_remove_cleanup_hook(wh->qr, qb_worker_handle_cleanup, wh);
+         qb_worker_release(w);
+     }
+diff --git a/node/zlib.c b/node/zlib.c
+index 0978f2b..439e77d 100644
+--- a/node/zlib.c
++++ b/node/zlib.c
+@@ -1035,7 +1035,9 @@ static const JSCFunctionListEntry qb_zconstants[] = {
+     ZC(ZSTD_c_minMatch),
+     ZC(ZSTD_c_targetLength),
+     ZC(ZSTD_c_strategy),
++#if ZSTD_VERSION_NUMBER >= 10506
+     ZC(ZSTD_c_targetCBlockSize),
++#endif
+     ZC(ZSTD_c_enableLongDistanceMatching),
+     ZC(ZSTD_c_ldmHashLog),
+     ZC(ZSTD_c_ldmMinMatch),
+@@ -1083,7 +1085,9 @@ static const JSCFunctionListEntry qb_zconstants[] = {
+     ZEC(tableLog_tooLarge),
+     ZEC(maxSymbolValue_tooLarge),
+     ZEC(maxSymbolValue_tooSmall),
++#if ZSTD_VERSION_NUMBER >= 10506
+     ZEC(cannotProduce_uncompressedBlock),
++#endif
+     ZEC(stabilityCondition_notRespected),
+     ZEC(stage_wrong),
+     ZEC(init_missing),
+diff --git a/qbun.c b/qbun.c
+index 578bcd7..90894f0 100644
+--- a/qbun.c
++++ b/qbun.c
+@@ -24,6 +24,58 @@
+ 
+ #include "node/qbun.h"
+ 
++/*
++ * EXPERIMENT (qbun-prototype): a durable step() builtin for workflows.
++ * step(input) suspends the calling workflow with JS_SuspendCall(); the
++ * host snapshots the runtime, exits, and a fresh process resumes the
++ * call with JS_ResumeWith(). Only the sync-looking style works: a step
++ * called from an async frame throws "TypeError: this call cannot be
++ * suspended". Registered on the main context after bootstrap so the
++ * workflow module can call it as a plain global.
++ */
++static JSValue qb_step(JSContext *ctx, JSValueConst this_val,
++                       int argc, JSValueConst *argv)
++{
++    JSValue json = JS_JSONStringify(ctx, argc > 0 ? argv[0] : JS_UNDEFINED,
++                                    JS_UNDEFINED, JS_UNDEFINED);
++    const char *str = JS_ToCString(ctx, json);
++    fprintf(stderr, "[qbun-step] step(%s) - suspending\n", str ? str : "?");
++    JS_FreeCString(ctx, str);
++    JS_FreeValue(ctx, json);
++    (void)this_val;
++    return JS_SuspendCall(ctx);
++}
++
++/* try to snapshot a suspended runtime; 0 = snapshot written, 1 = failed */
++static int qb_try_snapshot(QBRuntime *qr, const char *path)
++{
++    static const void *natives[] = { (const void *)qb_step };
++    static const JSSnapshotHost host = {
++        .natives = natives,
++        .native_count = 1,
++    };
++    size_t size = 0;
++    uint8_t *buf = JS_WriteSnapshot(qr->ctx, &size, &host, NULL, 0, 0);
++    FILE *f;
++    if (!buf) {
++        JSValue exc = JS_GetException(qr->ctx);
++        const char *msg = JS_ToCString(qr->ctx, exc);
++        fprintf(stderr, "[qbun-step] snapshot FAILED: %s\n", msg ? msg : "?");
++        JS_FreeCString(qr->ctx, msg);
++        JS_FreeValue(qr->ctx, exc);
++        return 1;
++    }
++    f = fopen(path, "wb");
++    if (!f || fwrite(buf, 1, size, f) != size || fclose(f)) {
++        perror(path);
++        js_free(qr->ctx, buf);
++        return 1;
++    }
++    fprintf(stderr, "[qbun-step] snapshot saved: %s (%zu bytes)\n", path, size);
++    js_free(qr->ctx, buf);
++    return 0;
++}
++
+ #ifndef CONFIG_QBUN_LIB
+ #define CONFIG_QBUN_LIB ""
+ #endif
+@@ -172,12 +224,28 @@ int main(int argc, char **argv)
+             return 1;
+     }
+     free(preloads);
++    /* the workflow's step() builtin (registered after bootstrap so the
++       module can call it as a plain global) */
++    {
++        JSValue global = JS_GetGlobalObject(qr->ctx);
++        JS_SetPropertyStr(qr->ctx, global, "step",
++                          JS_NewCFunction(qr->ctx, qb_step, "step", 1));
++        JS_FreeValue(qr->ctx, global);
++    }
+     if (file)
+         ret = qb_run_main(qr, file);
+     else
+         ret = qb_run_eval(qr, eval, 1);
+     if (ret < 0)
+         return 1;
++    if (ret == 2) {
++        /* the workflow suspended in step(): snapshot and exit so a fresh
++           process can resume it (QBUN_STEP_SNAP sets the snapshot path) */
++        const char *snap = getenv("QBUN_STEP_SNAP");
++        if (!snap)
++            snap = "qbun-step.snap";
++        return qb_try_snapshot(qr, snap) == 0 ? 2 : 1;
++    }
+     qb_run_loop(qr);
+     ret = qb_runtime_exit(qr);
+     fflush(stdout);
