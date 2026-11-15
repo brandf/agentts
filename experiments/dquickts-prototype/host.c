@@ -8,12 +8,15 @@
  * disk and exits, and a fresh process restores the snapshot and completes
  * the call with JS_ResumeWith().
  *
- * Async workflows use a second builtin, `stepAsync`, because the sync
- * call cannot be awaited: `await step()` throws "TypeError: this call
- * cannot be suspended" (an async frame is not suspendable). stepAsync()
- * returns a promise and stashes its resolve on the heap; the workflow
- * parks on the await between jobs, the host snapshots, and a later
- * process resolves the promise. Same workflow otherwise.
+ * Sync-looking is the only style. `await step()` throws "TypeError: this
+ * call cannot be suspended" (an async frame is not suspendable) — that is
+ * a documented constraint, not a supported path: there is no async
+ * variant of the builtin.
+ *
+ * A step can also deliver an exception instead of a value: the resume
+ * driver takes a result of the form throw:<json> and completes the call
+ * with JS_ResumeWith(result, throw_flag=1), so the exception is raised
+ * at the step call site and the workflow's try/catch sees it.
  *
  *   proto run <workflow.ts> <snap>      evaluate; suspend at the first
  *                                        step call, save snapshot, exit 2
@@ -21,6 +24,8 @@
  *                                        step call with the result; run on
  *                                        until the next step (exit 2) or
  *                                        completion (exit 0)
+ *   proto resume <snap> throw:<json>    same, but the step call throws
+ *                                        the JSON value instead
  *
  * Exit codes: 0 = workflow done, 1 = error, 2 = suspended, snapshot saved.
  * Workflow output (print) goes to stdout; host diagnostics to stderr.
@@ -52,8 +57,7 @@ static JSValue js_print(JSContext *ctx, JSValueConst this_val,
  * Limitation, found by testing: this only works from a plain synchronous
  * call stack. `await step(input)` throws "TypeError: this call cannot be
  * suspended" — an async frame is not suspendable (quickjs.h: every frame
- * must be a normal non-generator, non-async function). So async workflows
- * need stepAsync() instead: a promise whose resolve the host holds. */
+ * must be a normal non-generator, non-async function). */
 static JSValue js_step(JSContext *ctx, JSValueConst this_val,
                        int argc, JSValueConst *argv)
 {
@@ -66,58 +70,14 @@ static JSValue js_step(JSContext *ctx, JSValueConst this_val,
     return JS_SuspendCall(ctx);
 }
 
-/* stepAsync(input): the promise-based builtin for async workflows.
- * Returns a promise and stashes {input, resolve} on the global
- * __pendingSteps array. The workflow parks on the await between jobs;
- * the host snapshots, exits, and a later process pops the entry and
- * calls resolve(result). */
-static JSValue js_step_async(JSContext *ctx, JSValueConst this_val,
-                             int argc, JSValueConst *argv)
-{
-    JSValue resolving[2];
-    JSValue promise = JS_NewPromiseCapability(ctx, resolving);
-    JSValue global = JS_GetGlobalObject(ctx);
-    JSValue arr = JS_GetPropertyStr(ctx, global, "__pendingSteps");
-    JSValue entry, lenv;
-    int64_t n = 0;
-    if (JS_IsUndefined(arr) || JS_IsNull(arr)) {
-        arr = JS_NewArray(ctx);
-        /* SetPropertyStr consumes its value: dup so arr stays ours. */
-        JS_SetPropertyStr(ctx, global, "__pendingSteps",
-                          JS_DupValue(ctx, arr));
-    }
-    entry = JS_NewObject(ctx);
-    JS_SetPropertyStr(ctx, entry, "input",
-                      argc > 0 ? JS_DupValue(ctx, argv[0]) : JS_UNDEFINED);
-    JS_SetPropertyStr(ctx, entry, "resolve", resolving[0]);
-    JS_SetPropertyStr(ctx, entry, "reject", resolving[1]);
-    lenv = JS_GetPropertyStr(ctx, arr, "length");
-    JS_ToInt64(ctx, &n, lenv);
-    JS_FreeValue(ctx, lenv);
-    JS_SetPropertyUint32(ctx, arr, (uint32_t)n, entry);
-    JS_FreeValue(ctx, arr);
-    JS_FreeValue(ctx, global);
-    {
-        JSValue json = JS_JSONStringify(ctx, argc > 0 ? argv[0] : JS_UNDEFINED,
-                                        JS_UNDEFINED, JS_UNDEFINED);
-        const char *str = JS_ToCString(ctx, json);
-        fprintf(stderr, "[host] stepAsync(%s) — promise pending\n",
-                str ? str : "?");
-        JS_FreeCString(ctx, str);
-        JS_FreeValue(ctx, json);
-    }
-    return promise;
-}
-
 static const void * const host_natives[] = {
     (const void *)js_print,
     (const void *)js_step,
-    (const void *)js_step_async,
 };
 
 static const JSSnapshotHost host = {
     .natives = host_natives,
-    .native_count = 3,
+    .native_count = 2,
 };
 
 static void print_exception(JSContext *ctx)
@@ -184,58 +144,9 @@ static int save(JSRuntime *rt, JSContext *ctx, const char *snap)
     return 2;
 }
 
-/* Number of stepAsync calls still waiting for a result. */
-static int pending_steps(JSContext *ctx)
-{
-    JSValue global = JS_GetGlobalObject(ctx);
-    JSValue arr = JS_GetPropertyStr(ctx, global, "__pendingSteps");
-    JSValue lenv;
-    int64_t n = 0;
-    JS_FreeValue(ctx, global);
-    if (JS_IsArray(ctx, arr)) {
-        lenv = JS_GetPropertyStr(ctx, arr, "length");
-        JS_ToInt64(ctx, &n, lenv);
-        JS_FreeValue(ctx, lenv);
-    }
-    JS_FreeValue(ctx, arr);
-    return (int)n;
-}
-
-/* Complete the most recent pending stepAsync call with result.
- * Returns 1 if one was resolved, 0 if none was pending. */
-static int resolve_pending(JSContext *ctx, JSValue result)
-{
-    JSValue global = JS_GetGlobalObject(ctx);
-    JSValue arr = JS_GetPropertyStr(ctx, global, "__pendingSteps");
-    JSValue lenv, entry, resolve, r;
-    int64_t n = 0;
-    JS_FreeValue(ctx, global);
-    if (!JS_IsArray(ctx, arr)) {
-        JS_FreeValue(ctx, arr);
-        return 0;
-    }
-    lenv = JS_GetPropertyStr(ctx, arr, "length");
-    JS_ToInt64(ctx, &n, lenv);
-    JS_FreeValue(ctx, lenv);
-    if (n <= 0) {
-        JS_FreeValue(ctx, arr);
-        return 0;
-    }
-    entry = JS_GetPropertyUint32(ctx, arr, (uint32_t)(n - 1));
-    resolve = JS_GetPropertyStr(ctx, entry, "resolve");
-    fprintf(stderr, "[host] resolving pending stepAsync\n");
-    r = JS_Call(ctx, resolve, JS_UNDEFINED, 1, &result);
-    if (JS_IsException(r))
-        print_exception(ctx);
-    JS_FreeValue(ctx, r);
-    JS_FreeValue(ctx, resolve);
-    JS_FreeValue(ctx, entry);
-    JS_SetPropertyStr(ctx, arr, "length", JS_NewInt64(ctx, n - 1));
-    JS_FreeValue(ctx, arr);
-    return 1;
-}
-
-/* Drain pending jobs. Returns 0 done, 1 error, 2 suspended (saved). */
+/* Drain pending jobs. Returns 0 done, 1 error, 2 suspended (saved).
+ * Sync-only workflows create no jobs, so a drain that ends without a
+ * suspension means the workflow is done. */
 static int finish_slice(JSRuntime *rt, JSContext *ctx, const char *snap)
 {
     JSContext *ctx1;
@@ -251,10 +162,6 @@ static int finish_slice(JSRuntime *rt, JSContext *ctx, const char *snap)
         return 1;
     }
     if (JS_IsSuspended(rt))
-        return save(rt, ctx, snap);
-    if (pending_steps(ctx) > 0)
-        return save(rt, ctx, snap);
-    if (JS_IsJobPending(rt))
         return save(rt, ctx, snap);
     return 0;
 }
@@ -284,8 +191,6 @@ int main(int argc, char **argv)
                           JS_NewCFunction(ctx, js_print, "print", 1));
         JS_SetPropertyStr(ctx, global, "step",
                           JS_NewCFunction(ctx, js_step, "step", 1));
-        JS_SetPropertyStr(ctx, global, "stepAsync",
-                          JS_NewCFunction(ctx, js_step_async, "stepAsync", 1));
         JS_FreeValue(ctx, global);
 
         val = JS_Eval(ctx, (char *)buf, len, argv[2],
@@ -304,6 +209,8 @@ int main(int argc, char **argv)
     if (argc == 4 && !strcmp(argv[1], "resume")) {
         JSSnapshotResult res;
         char err[256];
+        int throw_flag = 0;
+        const char *result_json = argv[3];
         buf = load_file(argv[2], &len);
         rt = JS_NewRuntime();
         if (JS_ReadSnapshot(rt, buf, len, NULL, 0, &host, &res,
@@ -316,12 +223,19 @@ int main(int argc, char **argv)
         ctx = res.contexts[0];
         JS_FreeSnapshotResult(rt, &res);
 
-        val = parse_result(ctx, argv[3]);
+        /* throw:<json> delivers the JSON value as an exception from the
+         * pending step call instead of a normal result. */
+        if (!strncmp(result_json, "throw:", 6)) {
+            throw_flag = 1;
+            result_json += 6;
+        }
+        val = parse_result(ctx, result_json);
         if (JS_IsException(val))
             return 1;
         if (JS_IsSuspended(rt)) {
-            /* The pending step() call completes with the result. */
-            val = JS_ResumeWith(ctx, val, 0);
+            /* The pending step() call completes with the result — or
+             * throws it, if throw_flag is set. */
+            val = JS_ResumeWith(ctx, val, throw_flag);
             if (JS_IsException(val)) {
                 if (JS_IsSuspended(rt))
                     return save(rt, ctx, argv[2]);
@@ -331,19 +245,14 @@ int main(int argc, char **argv)
             JS_FreeValue(ctx, val);
             return finish_slice(rt, ctx, argv[2]);
         }
-        /* Not suspended: the run is parked on a stepAsync promise.
-         * Resolve the pending call with the result. */
-        if (resolve_pending(ctx, val)) {
-            JS_FreeValue(ctx, val);
-            return finish_slice(rt, ctx, argv[2]);
-        }
-        fprintf(stderr, "[host] restored runtime is neither suspended "
-                "nor waiting on a step; nothing to resume\n");
+        fprintf(stderr, "[host] restored runtime is not suspended; "
+                "nothing to resume\n");
         JS_FreeValue(ctx, val);
-        return finish_slice(rt, ctx, argv[2]);
+        return 1;
     }
 
     fprintf(stderr, "usage: proto run <workflow.ts> <snap>\n"
-            "       proto resume <snap> <result-json>\n");
+            "       proto resume <snap> <result-json>\n"
+            "       proto resume <snap> throw:<json>\n");
     return 1;
 }
