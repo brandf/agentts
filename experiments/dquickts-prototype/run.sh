@@ -56,10 +56,14 @@ verdict: ship/reject
 workflow done: ship/reject
 EOF
 
-make proto 2>&1 | tail -3
+make proto || { echo "build failed"; exit 1; }
 run_variant "sync-looking" workflow-sync.ts sync.snap sync.out
 run_variant "async-await" workflow-async.ts async.snap async.out
 
 echo "=== raw engine speed (qjs, same VM) ==="
 QJS=${QJS:-$HOME/workspace/dquickts-build/qjs}
-time "$QJS" -e 'let s=0; for (let i=0;i<100000000;i++) s+=i; print(s)'
+if [ -x "$QJS" ]; then
+    time "$QJS" -e 'let s=0; for (let i=0;i<100000000;i++) s+=i; print(s)'
+else
+    echo "(qjs not found at $QJS — skipping raw-speed check)"
+fi
