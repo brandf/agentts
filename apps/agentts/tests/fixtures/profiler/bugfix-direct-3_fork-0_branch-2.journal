@@ -1,0 +1,8 @@
+{"event":"lifecycle","lifecycle":"resumed","runId":"bugfix-direct-3/fork-0/branch-2"}
+{"event":"branch-start","runId":"bugfix-direct-3/fork-0/branch-2","parentForkId":"bugfix-direct-3/fork-0","branch":2}
+{"event":"trap","runId":"bugfix-direct-3/fork-0/branch-2","trapId":"bugfix-direct-3/fork-0/branch-2/trap-0","ordinal":0,"type":"job","arg":{"spec":"judge","input":{"item":{"text":"The fix is minimal and targeted: the CLI wires the local decision model into the mock path, with no regression to canned answers for other traps.","goal":"A minimal, targeted BRA-54 fix with no regression."},"rubric":{"criteria":["minimal","targeted","no regression"],"threshold":0.8},"judge":2}}}
+{"event":"lifecycle","lifecycle":"suspended","runId":"bugfix-direct-3/fork-0/branch-2","kind":2}
+{"event":"lifecycle","lifecycle":"resumed","runId":"bugfix-direct-3/fork-0/branch-2"}
+{"event":"trap-result","runId":"bugfix-direct-3/fork-0/branch-2","trapId":"bugfix-direct-3/fork-0/branch-2/trap-0","ordinal":0,"result":{"score":0.98,"label":"approved","notes":"minimal: addressed; targeted: addressed; no regression: addressed"}}
+{"event":"branch-done","runId":"bugfix-direct-3/fork-0/branch-2","parentForkId":"bugfix-direct-3/fork-0","branch":2,"outcome":{"ok":true,"value":{"score":0.98,"label":"approved","notes":"minimal: addressed; targeted: addressed; no regression: addressed"}}}
+{"event":"lifecycle","lifecycle":"completed","runId":"bugfix-direct-3/fork-0/branch-2"}

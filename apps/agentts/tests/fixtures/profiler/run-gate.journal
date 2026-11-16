@@ -1,0 +1,7 @@
+{"event":"lifecycle","lifecycle":"started","runId":"run-gate"}
+{"event":"trap","runId":"run-gate","trapId":"run-gate/trap-0","ordinal":0,"type":"gate","arg":{"question":"approve?"}}
+{"event":"lifecycle","lifecycle":"suspended","runId":"run-gate","kind":2}
+{"event":"gate-held","runId":"run-gate","trapId":"run-gate/trap-0","question":"approve?"}
+{"event":"lifecycle","lifecycle":"resumed","runId":"run-gate"}
+{"event":"trap-result","runId":"run-gate","trapId":"run-gate/trap-0","ordinal":0,"result":{"answer":"yes"}}
+{"event":"lifecycle","lifecycle":"completed","runId":"run-gate"}

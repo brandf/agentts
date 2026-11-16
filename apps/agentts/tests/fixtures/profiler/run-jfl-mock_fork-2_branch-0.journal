@@ -1,0 +1,8 @@
+{"event":"lifecycle","lifecycle":"resumed","runId":"run-jfl-mock/fork-2/branch-0"}
+{"event":"branch-start","runId":"run-jfl-mock/fork-2/branch-0","parentForkId":"run-jfl-mock/fork-2","branch":0}
+{"event":"trap","runId":"run-jfl-mock/fork-2/branch-0","trapId":"run-jfl-mock/fork-2/branch-0/trap-0","ordinal":0,"type":"job","arg":{"spec":"judge","input":{"item":{"text":"The quick brown fox jumps over the lazy dog. (revised 1). It is tightened and clarified. (revised 2). It is tightened and clarified.","goal":"A vivid one-sentence story opening."},"rubric":{"criteria":["vivid","concrete","concise"],"threshold":0.8},"judge":0}}}
+{"event":"lifecycle","lifecycle":"suspended","runId":"run-jfl-mock/fork-2/branch-0","kind":2}
+{"event":"lifecycle","lifecycle":"resumed","runId":"run-jfl-mock/fork-2/branch-0"}
+{"event":"trap-result","runId":"run-jfl-mock/fork-2/branch-0","trapId":"run-jfl-mock/fork-2/branch-0/trap-0","ordinal":0,"result":{"score":0.85,"label":"approved","notes":"vivid: missing; concrete: missing; concise: missing"}}
+{"event":"branch-done","runId":"run-jfl-mock/fork-2/branch-0","parentForkId":"run-jfl-mock/fork-2","branch":0,"outcome":{"ok":true,"value":{"score":0.85,"label":"approved","notes":"vivid: missing; concrete: missing; concise: missing"}}}
+{"event":"lifecycle","lifecycle":"completed","runId":"run-jfl-mock/fork-2/branch-0"}

@@ -1,0 +1,98 @@
+{"event":"lifecycle","lifecycle":"started","runId":"run-jfl-mock"}
+{"event":"fork","runId":"run-jfl-mock","forkId":"run-jfl-mock/fork-0","kind":"all","branches":3,"failFast":false,"childRuns":["run-jfl-mock/fork-0/branch-0","run-jfl-mock/fork-0/branch-1","run-jfl-mock/fork-0/branch-2"]}
+{"event":"lifecycle","lifecycle":"suspended","runId":"run-jfl-mock","kind":3}
+{"event":"lifecycle","lifecycle":"resumed","runId":"run-jfl-mock"}
+{"event":"join","runId":"run-jfl-mock","forkId":"run-jfl-mock/fork-0","outcome":[{"ok":true,"value":{"score":0.55,"label":"weak","notes":"vivid: missing; concrete: missing; concise: missing"}},{"ok":true,"value":{"score":0.62,"label":"weak","notes":"vivid: missing; concrete: missing; concise: missing"}},{"ok":true,"value":{"score":0.48,"label":"weak","notes":"vivid: missing; concrete: missing; concise: missing"}}]}
+{"event":"trap","runId":"run-jfl-mock","trapId":"run-jfl-mock/trap-0","ordinal":0,"type":"job","arg":{"spec":"aggregate","input":{"verdicts":[{"score":0.55,"label":"weak","notes":"vivid: missing; concrete: missing; concise: missing"},{"score":0.62,"label":"weak","notes":"vivid: missing; concrete: missing; concise: missing"},{"score":0.48,"label":"weak","notes":"vivid: missing; concrete: missing; concise: missing"}],"failed":0,"threshold":0.8}}}
+{"event":"lifecycle","lifecycle":"suspended","runId":"run-jfl-mock","kind":2}
+{"event":"lifecycle","lifecycle":"resumed","runId":"run-jfl-mock"}
+{"event":"trap-result","runId":"run-jfl-mock","trapId":"run-jfl-mock/trap-0","ordinal":0,"result":{"approved":0,"failed":0,"meanScore":0.55,"summary":"0 approved, 0 failed, mean 0.55"}}
+{"event":"trap","runId":"run-jfl-mock","trapId":"run-jfl-mock/trap-1","ordinal":1,"type":"decide","arg":{"question":"loop 1: mean score 0.55 threshold 0.8; 0 of 3 approved. Should the work item be revised or kept?","options":["revise","keep"]}}
+{"event":"lifecycle","lifecycle":"suspended","runId":"run-jfl-mock","kind":2}
+{"event":"lifecycle","lifecycle":"resumed","runId":"run-jfl-mock"}
+{"event":"trap-result","runId":"run-jfl-mock","trapId":"run-jfl-mock/trap-1","ordinal":1,"result":{"choice":"revise","confidence":0.8}}
+{"event":"trap","runId":"run-jfl-mock","trapId":"run-jfl-mock/trap-2","ordinal":2,"type":"job","arg":{"spec":"fix","input":{"item":{"text":"The quick brown fox jumps over the lazy dog.","goal":"A vivid one-sentence story opening."},"rubric":{"criteria":["vivid","concrete","concise"],"threshold":0.8},"verdicts":[{"score":0.55,"label":"weak","notes":"vivid: missing; concrete: missing; concise: missing"},{"score":0.62,"label":"weak","notes":"vivid: missing; concrete: missing; concise: missing"},{"score":0.48,"label":"weak","notes":"vivid: missing; concrete: missing; concise: missing"}]}}}
+{"event":"lifecycle","lifecycle":"suspended","runId":"run-jfl-mock","kind":2}
+{"event":"lifecycle","lifecycle":"resumed","runId":"run-jfl-mock"}
+{"event":"trap-result","runId":"run-jfl-mock","trapId":"run-jfl-mock/trap-2","ordinal":2,"result":{"text":"The quick brown fox jumps over the lazy dog. (revised 1). It is tightened and clarified.","goal":"A vivid one-sentence story opening."}}
+{"event":"trap","runId":"run-jfl-mock","trapId":"run-jfl-mock/trap-3","ordinal":3,"type":"decide","arg":{"question":"loop 1: mean score 0.55 threshold 0.8, loops since rubric change 99. Converged?","options":["converged","continue"]}}
+{"event":"lifecycle","lifecycle":"suspended","runId":"run-jfl-mock","kind":2}
+{"event":"lifecycle","lifecycle":"resumed","runId":"run-jfl-mock"}
+{"event":"trap-result","runId":"run-jfl-mock","trapId":"run-jfl-mock/trap-3","ordinal":3,"result":{"choice":"continue","confidence":0.8}}
+{"event":"fork","runId":"run-jfl-mock","forkId":"run-jfl-mock/fork-1","kind":"all","branches":3,"failFast":false,"childRuns":["run-jfl-mock/fork-1/branch-0","run-jfl-mock/fork-1/branch-1","run-jfl-mock/fork-1/branch-2"]}
+{"event":"lifecycle","lifecycle":"suspended","runId":"run-jfl-mock","kind":3}
+{"event":"lifecycle","lifecycle":"resumed","runId":"run-jfl-mock"}
+{"event":"join","runId":"run-jfl-mock","forkId":"run-jfl-mock/fork-1","outcome":[{"ok":true,"value":{"score":0.7,"label":"weak","notes":"vivid: missing; concrete: missing; concise: missing"}},{"ok":true,"value":{"score":0.77,"label":"weak","notes":"vivid: missing; concrete: missing; concise: missing"}},{"ok":true,"value":{"score":0.63,"label":"weak","notes":"vivid: missing; concrete: missing; concise: missing"}}]}
+{"event":"trap","runId":"run-jfl-mock","trapId":"run-jfl-mock/trap-4","ordinal":4,"type":"job","arg":{"spec":"aggregate","input":{"verdicts":[{"score":0.7,"label":"weak","notes":"vivid: missing; concrete: missing; concise: missing"},{"score":0.77,"label":"weak","notes":"vivid: missing; concrete: missing; concise: missing"},{"score":0.63,"label":"weak","notes":"vivid: missing; concrete: missing; concise: missing"}],"failed":0,"threshold":0.8}}}
+{"event":"lifecycle","lifecycle":"suspended","runId":"run-jfl-mock","kind":2}
+{"event":"lifecycle","lifecycle":"resumed","runId":"run-jfl-mock"}
+{"event":"trap-result","runId":"run-jfl-mock","trapId":"run-jfl-mock/trap-4","ordinal":4,"result":{"approved":0,"failed":0,"meanScore":0.7,"summary":"0 approved, 0 failed, mean 0.7"}}
+{"event":"trap","runId":"run-jfl-mock","trapId":"run-jfl-mock/trap-5","ordinal":5,"type":"decide","arg":{"question":"loop 2: mean score 0.7 threshold 0.8; 0 of 3 approved. Should the work item be revised or kept?","options":["revise","keep"]}}
+{"event":"lifecycle","lifecycle":"suspended","runId":"run-jfl-mock","kind":2}
+{"event":"lifecycle","lifecycle":"resumed","runId":"run-jfl-mock"}
+{"event":"trap-result","runId":"run-jfl-mock","trapId":"run-jfl-mock/trap-5","ordinal":5,"result":{"choice":"revise","confidence":0.6500000000000001}}
+{"event":"trap","runId":"run-jfl-mock","trapId":"run-jfl-mock/trap-6","ordinal":6,"type":"job","arg":{"spec":"fix","input":{"item":{"text":"The quick brown fox jumps over the lazy dog. (revised 1). It is tightened and clarified.","goal":"A vivid one-sentence story opening."},"rubric":{"criteria":["vivid","concrete","concise"],"threshold":0.8},"verdicts":[{"score":0.7,"label":"weak","notes":"vivid: missing; concrete: missing; concise: missing"},{"score":0.77,"label":"weak","notes":"vivid: missing; concrete: missing; concise: missing"},{"score":0.63,"label":"weak","notes":"vivid: missing; concrete: missing; concise: missing"}]}}}
+{"event":"lifecycle","lifecycle":"suspended","runId":"run-jfl-mock","kind":2}
+{"event":"lifecycle","lifecycle":"resumed","runId":"run-jfl-mock"}
+{"event":"trap-result","runId":"run-jfl-mock","trapId":"run-jfl-mock/trap-6","ordinal":6,"result":{"text":"The quick brown fox jumps over the lazy dog. (revised 1). It is tightened and clarified. (revised 2). It is tightened and clarified.","goal":"A vivid one-sentence story opening."}}
+{"event":"trap","runId":"run-jfl-mock","trapId":"run-jfl-mock/trap-7","ordinal":7,"type":"decide","arg":{"question":"loop 2: mean score 0.7 threshold 0.8, loops since rubric change 100. Converged?","options":["converged","continue"]}}
+{"event":"lifecycle","lifecycle":"suspended","runId":"run-jfl-mock","kind":2}
+{"event":"lifecycle","lifecycle":"resumed","runId":"run-jfl-mock"}
+{"event":"trap-result","runId":"run-jfl-mock","trapId":"run-jfl-mock/trap-7","ordinal":7,"result":{"choice":"continue","confidence":0.6500000000000001}}
+{"event":"fork","runId":"run-jfl-mock","forkId":"run-jfl-mock/fork-2","kind":"all","branches":3,"failFast":false,"childRuns":["run-jfl-mock/fork-2/branch-0","run-jfl-mock/fork-2/branch-1","run-jfl-mock/fork-2/branch-2"]}
+{"event":"lifecycle","lifecycle":"suspended","runId":"run-jfl-mock","kind":3}
+{"event":"lifecycle","lifecycle":"resumed","runId":"run-jfl-mock"}
+{"event":"join","runId":"run-jfl-mock","forkId":"run-jfl-mock/fork-2","outcome":[{"ok":true,"value":{"score":0.85,"label":"approved","notes":"vivid: missing; concrete: missing; concise: missing"}},{"ok":true,"value":{"score":0.92,"label":"approved","notes":"vivid: missing; concrete: missing; concise: missing"}},{"ok":true,"value":{"score":0.78,"label":"weak","notes":"vivid: missing; concrete: missing; concise: missing"}}]}
+{"event":"trap","runId":"run-jfl-mock","trapId":"run-jfl-mock/trap-8","ordinal":8,"type":"job","arg":{"spec":"aggregate","input":{"verdicts":[{"score":0.85,"label":"approved","notes":"vivid: missing; concrete: missing; concise: missing"},{"score":0.92,"label":"approved","notes":"vivid: missing; concrete: missing; concise: missing"},{"score":0.78,"label":"weak","notes":"vivid: missing; concrete: missing; concise: missing"}],"failed":0,"threshold":0.8}}}
+{"event":"lifecycle","lifecycle":"suspended","runId":"run-jfl-mock","kind":2}
+{"event":"lifecycle","lifecycle":"resumed","runId":"run-jfl-mock"}
+{"event":"trap-result","runId":"run-jfl-mock","trapId":"run-jfl-mock/trap-8","ordinal":8,"result":{"approved":2,"failed":0,"meanScore":0.85,"summary":"2 approved, 0 failed, mean 0.85"}}
+{"event":"trap","runId":"run-jfl-mock","trapId":"run-jfl-mock/trap-9","ordinal":9,"type":"decide","arg":{"question":"loop 3: mean score 0.85 threshold 0.8; 2 of 3 approved. Should the work item be revised or kept?","options":["revise","keep"]}}
+{"event":"lifecycle","lifecycle":"suspended","runId":"run-jfl-mock","kind":2}
+{"event":"lifecycle","lifecycle":"resumed","runId":"run-jfl-mock"}
+{"event":"trap-result","runId":"run-jfl-mock","trapId":"run-jfl-mock/trap-9","ordinal":9,"result":{"choice":"keep","confidence":0.6}}
+{"event":"trap","runId":"run-jfl-mock","trapId":"run-jfl-mock/trap-10","ordinal":10,"type":"decide","arg":{"question":"loop 3: misses: 3 missed criteria across judges; update the rubric if misses >= 2. Should the rubric be updated or kept?","options":["update","keep"]}}
+{"event":"lifecycle","lifecycle":"suspended","runId":"run-jfl-mock","kind":2}
+{"event":"lifecycle","lifecycle":"resumed","runId":"run-jfl-mock"}
+{"event":"trap-result","runId":"run-jfl-mock","trapId":"run-jfl-mock/trap-10","ordinal":10,"result":{"choice":"update","confidence":0.8}}
+{"event":"trap","runId":"run-jfl-mock","trapId":"run-jfl-mock/trap-11","ordinal":11,"type":"job","arg":{"spec":"rubric-update","input":{"rubric":{"criteria":["vivid","concrete","concise"],"threshold":0.8},"verdicts":[{"score":0.85,"label":"approved","notes":"vivid: missing; concrete: missing; concise: missing"},{"score":0.92,"label":"approved","notes":"vivid: missing; concrete: missing; concise: missing"},{"score":0.78,"label":"weak","notes":"vivid: missing; concrete: missing; concise: missing"}]}}}
+{"event":"lifecycle","lifecycle":"suspended","runId":"run-jfl-mock","kind":2}
+{"event":"lifecycle","lifecycle":"resumed","runId":"run-jfl-mock"}
+{"event":"trap-result","runId":"run-jfl-mock","trapId":"run-jfl-mock/trap-11","ordinal":11,"result":{"criteria":["vivid","concrete","concise","concrete example"],"threshold":0.8}}
+{"event":"trap","runId":"run-jfl-mock","trapId":"run-jfl-mock/trap-12","ordinal":12,"type":"decide","arg":{"question":"loop 3: mean score 0.85 threshold 0.8, loops since rubric change 0. Converged?","options":["converged","continue"]}}
+{"event":"lifecycle","lifecycle":"suspended","runId":"run-jfl-mock","kind":2}
+{"event":"lifecycle","lifecycle":"resumed","runId":"run-jfl-mock"}
+{"event":"trap-result","runId":"run-jfl-mock","trapId":"run-jfl-mock/trap-12","ordinal":12,"result":{"choice":"converged","confidence":0.6}}
+{"event":"fork","runId":"run-jfl-mock","forkId":"run-jfl-mock/fork-3","kind":"all","branches":3,"failFast":false,"childRuns":["run-jfl-mock/fork-3/branch-0","run-jfl-mock/fork-3/branch-1","run-jfl-mock/fork-3/branch-2"]}
+{"event":"lifecycle","lifecycle":"suspended","runId":"run-jfl-mock","kind":3}
+{"event":"lifecycle","lifecycle":"resumed","runId":"run-jfl-mock"}
+{"event":"join","runId":"run-jfl-mock","forkId":"run-jfl-mock/fork-3","outcome":[{"ok":true,"value":{"score":0.85,"label":"approved","notes":"vivid: missing; concrete: missing; concise: missing; concrete example: missing"}},{"ok":true,"value":{"score":0.92,"label":"approved","notes":"vivid: missing; concrete: missing; concise: missing; concrete example: missing"}},{"ok":true,"value":{"score":0.78,"label":"weak","notes":"vivid: missing; concrete: missing; concise: missing; concrete example: missing"}}]}
+{"event":"trap","runId":"run-jfl-mock","trapId":"run-jfl-mock/trap-13","ordinal":13,"type":"job","arg":{"spec":"aggregate","input":{"verdicts":[{"score":0.85,"label":"approved","notes":"vivid: missing; concrete: missing; concise: missing; concrete example: missing"},{"score":0.92,"label":"approved","notes":"vivid: missing; concrete: missing; concise: missing; concrete example: missing"},{"score":0.78,"label":"weak","notes":"vivid: missing; concrete: missing; concise: missing; concrete example: missing"}],"failed":0,"threshold":0.8}}}
+{"event":"lifecycle","lifecycle":"suspended","runId":"run-jfl-mock","kind":2}
+{"event":"lifecycle","lifecycle":"resumed","runId":"run-jfl-mock"}
+{"event":"trap-result","runId":"run-jfl-mock","trapId":"run-jfl-mock/trap-13","ordinal":13,"result":{"approved":2,"failed":0,"meanScore":0.85,"summary":"2 approved, 0 failed, mean 0.85"}}
+{"event":"trap","runId":"run-jfl-mock","trapId":"run-jfl-mock/trap-14","ordinal":14,"type":"decide","arg":{"question":"loop 4: mean score 0.85 threshold 0.8; 2 of 3 approved. Should the work item be revised or kept?","options":["revise","keep"]}}
+{"event":"lifecycle","lifecycle":"suspended","runId":"run-jfl-mock","kind":2}
+{"event":"lifecycle","lifecycle":"resumed","runId":"run-jfl-mock"}
+{"event":"trap-result","runId":"run-jfl-mock","trapId":"run-jfl-mock/trap-14","ordinal":14,"result":{"choice":"keep","confidence":0.6}}
+{"event":"trap","runId":"run-jfl-mock","trapId":"run-jfl-mock/trap-15","ordinal":15,"type":"decide","arg":{"question":"loop 4: mean score 0.85 threshold 0.8, loops since rubric change 1. Converged?","options":["converged","continue"]}}
+{"event":"lifecycle","lifecycle":"suspended","runId":"run-jfl-mock","kind":2}
+{"event":"lifecycle","lifecycle":"resumed","runId":"run-jfl-mock"}
+{"event":"trap-result","runId":"run-jfl-mock","trapId":"run-jfl-mock/trap-15","ordinal":15,"result":{"choice":"converged","confidence":0.6}}
+{"event":"fork","runId":"run-jfl-mock","forkId":"run-jfl-mock/fork-4","kind":"all","branches":3,"failFast":false,"childRuns":["run-jfl-mock/fork-4/branch-0","run-jfl-mock/fork-4/branch-1","run-jfl-mock/fork-4/branch-2"]}
+{"event":"lifecycle","lifecycle":"suspended","runId":"run-jfl-mock","kind":3}
+{"event":"lifecycle","lifecycle":"resumed","runId":"run-jfl-mock"}
+{"event":"join","runId":"run-jfl-mock","forkId":"run-jfl-mock/fork-4","outcome":[{"ok":true,"value":{"score":0.85,"label":"approved","notes":"vivid: missing; concrete: missing; concise: missing; concrete example: missing"}},{"ok":true,"value":{"score":0.92,"label":"approved","notes":"vivid: missing; concrete: missing; concise: missing; concrete example: missing"}},{"ok":true,"value":{"score":0.78,"label":"weak","notes":"vivid: missing; concrete: missing; concise: missing; concrete example: missing"}}]}
+{"event":"trap","runId":"run-jfl-mock","trapId":"run-jfl-mock/trap-16","ordinal":16,"type":"job","arg":{"spec":"aggregate","input":{"verdicts":[{"score":0.85,"label":"approved","notes":"vivid: missing; concrete: missing; concise: missing; concrete example: missing"},{"score":0.92,"label":"approved","notes":"vivid: missing; concrete: missing; concise: missing; concrete example: missing"},{"score":0.78,"label":"weak","notes":"vivid: missing; concrete: missing; concise: missing; concrete example: missing"}],"failed":0,"threshold":0.8}}}
+{"event":"lifecycle","lifecycle":"suspended","runId":"run-jfl-mock","kind":2}
+{"event":"lifecycle","lifecycle":"resumed","runId":"run-jfl-mock"}
+{"event":"trap-result","runId":"run-jfl-mock","trapId":"run-jfl-mock/trap-16","ordinal":16,"result":{"approved":2,"failed":0,"meanScore":0.85,"summary":"2 approved, 0 failed, mean 0.85"}}
+{"event":"trap","runId":"run-jfl-mock","trapId":"run-jfl-mock/trap-17","ordinal":17,"type":"decide","arg":{"question":"loop 5: mean score 0.85 threshold 0.8; 2 of 3 approved. Should the work item be revised or kept?","options":["revise","keep"]}}
+{"event":"lifecycle","lifecycle":"suspended","runId":"run-jfl-mock","kind":2}
+{"event":"lifecycle","lifecycle":"resumed","runId":"run-jfl-mock"}
+{"event":"trap-result","runId":"run-jfl-mock","trapId":"run-jfl-mock/trap-17","ordinal":17,"result":{"choice":"keep","confidence":0.6}}
+{"event":"trap","runId":"run-jfl-mock","trapId":"run-jfl-mock/trap-18","ordinal":18,"type":"decide","arg":{"question":"loop 5: mean score 0.85 threshold 0.8, loops since rubric change 2. Converged?","options":["converged","continue"]}}
+{"event":"lifecycle","lifecycle":"suspended","runId":"run-jfl-mock","kind":2}
+{"event":"lifecycle","lifecycle":"resumed","runId":"run-jfl-mock"}
+{"event":"trap-result","runId":"run-jfl-mock","trapId":"run-jfl-mock/trap-18","ordinal":18,"result":{"choice":"converged","confidence":0.6}}
+{"event":"lifecycle","lifecycle":"completed","runId":"run-jfl-mock"}
