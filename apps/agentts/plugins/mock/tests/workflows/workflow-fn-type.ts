@@ -1,0 +1,19 @@
+// Negative extraction fixture (BRA-46): a trap call whose output type
+// contains a function — not JSON-like data, not extractable. The host
+// must FAIL LOUDLY at first run ("type X cannot be validated —
+// simplify it"), not silently skip validation.
+
+declare function trap<Input, Output>(type: string, arg: unknown): unknown;
+declare function print(...args: unknown[]): void;
+
+interface ScoreInput {
+  op: string;
+  value?: number;
+}
+interface FnResult {
+  score: number;
+  compute: (x: number) => string;
+}
+
+const r = trap<ScoreInput, FnResult>("job", { op: "score", value: 7 });
+print("got:", JSON.stringify(r));
