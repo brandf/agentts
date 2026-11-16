@@ -1,0 +1,1425 @@
+/*
+ * AgentTS combinator host (Linear BRA-24, BRA-25, BRA-26): all
+ * (collect-all + fail-fast bool), any, race.
+ *
+ * Extends the restore+eval experiment host (experiments/restore-eval,
+ * BRA-23) with the part that experiment did not build: THE JOIN. The
+ * host waits for the branch children, collects their results, and
+ * resumes the parent snapshot with JS_ResumeWith, value = the joined
+ * outcome array. Also adds the minimal journal (fork + join events in
+ * the parent journal, parent fork id in each child journal) and wraps
+ * branch results into outcome objects ({ ok: true, value } /
+ * { ok: false, error }).
+ *
+ *   host run <workflow.ts> <snap>        evaluate; suspend at the first
+ *                                        step/all/any/race call, save
+ *                                        snapshot, exit 2 (step) or 3
+ *                                        (combinator)
+ *   host resume <snap> <result-json>     restore; complete the pending
+ *                                        step call with the result; run
+ *                                        on until the next step (exit 2),
+ *                                        the next combinator (exit 3),
+ *                                        or completion (exit 0)
+ *   host resume <snap> throw:<json>      same, but the step call throws
+ *   host branch <snap> <index>           restore a snapshot suspended
+ *                                        at a combinator; abandon the
+ *                                        parent's suspended call
+ *                                        (JS_AbandonSuspended, BRA-42);
+ *                                        find the stash, eval the driver
+ *                                        __stash[<index>](); on
+ *                                        suspension save and exit 2/3,
+ *                                        on completion write the branch
+ *                                        outcome and exit 0
+ *   host join <snap> <outcome.json>...   restore a snapshot suspended
+ *                                        at all(); resume it with the
+ *                                        joined outcome array (read from
+ *                                        the branch outcome files, in
+ *                                        order); then as resume
+ *   host join-value <snap> <record.json> restore a snapshot suspended
+ *                                        at any()/race(); journal the
+ *                                        join event (winner, cancelled,
+ *                                        completed), and resume it with
+ *                                        the winner's bare value (from
+ *                                        the record file); then as resume
+ *   host join-throw <snap> <record.json>  restore a snapshot suspended
+ *                                        at all()/race(); journal the
+ *                                        join event (failedBranch,
+ *                                        error, cancelled, completed —
+ *                                        from the record file),
+ *                                        rehydrate the error record
+ *                                        into an Error, and resume the
+ *                                        parent with JS_ResumeWith
+ *                                        throw_flag=1; then as resume
+ *   host join-aggregate <snap> <record.json>
+ *                                        restore a snapshot suspended
+ *                                        at any(); journal the join
+ *                                        event (aggregate, errors,
+ *                                        completed, cancelled — from
+ *                                        the record file), rehydrate
+ *                                        each branch error and resume
+ *                                        the parent with JS_ResumeWith
+ *                                        throw_flag=1 throwing a real
+ *                                        AggregateError of all branch
+ *                                        errors in branch order; then
+ *                                        as resume
+ *
+ * Exit codes: 0 = done, 1 = error, 2 = suspended at step, 3 = suspended
+ * at a combinator. Workflow output (print) goes to stdout; host
+ * diagnostics to stderr.
+ *
+ * Run context lives in heap globals, set from the environment by the
+ * run/branch modes and carried by the snapshot afterwards:
+ *   __run_id         run id, e.g. "run-judges" or
+ *                    "run-judges/fork-0/branch-1"
+ *   __journal_path   append-only journal file (one JSON object per line)
+ *   __fork_count     fork ordinal counter for this run (snapshotted)
+ *   __branch_index   branch index, branch runs only
+ *   __parent_fork    parent fork id, branch runs only
+ *   __outcome_path   branch outcome file, branch runs only
+ *
+ * Journal events (minimal, shape-proving — not M1's full journal):
+ *   {"type":"fork","runId","forkId","kind":"all","branches":N,
+ *    "failFast":true|false,"childRuns":[...]}
+ *                                     written by all() before suspending
+ *   {"type":"fork","runId","forkId","kind":"any"|"race","branches":N,
+ *    "childRuns":[...]}                written by any()/race() before
+ *                                     suspending (no failFast field)
+ *   {"type":"join","runId","forkId","outcome":[...]}
+ *                                     written by join before resuming
+ *   {"type":"join","runId","forkId","outcome":<bare value>,"winner":i,
+ *    "cancelled":[...],"completed":[...]}
+ *                                     written by join-value before
+ *                                     resuming (any/race winner)
+ *   {"type":"join","runId","forkId","failedBranch":i,"error":{},
+ *    "cancelled":[...],"completed":[...]}
+ *                                     written by join-throw before
+ *                                     resuming with the throw
+ *   {"type":"join","runId","forkId","aggregate":true,"errors":[...],
+ *    "completed":[...],"cancelled":[...]}
+ *                                     written by join-aggregate before
+ *                                     resuming with the thrown
+ *                                     AggregateError (any, every branch
+ *                                     failed)
+ *   {"type":"cancel","runId","parentForkId","branch":i,
+ *    "trigger":"sibling failed with fail-fast on",
+ *    "failedBranch":j,"error":{}}     written by the driver (the
+ *                                     scheduler) into a cancelled
+ *                                     sibling's journal
+ *   {"type":"cancel","runId","parentForkId","branch":i,
+ *    "trigger":"loser in any"|"loser in race","winner":j}
+ *                                     written by the driver into a
+ *                                     loser's journal (any/race)
+ *   {"type":"branch-start","runId","parentForkId","branch":i}
+ *   {"type":"branch-done","runId","parentForkId","branch":i,"outcome":{}}
+ *   {"type":"step","runId","ordinal":N,"input":{}}
+ *   {"type":"step-result","runId","ordinal":N,"result":{}}
+ *   {"type":"step-error","runId","ordinal":N,"error":{}}
+ *
+ * Ownership notes (QuickJS traps): JS_SetProperty* consumes its value
+ * argument; JS_SetPropertyValue frees both prop and val, so the stashed
+ * thunks array is dup'd first; JS_ResumeWith frees its result argument.
+ */
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <stdarg.h>
+#include <inttypes.h>
+
+#include "quickjs.h"
+
+/* ---- tiny string buffer ---- */
+struct strbuf { char *s; size_t len, cap; };
+static void sb_init(struct strbuf *b)
+{
+    b->cap = 256; b->len = 0; b->s = malloc(b->cap); b->s[0] = '\0';
+}
+static void sb_printf(struct strbuf *b, const char *fmt, ...)
+{
+    va_list ap;
+    int n;
+    for (;;) {
+        va_start(ap, fmt);
+        n = vsnprintf(b->s + b->len, b->cap - b->len, fmt, ap);
+        va_end(ap);
+        if (n < 0)
+            return;
+        if ((size_t)n < b->cap - b->len) { b->len += (size_t)n; return; }
+        b->cap = (b->len + (size_t)n + 1) * 2;
+        b->s = realloc(b->s, b->cap);
+    }
+}
+static void sb_free(struct strbuf *b) { free(b->s); b->s = NULL; b->len = b->cap = 0; }
+
+/* 2 = suspended at step, 3 = suspended at a combinator. Set by the
+ * builtin that suspends; save() returns it. */
+static int g_suspend_kind = 2;
+
+static JSValue js_print(JSContext *ctx, JSValueConst this_val,
+                        int argc, JSValueConst *argv)
+{
+    int i;
+    for (i = 0; i < argc; i++) {
+        const char *str = JS_ToCString(ctx, argv[i]);
+        if (!str)
+            return JS_EXCEPTION;
+        printf("%s%s", i ? " " : "", str);
+        JS_FreeCString(ctx, str);
+    }
+    printf("\n");
+    return JS_UNDEFINED;
+}
+
+/* ---- heap globals: run context ---- */
+static char *get_global_cstring(JSContext *ctx, const char *name)
+{
+    JSValue global = JS_GetGlobalObject(ctx);
+    JSValue v = JS_GetPropertyStr(ctx, global, name);
+    char *s = NULL;
+    if (!JS_IsException(v) && !JS_IsUndefined(v)) {
+        const char *c = JS_ToCString(ctx, v);
+        if (c)
+            s = strdup(c);
+        if (c)
+            JS_FreeCString(ctx, c);
+    }
+    JS_FreeValue(ctx, v);
+    JS_FreeValue(ctx, global);
+    return s;
+}
+
+static int64_t get_global_int(JSContext *ctx, const char *name, int64_t def)
+{
+    JSValue global = JS_GetGlobalObject(ctx);
+    JSValue v = JS_GetPropertyStr(ctx, global, name);
+    int64_t n = def;
+    if (!JS_IsException(v) && !JS_IsUndefined(v))
+        JS_ToInt64(ctx, &n, v);
+    JS_FreeValue(ctx, v);
+    JS_FreeValue(ctx, global);
+    return n;
+}
+
+static void set_global_str(JSContext *ctx, const char *name, const char *s)
+{
+    JSValue global = JS_GetGlobalObject(ctx);
+    JS_SetPropertyStr(ctx, global, name, JS_NewString(ctx, s));
+    JS_FreeValue(ctx, global);
+}
+
+static void set_global_int(JSContext *ctx, const char *name, int64_t n)
+{
+    JSValue global = JS_GetGlobalObject(ctx);
+    JS_SetPropertyStr(ctx, global, name, JS_NewInt64(ctx, n));
+    JS_FreeValue(ctx, global);
+}
+
+static char *current_run_id(JSContext *ctx)
+{
+    char *s = get_global_cstring(ctx, "__run_id");
+    return s ? s : strdup("run-parent");
+}
+
+/* JSON-stringify a value; returns a malloc'd string or NULL. */
+static char *json_stringify(JSContext *ctx, JSValueConst v)
+{
+    JSValue js = JS_JSONStringify(ctx, v, JS_UNDEFINED, JS_UNDEFINED);
+    const char *c = NULL;
+    char *s = NULL;
+    if (!JS_IsException(js)) {
+        c = JS_ToCString(ctx, js);
+        if (c)
+            s = strdup(c);
+        if (c)
+            JS_FreeCString(ctx, c);
+    }
+    JS_FreeValue(ctx, js);
+    return s;
+}
+
+/* Append one JSON line to the journal named by the __journal_path global. */
+static void journal_line(JSContext *ctx, const char *json)
+{
+    char *path = get_global_cstring(ctx, "__journal_path");
+    FILE *f;
+    if (!path)
+        return;
+    f = fopen(path, "a");
+    if (f) {
+        fprintf(f, "%s\n", json);
+        fclose(f);
+    }
+    free(path);
+}
+
+/* step(input): the engine's sync builtin, as in the dquickts prototype.
+ * Journals the dispatch, then suspends. */
+static JSValue js_step(JSContext *ctx, JSValueConst this_val,
+                       int argc, JSValueConst *argv)
+{
+    JSValue input = argc > 0 ? argv[0] : JS_UNDEFINED;
+    char *input_json, *run;
+    int64_t ordinal;
+    struct strbuf b;
+    JSValue json = JS_JSONStringify(ctx, input, JS_UNDEFINED, JS_UNDEFINED);
+    const char *str = JS_ToCString(ctx, json);
+    fprintf(stderr, "[host] step(%s) — suspending\n", str ? str : "?");
+    JS_FreeCString(ctx, str);
+    JS_FreeValue(ctx, json);
+
+    ordinal = get_global_int(ctx, "__step_count", 0);
+    set_global_int(ctx, "__step_count", ordinal + 1);
+    input_json = JS_IsUndefined(input) ? strdup("null")
+                                       : json_stringify(ctx, input);
+    run = current_run_id(ctx);
+    sb_init(&b);
+    sb_printf(&b, "{\"type\":\"step\",\"runId\":\"%s\",\"ordinal\":%" PRId64
+              ",\"input\":%s}", run, ordinal,
+              input_json ? input_json : "null");
+    journal_line(ctx, b.s);
+    sb_free(&b);
+    free(input_json);
+    free(run);
+    g_suspend_kind = 2;
+    return JS_SuspendCall(ctx);
+}
+
+/* Throw new AggregateError([], "All branches failed") — the
+ * Promise.any([]) shape. Returns JS_EXCEPTION; the thrown value is
+ * owned by the exception. */
+static JSValue throw_aggregate_empty(JSContext *ctx)
+{
+    JSValue global = JS_GetGlobalObject(ctx);
+    JSValue ctor = JS_GetPropertyStr(ctx, global, "AggregateError");
+    JSValue errors = JS_NewArray(ctx);
+    JSValue msg = JS_NewString(ctx, "All branches failed");
+    JSValue args[2];
+    JSValue e;
+    args[0] = errors;
+    args[1] = msg;
+    e = JS_Call(ctx, ctor, JS_UNDEFINED, 2, args);
+    JS_FreeValue(ctx, ctor);
+    JS_FreeValue(ctx, errors);
+    JS_FreeValue(ctx, msg);
+    JS_FreeValue(ctx, global);
+    if (JS_IsException(e))
+        return JS_EXCEPTION;
+    return JS_Throw(ctx, e);
+}
+
+/* The combinator builtins: all / any / race (Q13). All three stash the
+ * thunks array under a fresh Symbol key on the global object (the
+ * hidden spot from Q13), journal the fork event, then suspend. The
+ * driver joins per the combinator's rule.
+ *   all(thunks[, failFast]): an empty array returns [] immediately —
+ *     no fork, no suspension (Promise.all([])). failFast is an
+ *     optional boolean second argument: omitted or false is
+ *     collect-all; true is fail-fast (the driver joins with bare
+ *     values on success, join-throw on the first branch error).
+ *   any(thunks): an empty array throws an AggregateError with no
+ *     errors immediately — no fork, no suspension (Promise.any([])).
+ *     The driver joins with the first success's bare value
+ *     (join-value), or with an AggregateError of all branch errors
+ *     if every branch fails (join-aggregate).
+ *   race(thunks): an empty array suspends on a 0-branch fork and
+ *     never settles (Promise.race([])) — the driver has nothing to
+ *     spawn and nothing to join, so the run stays suspended. The
+ *     driver joins with the first settler's result (join-value on
+ *     success, join-throw on failure). */
+static JSValue js_combinator_impl(JSContext *ctx, JSValueConst *argv,
+                                  int argc, const char *kind)
+{
+    JSValue global, sym, len_v;
+    int64_t n = -1, i, fork_n;
+    int fail_fast = 0;
+    int is_any = !strcmp(kind, "any");
+    int is_race = !strcmp(kind, "race");
+    char *run, *fork_id;
+    struct strbuf b;
+    if (argc < 1)
+        return JS_ThrowTypeError(ctx, "%s() needs an array of thunks",
+                                 kind);
+    len_v = JS_GetPropertyStr(ctx, argv[0], "length");
+    if (!JS_IsException(len_v))
+        JS_ToInt64(ctx, &n, len_v);
+    JS_FreeValue(ctx, len_v);
+    if (n == 0) {
+        if (is_any)
+            return throw_aggregate_empty(ctx);
+        if (!is_race)
+            return JS_NewArray(ctx); /* all([]) -> [] */
+        /* race([]): fall through to a 0-branch fork; it never settles. */
+    }
+    if (argc >= 2 && !is_any && !is_race)
+        fail_fast = JS_ToBool(ctx, argv[1]) == 1;
+    fprintf(stderr, "[host] %s(%" PRId64 " branches%s) — stashing "
+            "thunks, suspending\n", kind, n,
+            (!is_any && !is_race && fail_fast) ? ", fail-fast" : "");
+
+    /* Fork event: fork id is (run id, ordinal), child run ids derive.
+     * failFast is an all-only field. */
+    run = current_run_id(ctx);
+    fork_n = get_global_int(ctx, "__fork_count", 0);
+    set_global_int(ctx, "__fork_count", fork_n + 1);
+    sb_init(&b);
+    sb_printf(&b, "%s/fork-%" PRId64, run, fork_n);
+    fork_id = strdup(b.s);
+    sb_free(&b);
+    sb_init(&b);
+    sb_printf(&b, "{\"type\":\"fork\",\"runId\":\"%s\",\"forkId\":\"%s\","
+              "\"kind\":\"%s\",\"branches\":%" PRId64,
+              run, fork_id, kind, n);
+    if (!is_any && !is_race)
+        sb_printf(&b, ",\"failFast\":%s", fail_fast ? "true" : "false");
+    sb_printf(&b, ",\"childRuns\":[");
+    for (i = 0; i < n; i++)
+        sb_printf(&b, "%s\"%s/branch-%" PRId64 "\"", i ? "," : "",
+                  fork_id, i);
+    sb_printf(&b, "]}");
+    journal_line(ctx, b.s);
+    sb_free(&b);
+    free(run);
+    free(fork_id);
+
+    global = JS_GetGlobalObject(ctx);
+    sym = JS_NewSymbol(ctx, "agentts:stash", 0);
+    /* JS_SetPropertyValue frees prop and val: dup the thunks array. */
+    /* NB: JS_SetProperty* returns TRUE on success, -1 on failure. */
+    if (JS_SetPropertyValue(ctx, global, sym,
+                            JS_DupValue(ctx, argv[0]), JS_PROP_THROW) < 0) {
+        JS_FreeValue(ctx, global);
+        return JS_EXCEPTION;
+    }
+    JS_FreeValue(ctx, global);
+    g_suspend_kind = 3;
+    return JS_SuspendCall(ctx);
+}
+
+static JSValue js_all(JSContext *ctx, JSValueConst this_val,
+                      int argc, JSValueConst *argv)
+{
+    return js_combinator_impl(ctx, argv, argc, "all");
+}
+
+static JSValue js_any(JSContext *ctx, JSValueConst this_val,
+                      int argc, JSValueConst *argv)
+{
+    return js_combinator_impl(ctx, argv, argc, "any");
+}
+
+static JSValue js_race(JSContext *ctx, JSValueConst this_val,
+                       int argc, JSValueConst *argv)
+{
+    return js_combinator_impl(ctx, argv, argc, "race");
+}
+
+static const void * const host_natives[] = {
+    (const void *)js_print,
+    (const void *)js_step,
+    (const void *)js_all,
+    (const void *)js_any,
+    (const void *)js_race,
+};
+
+static const JSSnapshotHost host = {
+    .natives = host_natives,
+    .native_count = 5,
+};
+
+static void print_exception(JSContext *ctx)
+{
+    JSValue exc = JS_GetException(ctx);
+    JSValue name, msg, js;
+    const char *str;
+    fprintf(stderr, "exception: isError=%d\n", JS_IsError(ctx, exc) ? 1 : 0);
+    name = JS_GetPropertyStr(ctx, exc, "name");
+    msg = JS_GetPropertyStr(ctx, exc, "message");
+    if (!JS_IsException(name) && !JS_IsException(msg)) {
+        const char *n = JS_ToCString(ctx, name);
+        const char *m = JS_ToCString(ctx, msg);
+        fprintf(stderr, "exception: %s: %s\n", n ? n : "?",
+                m ? m : "?");
+        if (n) JS_FreeCString(ctx, n);
+        if (m) JS_FreeCString(ctx, m);
+    }
+    js = JS_JSONStringify(ctx, exc, JS_UNDEFINED, JS_UNDEFINED);
+    if (!JS_IsException(js)) {
+        str = JS_ToCString(ctx, js);
+        fprintf(stderr, "exception: json=%s\n", str ? str : "?");
+        if (str) JS_FreeCString(ctx, str);
+    }
+    JS_FreeValue(ctx, name);
+    JS_FreeValue(ctx, msg);
+    JS_FreeValue(ctx, js);
+    str = JS_ToCString(ctx, exc);
+    fprintf(stderr, "exception: tostring=%s\n", str ? str : "?");
+    if (str) JS_FreeCString(ctx, str);
+    JS_FreeValue(ctx, exc);
+}
+
+static uint8_t *load_file(const char *filename, size_t *plen)
+{
+    FILE *f = fopen(filename, "rb");
+    uint8_t *buf;
+    long len;
+    if (!f) {
+        perror(filename);
+        exit(1);
+    }
+    fseek(f, 0, SEEK_END);
+    len = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    buf = malloc(len + 1);
+    if (fread(buf, 1, len, f) != (size_t)len) {
+        perror(filename);
+        exit(1);
+    }
+    buf[len] = '\0';
+    fclose(f);
+    *plen = len;
+    return buf;
+}
+
+static int save_snapshot(JSContext *ctx, const char *filename)
+{
+    size_t size;
+    uint8_t *buf = JS_WriteSnapshot(ctx, &size, &host, NULL, 0, 0);
+    FILE *f;
+    if (!buf) {
+        print_exception(ctx);
+        return 1;
+    }
+    f = fopen(filename, "wb");
+    if (!f || fwrite(buf, 1, size, f) != size || fclose(f)) {
+        perror(filename);
+        js_free(ctx, buf);
+        return 1;
+    }
+    fprintf(stderr, "[host] snapshot saved: %s (%zu bytes)\n", filename, size);
+    js_free(ctx, buf);
+    return 0;
+}
+
+/* Save the state and free the runtime. Exit code 2 = suspended at a step,
+ * 3 = suspended at a combinator. */
+static int save(JSRuntime *rt, JSContext *ctx, const char *snap)
+{
+    if (save_snapshot(ctx, snap))
+        return 1;
+    JS_FreeContext(ctx);
+    JS_FreeRuntime(rt);
+    return g_suspend_kind;
+}
+
+/* Drain pending jobs. Returns 0 done, 1 error, 2/3 suspended (saved).
+ * Sync-only workflows create no jobs, so a drain that ends without a
+ * suspension means the workflow is done. */
+static int finish_slice(JSRuntime *rt, JSContext *ctx, const char *snap)
+{
+    JSContext *ctx1;
+    int ret;
+    while ((ret = JS_ExecutePendingJob(rt, &ctx1)) > 0) {
+        if (JS_IsSuspended(rt))
+            return save(rt, ctx, snap);
+    }
+    if (ret < 0) {
+        if (JS_IsSuspended(rt))
+            return save(rt, ctx, snap);
+        print_exception(ctx1);
+        return 1;
+    }
+    if (JS_IsSuspended(rt))
+        return save(rt, ctx, snap);
+    return 0;
+}
+
+static JSValue parse_result(JSContext *ctx, const char *json)
+{
+    JSValue v = JS_ParseJSON(ctx, json, strlen(json), "<result>");
+    if (JS_IsException(v))
+        print_exception(ctx);
+    return v;
+}
+
+/* ---- branch outcomes ---- */
+
+/* Serialize a thrown value as an error record: { name, message } for
+ * Error objects, the raw value otherwise (Q13: a thrown non-Error
+ * crosses as-is). */
+static JSValue serialize_error(JSContext *ctx, JSValueConst exc)
+{
+    if (JS_IsError(ctx, exc)) {
+        JSValue obj = JS_NewObject(ctx);
+        JSValue name = JS_GetPropertyStr(ctx, exc, "name");
+        JSValue msg = JS_GetPropertyStr(ctx, exc, "message");
+        /* JS_SetPropertyStr consumes its value argument. */
+        JS_SetPropertyStr(ctx, obj, "name",
+                          JS_IsException(name) ? JS_NewString(ctx, "Error")
+                                               : name);
+        JS_SetPropertyStr(ctx, obj, "message",
+                          JS_IsException(msg) ? JS_NewString(ctx, "")
+                                              : msg);
+        return obj;
+    }
+    return JS_DupValue(ctx, exc);
+}
+
+/* Rehydrate an error record { name, message } into a real Error object
+ * (Q13: branch errors cross the process boundary as records and are
+ * rehydrated as Errors in the parent, where a combinator throws them).
+ * A thrown non-Error crosses as-is, so any other JSON value is
+ * returned unchanged. */
+static JSValue rehydrate_error(JSContext *ctx, JSValueConst err)
+{
+    JSValue name, msg;
+    if (!JS_IsObject(err))
+        return JS_DupValue(ctx, err);
+    name = JS_GetPropertyStr(ctx, err, "name");
+    msg = JS_GetPropertyStr(ctx, err, "message");
+    if (!JS_IsException(name) && !JS_IsException(msg) &&
+        JS_IsString(name) && JS_IsString(msg)) {
+        JSValue e = JS_NewError(ctx);
+        /* JS_NewError gives message undefined; set message and name
+         * (shadowing the prototype's "name"). */
+        JS_SetPropertyStr(ctx, e, "message", JS_DupValue(ctx, msg));
+        JS_SetPropertyStr(ctx, e, "name", JS_DupValue(ctx, name));
+        JS_FreeValue(ctx, name);
+        JS_FreeValue(ctx, msg);
+        return e;
+    }
+    JS_FreeValue(ctx, name);
+    JS_FreeValue(ctx, msg);
+    return JS_DupValue(ctx, err);
+}
+
+/* { ok: true, value } or { ok: false, error }. */
+static JSValue make_outcome(JSContext *ctx, int ok, JSValueConst val)
+{
+    JSValue obj = JS_NewObject(ctx);
+    JS_SetPropertyStr(ctx, obj, "ok", JS_NewBool(ctx, ok));
+    JS_SetPropertyStr(ctx, obj, ok ? "value" : "error",
+                      JS_DupValue(ctx, val));
+    return obj;
+}
+
+/* Journal the branch-done event for this run. */
+static void record_branch_done(JSContext *ctx, JSValueConst outcome)
+{
+    char *run = current_run_id(ctx);
+    char *parent = get_global_cstring(ctx, "__parent_fork");
+    char *ojson = json_stringify(ctx, outcome);
+    int64_t i = get_global_int(ctx, "__branch_index", -1);
+    struct strbuf b;
+    sb_init(&b);
+    sb_printf(&b, "{\"type\":\"branch-done\",\"runId\":\"%s\","
+              "\"parentForkId\":\"%s\",\"branch\":%" PRId64
+              ",\"outcome\":%s}", run, parent ? parent : "",
+              i, ojson ? ojson : "null");
+    journal_line(ctx, b.s);
+    sb_free(&b);
+    free(run);
+    free(parent);
+    free(ojson);
+}
+
+/* Write the branch outcome to the __outcome_path file and print
+ * "branch <i> outcome: <json>" on stdout. */
+static void write_outcome(JSContext *ctx, JSValueConst outcome)
+{
+    char *path = get_global_cstring(ctx, "__outcome_path");
+    char *json = json_stringify(ctx, outcome);
+    int64_t i = get_global_int(ctx, "__branch_index", -1);
+    FILE *f;
+    if (json) {
+        printf("branch %" PRId64 " outcome: %s\n", i, json);
+        fflush(stdout);
+    }
+    if (path && json) {
+        f = fopen(path, "w");
+        if (f) {
+            fputs(json, f);
+            fclose(f);
+        }
+    }
+    free(path);
+    free(json);
+}
+
+/* Complete a branch run with an outcome: journal branch-done, write the
+ * outcome file, print it. */
+static void finish_branch(JSContext *ctx, JSValueConst outcome)
+{
+    record_branch_done(ctx, outcome);
+    write_outcome(ctx, outcome);
+}
+
+/* Is this run a branch run? (__branch_index is set.) */
+static int is_branch_run(JSContext *ctx)
+{
+    JSValue global = JS_GetGlobalObject(ctx);
+    JSValue idx = JS_GetPropertyStr(ctx, global, "__branch_index");
+    int is = !JS_IsException(idx) && !JS_IsUndefined(idx);
+    JS_FreeValue(ctx, idx);
+    JS_FreeValue(ctx, global);
+    return is;
+}
+
+/* Complete a branch run with a failed outcome from a thrown value. */
+static void finish_branch_error(JSContext *ctx, JSValueConst exc)
+{
+    JSValue err = serialize_error(ctx, exc);
+    JSValue outcome = make_outcome(ctx, 0, err);
+    finish_branch(ctx, outcome);
+    JS_FreeValue(ctx, err);
+    JS_FreeValue(ctx, outcome);
+}
+
+/* Find the stashed thunks array: the first array-valued property under
+ * a symbol key on the global object. Returns 1 and fills *atom_out and
+ * *val_out (owned) if found, else 0. */
+static int find_stash(JSContext *ctx, JSAtom *atom_out, JSValue *val_out)
+{
+    JSValue global = JS_GetGlobalObject(ctx);
+    JSPropertyEnum *tab = NULL;
+    uint32_t len = 0, i;
+    if (JS_GetOwnPropertyNames(ctx, &tab, &len, global,
+                               JS_GPN_SYMBOL_MASK)) {
+        JS_FreeValue(ctx, global);
+        return 0;
+    }
+    fprintf(stderr, "[host] global has %u symbol-keyed propert%s\n", len,
+            len == 1 ? "y" : "ies");
+    for (i = 0; i < len; i++) {
+        JSValue v = JS_GetProperty(ctx, global, tab[i].atom);
+        JSValue keystr = JS_AtomToString(ctx, tab[i].atom);
+        const char *ks = JS_ToCString(ctx, keystr);
+        fprintf(stderr, "[host] symbol key: %s -> %s\n", ks ? ks : "?",
+                JS_IsException(v) ? "<exception>" :
+                JS_IsArray(ctx, v) ? "array (stash?)" : "other");
+        if (ks)
+            JS_FreeCString(ctx, ks);
+        JS_FreeValue(ctx, keystr);
+        if (!JS_IsException(v) && JS_IsArray(ctx, v)) {
+            /* Dup the atom: JS_FreePropertyEnum frees every atom in
+             * the tab, including this one. */
+            *atom_out = JS_DupAtom(ctx, tab[i].atom);
+            *val_out = v;
+            JS_FreePropertyEnum(ctx, tab, len);
+            JS_FreeValue(ctx, global);
+            return 1;
+        }
+        JS_FreeValue(ctx, v);
+    }
+    JS_FreePropertyEnum(ctx, tab, len);
+    JS_FreeValue(ctx, global);
+    return 0;
+}
+
+/* Delete the stash symbol property from the global object (Q13: the
+ * stash is removed on every resume path). The stash value is freed. */
+static void delete_stash(JSContext *ctx)
+{
+    JSAtom atom;
+    JSValue val;
+    JSValue global;
+    if (!find_stash(ctx, &atom, &val))
+        return;
+    global = JS_GetGlobalObject(ctx);
+    JS_DeleteProperty(ctx, global, atom, 0);
+    JS_FreeAtom(ctx, atom);
+    JS_FreeValue(ctx, val);
+    JS_FreeValue(ctx, global);
+    fprintf(stderr, "[host] stash removed from the global object\n");
+}
+
+static void register_builtins(JSContext *ctx)
+{
+    JSValue global = JS_GetGlobalObject(ctx);
+    JS_SetPropertyStr(ctx, global, "print",
+                      JS_NewCFunction(ctx, js_print, "print", 1));
+    JS_SetPropertyStr(ctx, global, "step",
+                      JS_NewCFunction(ctx, js_step, "step", 1));
+    JS_SetPropertyStr(ctx, global, "all",
+                      JS_NewCFunction(ctx, js_all, "all", 1));
+    JS_SetPropertyStr(ctx, global, "any",
+                      JS_NewCFunction(ctx, js_any, "any", 1));
+    JS_SetPropertyStr(ctx, global, "race",
+                      JS_NewCFunction(ctx, js_race, "race", 1));
+    JS_FreeValue(ctx, global);
+}
+
+/* Set the heap globals for a fresh run from the environment. */
+static void set_run_context(JSContext *ctx)
+{
+    const char *run_id = getenv("AGENTTS_RUN_ID");
+    const char *journal = getenv("AGENTTS_JOURNAL");
+    set_global_str(ctx, "__run_id", run_id ? run_id : "run-parent");
+    set_global_str(ctx, "__journal_path",
+                   journal ? journal : "run.journal");
+    set_global_int(ctx, "__fork_count", 0);
+    set_global_int(ctx, "__step_count", 0);
+}
+
+/* Set the heap globals for a branch run from the environment (after a
+ * snapshot restore). */
+static void set_branch_context(JSContext *ctx)
+{
+    const char *run_id = getenv("AGENTTS_RUN_ID");
+    const char *journal = getenv("AGENTTS_JOURNAL");
+    const char *parent_fork = getenv("AGENTTS_PARENT_FORK");
+    const char *outcome = getenv("AGENTTS_OUTCOME");
+    set_global_str(ctx, "__run_id", run_id ? run_id : "run-branch");
+    set_global_str(ctx, "__journal_path",
+                   journal ? journal : "branch.journal");
+    set_global_str(ctx, "__parent_fork",
+                   parent_fork ? parent_fork : "");
+    set_global_str(ctx, "__outcome_path", outcome ? outcome : "");
+    /* A branch is a fresh run for fork/step ordinals: its own forks
+     * count from 0 under its own run id. */
+    set_global_int(ctx, "__fork_count", 0);
+    set_global_int(ctx, "__step_count", 0);
+}
+
+int main(int argc, char **argv)
+{
+    JSRuntime *rt;
+    JSContext *ctx;
+    JSValue val, global;
+    uint8_t *buf;
+    size_t len;
+
+    if (argc == 4 && !strcmp(argv[1], "run")) {
+        buf = load_file(argv[2], &len);
+        rt = JS_NewRuntime();
+        ctx = JS_NewContext(rt);
+        register_builtins(ctx);
+        set_run_context(ctx);
+
+        val = JS_Eval(ctx, (char *)buf, len, argv[2],
+                      JS_EVAL_TYPE_GLOBAL | JS_EVAL_FLAG_TYPESCRIPT);
+        free(buf);
+        if (JS_IsException(val)) {
+            if (JS_IsSuspended(rt))
+                return save(rt, ctx, argv[3]);
+            print_exception(ctx);
+            return 1;
+        }
+        JS_FreeValue(ctx, val);
+        return finish_slice(rt, ctx, argv[3]);
+    }
+
+    if (argc == 4 && !strcmp(argv[1], "resume")) {
+        JSSnapshotResult res;
+        char err[256];
+        int throw_flag = 0, rc, branch;
+        const char *result_json = argv[3];
+        buf = load_file(argv[2], &len);
+        rt = JS_NewRuntime();
+        if (JS_ReadSnapshot(rt, buf, len, NULL, 0, &host, &res,
+                            err, sizeof(err))) {
+            fprintf(stderr, "%s: %s\n", argv[2], err);
+            JS_FreeRuntime(rt);
+            return 1;
+        }
+        free(buf);
+        ctx = res.contexts[0];
+        JS_FreeSnapshotResult(rt, &res);
+        branch = is_branch_run(ctx);
+
+        if (!strncmp(result_json, "throw:", 6)) {
+            throw_flag = 1;
+            result_json += 6;
+        }
+        val = parse_result(ctx, result_json);
+        if (JS_IsException(val))
+            return 1;
+        if (JS_IsSuspended(rt)) {
+            /* Journal the step completing with this result (or error)
+             * before JS_ResumeWith frees it. The step being resumed is
+             * ordinal __step_count - 1. */
+            JSValue result = val;
+            char *rjson = json_stringify(ctx, result);
+            char *run = current_run_id(ctx);
+            int64_t ordinal = get_global_int(ctx, "__step_count", 0) - 1;
+            struct strbuf b;
+            sb_init(&b);
+            sb_printf(&b, "{\"type\":\"%s\",\"runId\":\"%s\",\"ordinal\":%"
+                      PRId64 ",\"%s\":%s}",
+                      throw_flag ? "step-error" : "step-result", run,
+                      ordinal, throw_flag ? "error" : "result",
+                      rjson ? rjson : "null");
+            journal_line(ctx, b.s);
+            sb_free(&b);
+            free(rjson);
+            free(run);
+            /* The pending step() call completes with the result — or
+             * throws it, if throw_flag is set. */
+            val = JS_ResumeWith(ctx, result, throw_flag);
+            if (JS_IsException(val)) {
+                if (JS_IsSuspended(rt))
+                    return save(rt, ctx, argv[2]);
+                /* The resumed execution threw (uncaught). In a branch
+                 * run that is a failed outcome, not a host error. */
+                if (branch) {
+                    JSValue exc = JS_GetException(ctx);
+                    finish_branch_error(ctx, exc);
+                    JS_FreeValue(ctx, exc);
+                    return 0;
+                }
+                print_exception(ctx);
+                return 1;
+            }
+            rc = finish_slice(rt, ctx, argv[2]);
+            if (rc == 0 && branch) {
+                JSValue outcome = make_outcome(ctx, 1, val);
+                finish_branch(ctx, outcome);
+                JS_FreeValue(ctx, outcome);
+            }
+            if (rc != 2 && rc != 3)
+                JS_FreeValue(ctx, val);
+            return rc;
+        }
+        fprintf(stderr, "[host] restored runtime is not suspended; "
+                "nothing to resume\n");
+        JS_FreeValue(ctx, val);
+        return 1;
+    }
+
+    if (argc == 4 && !strcmp(argv[1], "branch")) {
+        JSSnapshotResult res;
+        char err[256];
+        char driver[64];
+        int index = atoi(argv[3]);
+        JSAtom atom;
+        JSValue stash;
+        buf = load_file(argv[2], &len);
+        rt = JS_NewRuntime();
+        if (JS_ReadSnapshot(rt, buf, len, NULL, 0, &host, &res,
+                            err, sizeof(err))) {
+            fprintf(stderr, "%s: %s\n", argv[2], err);
+            JS_FreeRuntime(rt);
+            return 1;
+        }
+        free(buf);
+        ctx = res.contexts[0];
+        JS_FreeSnapshotResult(rt, &res);
+        set_branch_context(ctx);
+        fprintf(stderr, "[host] restored runtime suspended=%d before "
+                "driver eval\n", JS_IsSuspended(rt) ? 1 : 0);
+
+        /* ABANDON: the restored runtime still holds the parent's
+         * suspended all() call, and the engine allows only one
+         * suspended execution at a time (js_can_suspend_from:
+         * rt->suspended != NULL -> the thunk's step() throws "this
+         * call cannot be suspended"). The child never resumes the
+         * parent's call — its job is the branch — so abandon it with
+         * JS_AbandonSuspended (fork abandon API, BRA-42): the
+         * suspended frames are discarded without running any parent
+         * code. The parent's own snapshot file is untouched; the host
+         * resumes it at join time. */
+        if (JS_IsSuspended(rt)) {
+            if (JS_AbandonSuspended(ctx)) {
+                fprintf(stderr, "[host] parent call abandoned; "
+                        "suspended=0\n");
+            } else {
+                fprintf(stderr, "[host] abandon reported nothing "
+                        "pending despite suspended=1\n");
+                return 1;
+            }
+        }
+
+        if (!find_stash(ctx, &atom, &stash)) {
+            fprintf(stderr, "[host] no stash array found on the global "
+                    "object\n");
+            return 1;
+        }
+        global = JS_GetGlobalObject(ctx);
+        /* JS_SetPropertyStr consumes its value: the stash array moves
+         * under the __stash name. Delete the symbol-keyed entry so a
+         * nested fork's stash cannot be confused with this one. */
+        JS_SetPropertyStr(ctx, global, "__stash", stash);
+        JS_DeleteProperty(ctx, global, atom, 0);
+        JS_FreeAtom(ctx, atom);
+        JS_SetPropertyStr(ctx, global, "__branch_index",
+                          JS_NewInt32(ctx, index));
+        JS_FreeValue(ctx, global);
+
+        {
+            char *run = current_run_id(ctx);
+            char *parent = get_global_cstring(ctx, "__parent_fork");
+            struct strbuf b;
+            sb_init(&b);
+            sb_printf(&b, "{\"type\":\"branch-start\",\"runId\":\"%s\","
+                      "\"parentForkId\":\"%s\",\"branch\":%d}",
+                      run, parent ? parent : "", index);
+            journal_line(ctx, b.s);
+            sb_free(&b);
+            free(run);
+            free(parent);
+        }
+
+        snprintf(driver, sizeof(driver), "__stash[%d]()", index);
+        fprintf(stderr, "[host] evaluating driver: %s\n", driver);
+        val = JS_Eval(ctx, driver, strlen(driver), "<driver>",
+                      JS_EVAL_TYPE_GLOBAL);
+        if (JS_IsException(val)) {
+            /* JS_IsSuspendException distinguishes the driver suspending
+             * at a step() (the suspension marker) from the eval itself
+             * failing. */
+            if (JS_IsSuspendException(ctx))
+                return save(rt, ctx, argv[2]);
+            {
+                JSValue exc = JS_GetException(ctx);
+                finish_branch_error(ctx, exc);
+                JS_FreeValue(ctx, exc);
+            }
+            return 0;
+        }
+        {
+            int rc = finish_slice(rt, ctx, argv[2]);
+            if (rc == 2 || rc == 3)
+                return rc; /* saved; the runtime is freed by save() */
+            if (rc == 0) {
+                JSValue outcome = make_outcome(ctx, 1, val);
+                finish_branch(ctx, outcome);
+                JS_FreeValue(ctx, outcome);
+            }
+            JS_FreeValue(ctx, val);
+            return rc;
+        }
+    }
+
+    if (argc >= 4 && !strcmp(argv[1], "join")) {
+        JSSnapshotResult res;
+        char err[256];
+        int i, rc, branch;
+        struct strbuf b;
+        char *outcomes_json, *run;
+        int64_t fork_n;
+        JSValue outcomes;
+        buf = load_file(argv[2], &len);
+        rt = JS_NewRuntime();
+        if (JS_ReadSnapshot(rt, buf, len, NULL, 0, &host, &res,
+                            err, sizeof(err))) {
+            fprintf(stderr, "%s: %s\n", argv[2], err);
+            JS_FreeRuntime(rt);
+            return 1;
+        }
+        free(buf);
+        ctx = res.contexts[0];
+        JS_FreeSnapshotResult(rt, &res);
+        branch = is_branch_run(ctx);
+
+        if (!JS_IsSuspended(rt)) {
+            fprintf(stderr, "[host] restored runtime is not suspended; "
+                    "nothing to join\n");
+            return 1;
+        }
+        /* Q13: the stash is removed on every resume path. */
+        delete_stash(ctx);
+
+        /* The joined outcomes, in branch order, as one JSON array. */
+        sb_init(&b);
+        sb_printf(&b, "[");
+        for (i = 3; i < argc; i++) {
+            size_t flen;
+            uint8_t *fbuf = load_file(argv[i], &flen);
+            sb_printf(&b, "%s%.*s", i > 3 ? "," : "", (int)flen,
+                      (char *)fbuf);
+            free(fbuf);
+        }
+        sb_printf(&b, "]");
+        outcomes_json = strdup(b.s);
+        sb_free(&b);
+        outcomes = JS_ParseJSON(ctx, outcomes_json, strlen(outcomes_json),
+                                "<outcomes>");
+        if (JS_IsException(outcomes)) {
+            print_exception(ctx);
+            free(outcomes_json);
+            return 1;
+        }
+
+        /* The pending fork is ordinal __fork_count - 1 of this run. */
+        run = current_run_id(ctx);
+        fork_n = get_global_int(ctx, "__fork_count", 0) - 1;
+        sb_init(&b);
+        sb_printf(&b, "{\"type\":\"join\",\"runId\":\"%s\",\"forkId\":"
+                  "\"%s/fork-%" PRId64 "\",\"outcome\":%s}",
+                  run, run, fork_n, outcomes_json);
+        journal_line(ctx, b.s);
+        sb_free(&b);
+        free(run);
+        free(outcomes_json);
+
+        val = JS_ResumeWith(ctx, outcomes, 0);
+        if (JS_IsException(val)) {
+            if (JS_IsSuspended(rt))
+                return save(rt, ctx, argv[2]);
+            if (branch) {
+                JSValue exc = JS_GetException(ctx);
+                finish_branch_error(ctx, exc);
+                JS_FreeValue(ctx, exc);
+                return 0;
+            }
+            print_exception(ctx);
+            return 1;
+        }
+        rc = finish_slice(rt, ctx, argv[2]);
+        if (rc == 0 && branch) {
+            JSValue outcome = make_outcome(ctx, 1, val);
+            finish_branch(ctx, outcome);
+            JS_FreeValue(ctx, outcome);
+        }
+        if (rc != 2 && rc != 3)
+            JS_FreeValue(ctx, val);
+        return rc;
+    }
+
+    if (argc == 4 && !strcmp(argv[1], "join-value")) {
+        JSSnapshotResult res;
+        char err[256];
+        int rc, branch;
+        struct strbuf b;
+        size_t rlen;
+        uint8_t *rbuf;
+        JSValue record, value, winner, cancelled, completed;
+        char *value_json, *cancelled_json, *completed_json;
+        char *run;
+        int64_t fork_n, winner_n = -1;
+        buf = load_file(argv[2], &len);
+        rt = JS_NewRuntime();
+        if (JS_ReadSnapshot(rt, buf, len, NULL, 0, &host, &res,
+                            err, sizeof(err))) {
+            fprintf(stderr, "%s: %s\n", argv[2], err);
+            JS_FreeRuntime(rt);
+            return 1;
+        }
+        free(buf);
+        ctx = res.contexts[0];
+        JS_FreeSnapshotResult(rt, &res);
+        branch = is_branch_run(ctx);
+
+        if (!JS_IsSuspended(rt)) {
+            fprintf(stderr, "[host] restored runtime is not suspended; "
+                    "nothing to join\n");
+            return 1;
+        }
+        /* Q13: the stash is removed on every resume path. */
+        delete_stash(ctx);
+
+        /* The join record: {"value":..., "winner":i, "cancelled":[...],
+         * "completed":[...]}. */
+        rbuf = load_file(argv[3], &rlen);
+        record = JS_ParseJSON(ctx, (char *)rbuf, rlen, "<join-record>");
+        free(rbuf);
+        if (JS_IsException(record)) {
+            print_exception(ctx);
+            return 1;
+        }
+        value = JS_GetPropertyStr(ctx, record, "value");
+        winner = JS_GetPropertyStr(ctx, record, "winner");
+        cancelled = JS_GetPropertyStr(ctx, record, "cancelled");
+        completed = JS_GetPropertyStr(ctx, record, "completed");
+        if (!JS_IsException(winner))
+            JS_ToInt64(ctx, &winner_n, winner);
+        value_json = json_stringify(ctx, value);
+        cancelled_json = json_stringify(ctx, cancelled);
+        completed_json = json_stringify(ctx, completed);
+
+        /* The pending fork is ordinal __fork_count - 1 of this run. */
+        run = current_run_id(ctx);
+        fork_n = get_global_int(ctx, "__fork_count", 0) - 1;
+        sb_init(&b);
+        sb_printf(&b, "{\"type\":\"join\",\"runId\":\"%s\",\"forkId\":"
+                  "\"%s/fork-%" PRId64 "\",\"outcome\":%s,\"winner\":%"
+                  PRId64 ",\"cancelled\":%s,\"completed\":%s}",
+                  run, run, fork_n,
+                  value_json ? value_json : "null", winner_n,
+                  cancelled_json ? cancelled_json : "null",
+                  completed_json ? completed_json : "null");
+        journal_line(ctx, b.s);
+        sb_free(&b);
+        free(run);
+        free(value_json);
+        free(cancelled_json);
+        free(completed_json);
+        JS_FreeValue(ctx, winner);
+        JS_FreeValue(ctx, cancelled);
+        JS_FreeValue(ctx, completed);
+        JS_FreeValue(ctx, record);
+
+        /* The winner's bare value, delivered to the any()/race() call
+         * site. JS_ResumeWith frees value. */
+        val = JS_ResumeWith(ctx, value, 0);
+        if (JS_IsException(val)) {
+            if (JS_IsSuspended(rt))
+                return save(rt, ctx, argv[2]);
+            if (branch) {
+                JSValue exc = JS_GetException(ctx);
+                finish_branch_error(ctx, exc);
+                JS_FreeValue(ctx, exc);
+                return 0;
+            }
+            print_exception(ctx);
+            return 1;
+        }
+        rc = finish_slice(rt, ctx, argv[2]);
+        if (rc == 0 && branch) {
+            JSValue outcome = make_outcome(ctx, 1, val);
+            finish_branch(ctx, outcome);
+            JS_FreeValue(ctx, outcome);
+        }
+        if (rc != 2 && rc != 3)
+            JS_FreeValue(ctx, val);
+        return rc;
+    }
+
+    if (argc == 4 && !strcmp(argv[1], "join-aggregate")) {
+        JSSnapshotResult res;
+        char err[256];
+        int rc, branch, i;
+        struct strbuf b;
+        size_t rlen;
+        uint8_t *rbuf;
+        JSValue record, errors, completed, cancelled;
+        JSValue agg_errors, ctor, msg, agg;
+        char *errors_json, *completed_json, *cancelled_json;
+        char *run;
+        int64_t fork_n, nerr = 0;
+        buf = load_file(argv[2], &len);
+        rt = JS_NewRuntime();
+        if (JS_ReadSnapshot(rt, buf, len, NULL, 0, &host, &res,
+                            err, sizeof(err))) {
+            fprintf(stderr, "%s: %s\n", argv[2], err);
+            JS_FreeRuntime(rt);
+            return 1;
+        }
+        free(buf);
+        ctx = res.contexts[0];
+        JS_FreeSnapshotResult(rt, &res);
+        branch = is_branch_run(ctx);
+
+        if (!JS_IsSuspended(rt)) {
+            fprintf(stderr, "[host] restored runtime is not suspended; "
+                    "nothing to join\n");
+            return 1;
+        }
+        /* Q13: the stash is removed on every resume path. */
+        delete_stash(ctx);
+
+        /* The join record: {"errors":[{name,message},...],
+         * "completed":[{ok:false,error}...], "cancelled":[...]}. */
+        rbuf = load_file(argv[3], &rlen);
+        record = JS_ParseJSON(ctx, (char *)rbuf, rlen, "<join-record>");
+        free(rbuf);
+        if (JS_IsException(record)) {
+            print_exception(ctx);
+            return 1;
+        }
+        errors = JS_GetPropertyStr(ctx, record, "errors");
+        completed = JS_GetPropertyStr(ctx, record, "completed");
+        cancelled = JS_GetPropertyStr(ctx, record, "cancelled");
+        errors_json = json_stringify(ctx, errors);
+        completed_json = json_stringify(ctx, completed);
+        cancelled_json = json_stringify(ctx, cancelled);
+
+        /* The pending fork is ordinal __fork_count - 1 of this run. */
+        run = current_run_id(ctx);
+        fork_n = get_global_int(ctx, "__fork_count", 0) - 1;
+        sb_init(&b);
+        sb_printf(&b, "{\"type\":\"join\",\"runId\":\"%s\",\"forkId\":"
+                  "\"%s/fork-%" PRId64 "\",\"aggregate\":true,"
+                  "\"errors\":%s,\"completed\":%s,\"cancelled\":%s}",
+                  run, run, fork_n,
+                  errors_json ? errors_json : "null",
+                  completed_json ? completed_json : "null",
+                  cancelled_json ? cancelled_json : "null");
+        journal_line(ctx, b.s);
+        sb_free(&b);
+        free(run);
+        free(errors_json);
+        free(completed_json);
+        free(cancelled_json);
+
+        /* Rehydrate each branch error and build the AggregateError
+         * the parent catches: new AggregateError(rehydrated, msg).
+         * JS_SetPropertyUint32 consumes each rehydrated error; the
+         * AggregateError constructor copies the array, so the
+         * temporaries are freed after the call. */
+        {
+            JSValue len_v = JS_GetPropertyStr(ctx, errors, "length");
+            if (!JS_IsException(len_v))
+                JS_ToInt64(ctx, &nerr, len_v);
+            JS_FreeValue(ctx, len_v);
+        }
+        agg_errors = JS_NewArray(ctx);
+        for (i = 0; i < nerr; i++) {
+            JSValue rec = JS_GetPropertyUint32(ctx, errors, (uint32_t)i);
+            JSValue e = rehydrate_error(ctx, rec);
+            JS_FreeValue(ctx, rec);
+            JS_SetPropertyUint32(ctx, agg_errors, (uint32_t)i, e);
+        }
+        {
+            JSValue global = JS_GetGlobalObject(ctx);
+            ctor = JS_GetPropertyStr(ctx, global, "AggregateError");
+            JS_FreeValue(ctx, global);
+        }
+        msg = JS_NewString(ctx, "All branches failed");
+        {
+            JSValue args[2];
+            args[0] = agg_errors;
+            args[1] = msg;
+            agg = JS_Call(ctx, ctor, JS_UNDEFINED, 2, args);
+        }
+        JS_FreeValue(ctx, ctor);
+        JS_FreeValue(ctx, agg_errors);
+        JS_FreeValue(ctx, msg);
+        JS_FreeValue(ctx, errors);
+        JS_FreeValue(ctx, completed);
+        JS_FreeValue(ctx, cancelled);
+        JS_FreeValue(ctx, record);
+        if (JS_IsException(agg)) {
+            print_exception(ctx);
+            return 1;
+        }
+        /* The AggregateError, thrown at the any() call site. The
+         * parent catches it with ordinary try/catch. JS_ResumeWith
+         * frees agg. */
+        val = JS_ResumeWith(ctx, agg, 1);
+        if (JS_IsException(val)) {
+            if (JS_IsSuspended(rt))
+                return save(rt, ctx, argv[2]);
+            if (branch) {
+                JSValue exc = JS_GetException(ctx);
+                finish_branch_error(ctx, exc);
+                JS_FreeValue(ctx, exc);
+                return 0;
+            }
+            print_exception(ctx);
+            return 1;
+        }
+        rc = finish_slice(rt, ctx, argv[2]);
+        if (rc == 0 && branch) {
+            JSValue outcome = make_outcome(ctx, 1, val);
+            finish_branch(ctx, outcome);
+            JS_FreeValue(ctx, outcome);
+        }
+        if (rc != 2 && rc != 3)
+            JS_FreeValue(ctx, val);
+        return rc;
+    }
+
+    if (argc == 4 && !strcmp(argv[1], "join-throw")) {
+        JSSnapshotResult res;
+        char err[256];
+        int rc, branch;
+        struct strbuf b;
+        size_t rlen;
+        uint8_t *rbuf;
+        JSValue record, failed, error, cancelled, completed;
+        JSValue err_val;
+        char *failed_json, *error_json, *cancelled_json, *completed_json;
+        char *run;
+        int64_t fork_n, failed_branch = -1;
+        buf = load_file(argv[2], &len);
+        rt = JS_NewRuntime();
+        if (JS_ReadSnapshot(rt, buf, len, NULL, 0, &host, &res,
+                            err, sizeof(err))) {
+            fprintf(stderr, "%s: %s\n", argv[2], err);
+            JS_FreeRuntime(rt);
+            return 1;
+        }
+        free(buf);
+        ctx = res.contexts[0];
+        JS_FreeSnapshotResult(rt, &res);
+        branch = is_branch_run(ctx);
+
+        if (!JS_IsSuspended(rt)) {
+            fprintf(stderr, "[host] restored runtime is not suspended; "
+                    "nothing to join\n");
+            return 1;
+        }
+        /* Q13: the stash is removed on every resume path. */
+        delete_stash(ctx);
+
+        /* The join record: {"failedBranch":i,"error":{},
+         * "cancelled":[...],"completed":[...]}. */
+        rbuf = load_file(argv[3], &rlen);
+        record = JS_ParseJSON(ctx, (char *)rbuf, rlen, "<join-record>");
+        free(rbuf);
+        if (JS_IsException(record)) {
+            print_exception(ctx);
+            return 1;
+        }
+        failed = JS_GetPropertyStr(ctx, record, "failedBranch");
+        error = JS_GetPropertyStr(ctx, record, "error");
+        cancelled = JS_GetPropertyStr(ctx, record, "cancelled");
+        completed = JS_GetPropertyStr(ctx, record, "completed");
+        if (!JS_IsException(failed))
+            JS_ToInt64(ctx, &failed_branch, failed);
+        failed_json = json_stringify(ctx, failed);
+        error_json = json_stringify(ctx, error);
+        cancelled_json = json_stringify(ctx, cancelled);
+        completed_json = json_stringify(ctx, completed);
+
+        /* The pending fork is ordinal __fork_count - 1 of this run. */
+        run = current_run_id(ctx);
+        fork_n = get_global_int(ctx, "__fork_count", 0) - 1;
+        sb_init(&b);
+        sb_printf(&b, "{\"type\":\"join\",\"runId\":\"%s\",\"forkId\":"
+                  "\"%s/fork-%" PRId64 "\",\"failedBranch\":%" PRId64
+                  ",\"error\":%s,\"cancelled\":%s,\"completed\":%s}",
+                  run, run, fork_n, failed_branch,
+                  error_json ? error_json : "null",
+                  cancelled_json ? cancelled_json : "null",
+                  completed_json ? completed_json : "null");
+        journal_line(ctx, b.s);
+        sb_free(&b);
+        free(run);
+        free(failed_json);
+        free(error_json);
+        free(cancelled_json);
+        free(completed_json);
+
+        /* The first branch error, rehydrated, thrown at the all() call
+         * site. The parent catches it with ordinary try/catch; its
+         * finally blocks run; the run itself is NOT cancelled. */
+        err_val = rehydrate_error(ctx, error);
+        JS_FreeValue(ctx, failed);
+        JS_FreeValue(ctx, error);
+        JS_FreeValue(ctx, cancelled);
+        JS_FreeValue(ctx, completed);
+        JS_FreeValue(ctx, record);
+        val = JS_ResumeWith(ctx, err_val, 1);
+        if (JS_IsException(val)) {
+            if (JS_IsSuspended(rt))
+                return save(rt, ctx, argv[2]);
+            if (branch) {
+                JSValue exc = JS_GetException(ctx);
+                finish_branch_error(ctx, exc);
+                JS_FreeValue(ctx, exc);
+                return 0;
+            }
+            print_exception(ctx);
+            return 1;
+        }
+        rc = finish_slice(rt, ctx, argv[2]);
+        if (rc == 0 && branch) {
+            JSValue outcome = make_outcome(ctx, 1, val);
+            finish_branch(ctx, outcome);
+            JS_FreeValue(ctx, outcome);
+        }
+        if (rc != 2 && rc != 3)
+            JS_FreeValue(ctx, val);
+        return rc;
+    }
+
+    fprintf(stderr, "usage: host run <workflow.ts> <snap>\n"
+            "       host resume <snap> <result-json>\n"
+            "       host resume <snap> throw:<json>\n"
+            "       host branch <snap> <index>\n"
+            "       host join <snap> <outcome.json>...\n"
+            "       host join-value <snap> <record.json>\n"
+            "       host join-throw <snap> <record.json>\n"
+            "       host join-aggregate <snap> <record.json>\n");
+    return 1;
+}
