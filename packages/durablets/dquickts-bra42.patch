@@ -1,0 +1,52 @@
+diff --git a/quickjs.c b/quickjs.c
+index 891aab4..972168c 100644
+--- a/quickjs.c
++++ b/quickjs.c
+@@ -26238,6 +26238,27 @@ JSValue JS_Resume(JSContext *ctx)
+     return JS_ResumeWith(ctx, JS_UNDEFINED, FALSE);
+ }
+ 
++/* Terminate the suspended execution, if any, without running any of
++   its code (see JS_AbandonSuspended() in quickjs.h). The suspended
++   frames are released by js_abort_suspended_frames(), the same path a
++   failed resume takes; the pending suspension marker exception is
++   cleared the way JS_ResumeWith() clears it. */
++JS_BOOL JS_AbandonSuspended(JSContext *ctx)
++{
++    JSRuntime *rt = ctx->rt;
++    JSAsyncFunctionState *s = rt->suspended;
++
++    if (!s)
++        return FALSE;
++    rt->suspended = NULL;
++    if (js_is_suspend_marker(rt->current_exception)) {
++        rt->current_exception = JS_UNINITIALIZED;
++        rt->current_exception_is_uncatchable = FALSE;
++    }
++    js_abort_suspended_frames(rt, s);
++    return TRUE;
++}
++
+ static JSValue js_call(JSContext *ctx, JSValueConst func_obj,
+                        JSValueConst this_obj, int argc, JSValueConst *argv)
+ {
+diff --git a/quickjs.h b/quickjs.h
+index 869078a..56fbd9b 100644
+--- a/quickjs.h
++++ b/quickjs.h
+@@ -1487,6 +1487,15 @@ JSValue JS_SuspendCall(JSContext *ctx);
+    returns 'result', or throws it if 'throw_flag' is TRUE. 'result' is
+    freed (it is ignored if no call was suspended by JS_SuspendCall()). */
+ JSValue JS_ResumeWith(JSContext *ctx, JSValue result, JS_BOOL throw_flag);
++/* Terminate the suspended execution, if any, without running any of
++   its code: the suspended frames are discarded as if the execution
++   could not be resumed (see JS_RequestSuspend()): their 'catch' and
++   'finally' clauses are not executed and their 'using' resources are
++   not disposed, but the closures they created keep working. The
++   runtime accepts a new suspension afterwards. A pending
++   JS_RequestSuspend() request, if any, is left alone. Returns TRUE if
++   a suspended execution was abandoned, FALSE if none was pending. */
++JS_BOOL JS_AbandonSuspended(JSContext *ctx);
+ 
+ /* if can_block is TRUE, Atomics.wait() can be used */
+ void JS_SetCanBlock(JSRuntime *rt, JS_BOOL can_block);
