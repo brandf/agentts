@@ -16,10 +16,9 @@ arbitrary real-world waits — minutes, hours, days — and resumed
 exactly, because every pause is a durable snapshot plus a journal
 entry, not memory.**
 
-Status: **pre-release — public release in progress.** The MIT
-LICENSE is in place and the MVP release checklist (Linear BRA-91)
-is being worked; the repo stays private until the checklist lands
-and the visibility flip is made (Linear BRA-33). There is no
+Status: **public MVP.** The MIT LICENSE is in place and the MVP
+release checklist (Linear BRA-91) is done — the repo is public as
+of Nov 17, 2026 (visibility flip per BRA-33). There is no
 versioned release yet. The host is v0 (`agentts-host
 0.1.0`); the core is the BRA-43 build. Everything here describes the
 system as it is today, verified against the code — see

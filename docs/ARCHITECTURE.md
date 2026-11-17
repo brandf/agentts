@@ -900,7 +900,8 @@ Exit codes: 0 done, 2 held at a gate, 1 error / refusal.
   should exist, and whether they would accumulate memory, is
   undecided (BRA-50).
 - **No versioned release, no published package, no hosted
-  service.** The repo is private per BRA-33.
+  service.** The repo is public (visibility flip Nov 17, 2026,
+  per BRA-33); there is still no versioned release.
 - **No C-host daemon.** One process spawn per run-slice.
 - **No async adapters in v0.** `answer()` is synchronous; pool
   adapters block inside it.
