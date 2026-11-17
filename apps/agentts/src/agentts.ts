@@ -35,6 +35,17 @@
 //   - The trap arg is exactly the spec object the author passed, verbatim
 //     — no added fields, no wrapping — so the journal's trap event arg
 //     is the spec and the extractor's call-site mapping stays trivial.
+//     The ONE exception is the call-site transport field (BRA-73):
+//     each wrapper attaches `__agenttsSite` ({file, line, column} of
+//     the call site in the bundle, captured from Error.stack) to the
+//     arg it passes to trap() — the only channel from inside the
+//     engine to the host, since the C core emits the trap event from
+//     the arg alone and the core is not touched. The host strips that
+//     key before dispatch (no adapter, repair handler, or schema
+//     lookup ever sees it) and journals it as the trap event's
+//     top-level `site`, so the journaled arg stays exactly the spec
+//     the author passed. Authors must not use `__agenttsSite` as a
+//     spec key — the host strips it from any arg that carries it.
 //   - Only JSON-like data types are extractable (objects, arrays,
 //     strings, numbers, booleans, unions, enums, optionals). A type
 //     outside that subset (Date, Map, functions, recursive types the
@@ -45,7 +56,8 @@
 //
 // The combinators (all / any / race) are core builtins, re-exported
 // here for convenience. trap itself stays the low-level core global.
-// decisionCascade and the Decision shape are NOT here — BRA-47.
+// decisionCascade and the Decision shape live here — BRA-47 (see the
+// "decision cascade" section at the end of this file).
 //
 // Trap-boundary JSON rule (Brandon, 19:39 PST). Everything crossing a
 // trap boundary must be clean JSON data. Every wrapper below runs the
@@ -65,6 +77,94 @@
 // methods dropped).
 
 declare function trap(type: string, arg: unknown): unknown;
+
+// ------------------------------------------- call-site capture (BRA-73)
+/**
+ * Reserved trap-arg key carrying a wrapper-captured call site (see
+ * the extractor-contract note above). Exported so the host can strip
+ * it — it is transport, not part of any spec.
+ */
+export const TRAP_SITE_KEY = "__agenttsSite";
+
+/** A call site: bundle coordinates (see below). */
+export interface TrapSite {
+  file: string;
+  line: number;
+  column: number;
+}
+
+/**
+ * The six wrapper names, plus this helper and the boundary check:
+ * frames for these are the trap machinery, not the call site.
+ * A workflow function that happens to share one of these names and
+ * calls a wrapper is skipped one frame too far — the site reported
+ * is then its caller, still a real call site in the workflow.
+ * decisionCascade is here too: its internal wrapper calls report
+ * the workflow's decisionCascade() call site, not the module
+ * interior — the four tiers share that one call site, and the
+ * journal tells them apart by trapId/type.
+ */
+const TRAP_FRAME_NAMES = new Set([
+  "job",
+  "exec",
+  "gate",
+  "sleep",
+  "cron",
+  "decide",
+  "decisionCascade",
+  "captureTrapSite",
+  "toJsonValue",
+]);
+
+/**
+ * Capture the caller's call site from Error.stack, skipping wrapper
+ * frames. The coordinates refer to the BUNDLE (the workflow is
+ * bundled before the C host evals it — verified live on the engine:
+ * `at f (/tmp/.../bundle-<run>.js:134:19)`), so they are only
+ * interpretable against the bundle + source map the host pins with
+ * the run (BRA-73: `bundlePath`/`bundleMapPath` on the
+ * lifecycle-started event). Never throws: an unparseable stack (a
+ * future engine format, a missing stack) yields null and the
+ * wrapper sends the arg without a site — the trap still dispatches.
+ */
+export function captureTrapSite(): TrapSite | null {
+  try {
+    const stack = new Error().stack;
+    if (typeof stack !== "string") return null;
+    for (const raw of stack.split("\n")) {
+      const line = raw.trim();
+      if (!line.startsWith("at ")) continue;
+      // QuickJS (the engine) and V8/Bun agree on the two shapes:
+      //   at name (file:line:column)   /   at file:line:column
+      const m = line.match(/^at (?:(.+?) \((.+):(\d+):(\d+)\)|(.+):(\d+):(\d+))$/);
+      if (!m) continue;
+      const name = m[1] ?? "";
+      const file = m[2] ?? m[5] ?? "";
+      const lineNo = Number(m[3] ?? m[6]);
+      const colNo = Number(m[4] ?? m[7]);
+      if (!file || !Number.isFinite(lineNo) || !Number.isFinite(colNo)) continue;
+      if (TRAP_FRAME_NAMES.has(name)) continue;
+      return { file, line: lineNo, column: colNo };
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Attach a captured site to a JSON-clean arg copy for the trap call.
+ * The site rides inside the arg (the C core serializes the arg into
+ * the trap event — the only channel out of the engine); the host
+ * strips it before dispatch and journals it as the event's `site`.
+ */
+function withTrapSite(cleanArg: unknown, site: TrapSite | null): unknown {
+  if (!site) return cleanArg;
+  if (cleanArg !== null && typeof cleanArg === "object" && !Array.isArray(cleanArg)) {
+    return { ...(cleanArg as Record<string, unknown>), [TRAP_SITE_KEY]: site };
+  }
+  return cleanArg;
+}
 
 /**
  * The core combinator builtins, re-exported. These are the globals
@@ -355,7 +455,7 @@ export interface JobSpec<Input> {
 }
 
 export function job<Input, Output>(spec: JobSpec<Input>): Output {
-  return trap("job", toJsonValue(spec, "job arg")) as Output;
+  return trap("job", withTrapSite(toJsonValue(spec, "job arg"), captureTrapSite())) as Output;
 }
 
 // -------------------------------------------------------------------- exec
@@ -373,7 +473,7 @@ export interface ExecResult {
 }
 
 export function exec(spec: ExecSpec): ExecResult {
-  return trap("exec", toJsonValue(spec, "exec arg")) as ExecResult;
+  return trap("exec", withTrapSite(toJsonValue(spec, "exec arg"), captureTrapSite())) as ExecResult;
 }
 
 // -------------------------------------------------------------------- gate
@@ -388,7 +488,7 @@ export interface GateResult {
 }
 
 export function gate(spec: GateSpec): GateResult {
-  return trap("gate", toJsonValue(spec, "gate arg")) as GateResult;
+  return trap("gate", withTrapSite(toJsonValue(spec, "gate arg"), captureTrapSite())) as GateResult;
 }
 
 // ------------------------------------------------------------------- sleep
@@ -402,7 +502,7 @@ export interface SleepResult {
 }
 
 export function sleep(spec: SleepSpec): SleepResult {
-  return trap("sleep", toJsonValue(spec, "sleep arg")) as SleepResult;
+  return trap("sleep", withTrapSite(toJsonValue(spec, "sleep arg"), captureTrapSite())) as SleepResult;
 }
 
 // -------------------------------------------------------------------- cron
@@ -419,19 +519,19 @@ export interface CronResult {
 }
 
 export function cron(spec: CronSpec): CronResult {
-  return trap("cron", toJsonValue(spec, "cron arg")) as CronResult;
+  return trap("cron", withTrapSite(toJsonValue(spec, "cron arg"), captureTrapSite())) as CronResult;
 }
 
 // ------------------------------------------------------------------ decide
 /**
  * A decision model instead of a full agent.
  *
- * The result type is generic because the Decision shape belongs to
- * BRA-47, not this module: call sites supply a concrete, named type,
- * e.g. `decide<DecideResult>({ question: "pick one", options: ["a", "b"] })`.
- * There is deliberately no default result type here — a default would
- * bake in a Decision shape BRA-47 owns. Until BRA-47 lands, workflows
- * name their own result type at the call site.
+ * The result type is generic: not every decide call is a cascade
+ * tier — call sites supply a concrete, named type, e.g.
+ * `decide<DecideResult>({ question: "pick one", options: ["a", "b"] })`.
+ * There is deliberately no default result type here. The cascade's
+ * decide tier uses DecideTierResult (the canonical Decision shape,
+ * BRA-47, below); other decide calls name their own result type.
  */
 export interface DecideSpec {
   question: string;
@@ -439,5 +539,388 @@ export interface DecideSpec {
 }
 
 export function decide<Output>(spec: DecideSpec): Output {
-  return trap("decide", toJsonValue(spec, "decide arg")) as Output;
+  return trap("decide", withTrapSite(toJsonValue(spec, "decide arg"), captureTrapSite())) as Output;
+}
+
+// ------------------------------------------------------- decision cascade (BRA-47)
+/**
+ * The canonical Decision shape + decisionCascade() (BRA-47).
+ *
+ * A Decision is the shared result shape for exec, decide, job, and
+ * gate WHEN THEY ARE USED AS DECISIONS. Not all gates/jobs/execs
+ * are decisions — the shape is a convention for decision-use, not a
+ * constraint on the trap type. A gate used as a decision tier returns
+ * confidence 1.0: a human answer is authoritative and terminal.
+ *
+ * decisionCascade(spec) runs one decision spec — question, options,
+ * optional context, optional exec command — through the tiers cheap
+ * to expensive (exec -> decide -> job -> gate), with the SAME inputs
+ * at every tier, stopping at the first tier at or above its
+ * threshold. It escalates on low confidence, abstention, or error,
+ * and ultimately to a human. It is ordinary workflow-side code
+ * built on the trap wrappers — NOT a core builtin or trap — so it
+ * is testable with the mock plugin, and the plugin journals every
+ * attempt, so the escalation path is visible audit evidence.
+ *
+ * Thresholds live in the spec, possibly per-tier
+ * (spec.thresholds.exec/decide/job, falling back to spec.threshold).
+ * Confidence is NOT comparable across tiers — a decision model's
+ * 0.8 is calibrated, an agent's self-reported 0.8 is less so — so
+ * there is NO default threshold anywhere in this module: a tier
+ * with no threshold in the spec fails loudly (before any trap
+ * fires) instead of silently inheriting a number nobody chose.
+ * The gate needs no threshold: its confidence is 1.0, which meets
+ * any threshold <= 1, so it always settles the cascade.
+ *
+ * Tier contracts (what each tier must return to count as a decision):
+ *   - exec: the spec's exec command must print EXACTLY one JSON
+ *     object on stdout: { choice, confidence }. Free text is not a
+ *     decision — unparseable stdout is an ABSTENTION, not a choice.
+ *     A non-zero exit is an ERROR. The choice must be one of
+ *     spec.options and confidence a finite number in [0, 1];
+ *     anything else is an abstention.
+ *   - decide: the decide trap (the local model in decision-model.ts)
+ *     returns { choice, confidence }; the same choice/confidence
+ *     checks apply. The local model never abstains — a question with
+ *     no parseable signal falls back to the first option at
+ *     confidence 0.5, which the cascade treats as a below-threshold
+ *     answer (it escalates by the threshold, not by abstention).
+ *   - job: the job tier always uses the "decision" jobspec (a string
+ *     LITERAL in the call below — the extractor requires a literal
+ *     spec to map the trap to its contract, so the cascade cannot
+ *     take a caller-supplied jobspec name). The agent's answer must
+ *     carry its SELF-REPORTED confidence as a structured output
+ *     field ({ choice, confidence, reason? } — see
+ *     plugins/muse/jobspecs/decision.md), not vibes: the cascade
+ *     reads the confidence field, it does not infer one. The same
+ *     choice/confidence checks apply.
+ *   - gate: the human's answer maps to { choice: answer,
+ *     confidence: 1.0, tier: "gate" }, accepted VERBATIM even when
+ *     it is not one of the options — a human may reject the framing,
+ *     and that is a decision. If the gate trap itself throws there
+ *     is no tier left to escalate to, so the cascade throws (the
+ *     run fails loudly, with the attempt history in the message).
+ *
+ * The returned Decision carries the deciding tier AND the full
+ * attempt history: one entry per tier the cascade evaluated, in
+ * order, up to and including the deciding tier — a tier with no
+ * exec command is recorded "skipped", not silently omitted — each
+ * with its result (choice + confidence) or its escalation reason.
+ * A cascade result naming only the winning tier would hide the
+ * escalation path; the audit value is the path.
+ *
+ * Context: spec.context reaches ONLY the job tier (as a structured
+ * input field). DecideSpec and GateSpec have no context channel, so
+ * the exec/decide/gate tiers receive the question and options
+ * exactly as written — fold any context those tiers need into the
+ * question text, and the inputs stay literally identical at every
+ * tier.
+ *
+ * Extraction note: the extractor walks the workflow file and its
+ * relative imports but EXCLUDES this module, so the trap calls
+ * inside decisionCascade never extract on their own. A
+ * decisionCascade(...) call in the workflow SYNTHESIZES the four
+ * tier sites (see extract.ts) with the contracts from this file —
+ * that is the only host support the helper needs, and the only
+ * reason a workflow using decisionCascade must import it from
+ * this module (not copy it). Consequence of the shared keys: a
+ * workflow that calls decisionCascade AND a direct decide<Other>
+ * (or a direct job<"decision"> with different types) hits the
+ * usual one-key-one-contract extraction conflict — keep direct
+ * decide/job calls in a cascade workflow on the cascade's types
+ * (DecideTierResult / DecisionJobInput / DecisionJobResult).
+ */
+
+/** The tiers, cheap to expensive. */
+export type DecisionTier = "exec" | "decide" | "job" | "gate";
+
+/**
+ * One tier's outcome in the attempt history. "decided" is the
+ * winning tier; "below-threshold" / "abstained" / "error" are the
+ * escalation reasons; "skipped" is a tier the cascade did not
+ * attempt (the exec tier with no exec command in the spec).
+ */
+export type DecisionAttemptStatus = "decided" | "below-threshold" | "abstained" | "error" | "skipped";
+
+export interface DecisionAttempt {
+  tier: DecisionTier;
+  status: DecisionAttemptStatus;
+  choice?: string;
+  confidence?: number;
+  /** What happened: the outcome note, or the escalation reason. */
+  reason: string;
+}
+
+/**
+ * The canonical Decision shape (BRA-47): the choice, its
+ * confidence (0–1), the tier that decided, the question + options
+ * it decided between, and the full attempt history (every tier
+ * evaluated, in order, with its result or its escalation reason).
+ * All plain JSON types, so the first-run gate can extract its
+ * schema from this interface.
+ */
+export interface Decision {
+  choice: string;
+  confidence: number;
+  tier: DecisionTier;
+  question: string;
+  options: string[];
+  attempts: DecisionAttempt[];
+}
+
+/**
+ * What the decide tier returns. Structurally the local model's
+ * { choice, confidence } (decision-model.ts DecisionResult) — a
+ * separate name here because this is the cascade tier's contract
+ * (the module's type, extractable from this file), not the model's
+ * return type. Keep the two shapes aligned.
+ */
+export interface DecideTierResult {
+  choice: string;
+  confidence: number;
+}
+
+/** Input to the "decision" jobspec: the question, the options, and the structured context. */
+export interface DecisionJobInput {
+  question: string;
+  options: string[];
+  context?: string;
+}
+
+/**
+ * What the "decision" jobspec returns: the agent's choice, its
+ * SELF-REPORTED confidence (a structured output field — the
+ * jobspec requires it; the cascade never infers a confidence),
+ * and a brief reason.
+ */
+export interface DecisionJobResult {
+  choice: string;
+  confidence: number;
+  reason?: string;
+}
+
+/** Per-tier stop thresholds (the gate needs none — see above). */
+export interface DecisionThresholds {
+  exec?: number;
+  decide?: number;
+  job?: number;
+}
+
+/**
+ * One decision spec, run through the tiers. question + options are
+ * the same inputs at every tier. exec is the cheap tier's command
+ * (absent: the exec tier is skipped). threshold is the fallback
+ * for any tier without its own entry in thresholds; a tier with
+ * neither fails loudly before any trap fires.
+ */
+export interface DecisionSpec {
+  question: string;
+  options: string[];
+  context?: string;
+  exec?: ExecSpec;
+  threshold?: number;
+  thresholds?: DecisionThresholds;
+}
+
+/** One tier's outcome before the threshold is applied. */
+type TierOutcome =
+  | { kind: "answer"; choice: string; confidence: number }
+  | { kind: "abstain"; reason: string }
+  | { kind: "error"; reason: string };
+
+function truncateReason(s: string, n: number): string {
+  return s.length > n ? `${s.slice(0, n)}…` : s;
+}
+
+/**
+ * Shared choice/confidence validation for the exec, decide, and job
+ * tiers: the answer must be an object with a string choice that is
+ * one of the options and a finite confidence in [0, 1]. Anything
+ * else is an ABSTENTION — the tier produced no usable decision —
+ * with the precise reason, never a low-confidence choice.
+ */
+function checkTierChoice(value: unknown, options: string[], tier: string): TierOutcome {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    return { kind: "abstain", reason: `${tier} returned a non-object decision (${truncateReason(JSON.stringify(value) ?? String(value), 120)})` };
+  }
+  const choice = (value as { choice?: unknown }).choice;
+  const confidence = (value as { confidence?: unknown }).confidence;
+  if (typeof choice !== "string" || !choice) {
+    return { kind: "abstain", reason: `${tier} returned no usable choice (${truncateReason(JSON.stringify(value) ?? String(value), 120)})` };
+  }
+  if (!options.includes(choice)) {
+    return { kind: "abstain", reason: `${tier} returned choice ${JSON.stringify(choice)} which is not one of the options ${JSON.stringify(options)}` };
+  }
+  if (typeof confidence !== "number" || !Number.isFinite(confidence) || confidence < 0 || confidence > 1) {
+    return { kind: "abstain", reason: `${tier} returned choice ${JSON.stringify(choice)} with confidence ${String(confidence)} outside [0, 1]` };
+  }
+  return { kind: "answer", choice, confidence };
+}
+
+function tierError(tier: string, e: unknown): TierOutcome {
+  // A throw crossing the resume boundary may arrive rehydrated as a
+  // plain { name, message } record, not an Error instance — read the
+  // message off either shape.
+  const msg =
+    e instanceof Error
+      ? e.message
+      : typeof e === "object" && e !== null && typeof (e as { message?: unknown }).message === "string"
+        ? (e as { message: string }).message
+        : String(e);
+  return { kind: "error", reason: `${tier} trap threw: ${msg}` };
+}
+
+/** exec tier: stdout must be exactly one JSON { choice, confidence }. */
+function execTier(cmd: ExecSpec, options: string[]): TierOutcome {
+  let r: ExecResult;
+  try {
+    r = exec(cmd);
+  } catch (e) {
+    return tierError("exec", e);
+  }
+  if (r.exitCode !== 0) {
+    return { kind: "error", reason: `exec exited ${r.exitCode}${r.stderr ? `: ${truncateReason(r.stderr.trim(), 200)}` : ""}` };
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(r.stdout.trim());
+  } catch {
+    return { kind: "abstain", reason: `exec stdout did not parse as JSON {choice, confidence} (stdout: ${truncateReason(r.stdout.trim(), 120) || "(empty)"})` };
+  }
+  return checkTierChoice(parsed, options, "exec");
+}
+
+/** decide tier: the decide trap (the local model), same checks. */
+function decideTier(question: string, options: string[]): TierOutcome {
+  let r: DecideTierResult;
+  try {
+    r = decide<DecideTierResult>({ question, options });
+  } catch (e) {
+    return tierError("decide", e);
+  }
+  return checkTierChoice(r, options, "decide");
+}
+
+/**
+ * job tier: the "decision" jobspec — the spec name is a string
+ * LITERAL (the extractor requires a literal to map the trap to its
+ * contract; a caller-supplied jobspec name cannot extract).
+ */
+function jobTier(question: string, options: string[], context: string | undefined): TierOutcome {
+  let r: DecisionJobResult;
+  try {
+    r = job<DecisionJobInput, DecisionJobResult>({
+      spec: "decision",
+      input: { question, options, ...(context !== undefined ? { context } : {}) },
+    });
+  } catch (e) {
+    return tierError("job", e);
+  }
+  return checkTierChoice(r, options, "job");
+}
+
+/**
+ * gate tier: the human's answer, confidence 1.0, accepted verbatim
+ * even when it is not one of the options.
+ */
+function gateTier(question: string, options: string[]): TierOutcome {
+  let r: GateResult;
+  try {
+    r = gate({ question, options });
+  } catch (e) {
+    return tierError("gate", e);
+  }
+  return { kind: "answer", choice: r.answer, confidence: 1.0 };
+}
+
+/**
+ * The stop threshold for one tier: its own entry in
+ * spec.thresholds, else the spec-wide threshold. Missing or out of
+ * [0, 1] is a spec error, loud, before any trap fires (the caller
+ * in decisionCascade validates every enabled tier up front).
+ */
+function decisionThreshold(spec: DecisionSpec, tier: "exec" | "decide" | "job"): number {
+  const t = spec.thresholds?.[tier] ?? spec.threshold;
+  if (t === undefined) {
+    throw new Error(
+      `decisionCascade: no threshold for the ${tier} tier — set thresholds.${tier} or threshold in the decision spec (thresholds are per-tier: confidence is not comparable across tiers, so there is no default)`,
+    );
+  }
+  if (typeof t !== "number" || !Number.isFinite(t) || t < 0 || t > 1) {
+    throw new Error(`decisionCascade: threshold for the ${tier} tier must be a number in [0, 1] (got ${String(t)})`);
+  }
+  return t;
+}
+
+/** Spec validation, up front: loud before any trap fires. */
+function validateDecisionSpec(spec: DecisionSpec): void {
+  if (typeof spec.question !== "string" || !spec.question) {
+    throw new Error("decisionCascade: spec.question must be a non-empty string");
+  }
+  if (!Array.isArray(spec.options) || spec.options.length === 0) {
+    throw new Error("decisionCascade: spec.options must be a non-empty array of option strings");
+  }
+  if (spec.options.some((o) => typeof o !== "string" || !o)) {
+    throw new Error("decisionCascade: every spec.options entry must be a non-empty string");
+  }
+  decisionThreshold(spec, "decide");
+  decisionThreshold(spec, "job");
+  if (spec.exec) decisionThreshold(spec, "exec");
+}
+
+/**
+ * Run one decision spec through the tiers cheap to expensive
+ * (exec -> decide -> job -> gate), same inputs at every tier,
+ * stopping at the first tier at or above its threshold. Escalates
+ * on low confidence, abstention, or error; the gate is terminal
+ * (confidence 1.0). The returned Decision carries the deciding
+ * tier and the full attempt history.
+ */
+export function decisionCascade(spec: DecisionSpec): Decision {
+  validateDecisionSpec(spec);
+  const attempts: DecisionAttempt[] = [];
+  const finish = (choice: string, confidence: number, tier: DecisionTier): Decision => ({
+    choice,
+    confidence,
+    tier,
+    question: spec.question,
+    options: spec.options,
+    attempts,
+  });
+  // One tier's outcome against its threshold: returns the deciding
+  // choice, or null (recorded, escalate to the next tier).
+  const settle = (tier: DecisionTier, out: TierOutcome, threshold: number): { choice: string; confidence: number } | null => {
+    if (out.kind === "answer") {
+      if (out.confidence >= threshold) {
+        attempts.push({ tier, status: "decided", choice: out.choice, confidence: out.confidence, reason: `confidence ${out.confidence} at or above ${tier} threshold ${threshold}` });
+        return { choice: out.choice, confidence: out.confidence };
+      }
+      attempts.push({ tier, status: "below-threshold", choice: out.choice, confidence: out.confidence, reason: `confidence ${out.confidence} below ${tier} threshold ${threshold}` });
+      return null;
+    }
+    if (out.kind === "abstain") {
+      attempts.push({ tier, status: "abstained", reason: out.reason });
+      return null;
+    }
+    attempts.push({ tier, status: "error", reason: out.reason });
+    return null;
+  };
+
+  if (!spec.exec) {
+    attempts.push({ tier: "exec", status: "skipped", reason: "no exec command in spec — the exec tier is skipped, not attempted" });
+  } else {
+    const won = settle("exec", execTier(spec.exec, spec.options), decisionThreshold(spec, "exec"));
+    if (won) return finish(won.choice, won.confidence, "exec");
+  }
+  const decided = settle("decide", decideTier(spec.question, spec.options), decisionThreshold(spec, "decide"));
+  if (decided) return finish(decided.choice, decided.confidence, "decide");
+  const jobbed = settle("job", jobTier(spec.question, spec.options, spec.context), decisionThreshold(spec, "job"));
+  if (jobbed) return finish(jobbed.choice, jobbed.confidence, "job");
+  // The gate is terminal: confidence 1.0 meets any threshold <= 1.
+  const gated = settle("gate", gateTier(spec.question, spec.options), 1.0);
+  if (gated) return finish(gated.choice, gated.confidence, "gate");
+  // No tier left: the gate trap itself threw.
+  throw new Error(
+    `decisionCascade: the gate tier failed (${attempts[attempts.length - 1]?.reason ?? "unknown"}) — no decision; attempts: ${JSON.stringify(attempts)}`,
+  );
 }

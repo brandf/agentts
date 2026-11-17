@@ -43,7 +43,7 @@ import * as path from "node:path";
 import * as os from "node:os";
 import { spawn, type Subprocess } from "bun";
 import { Host } from "../src/host";
-import { MuseAdapter } from "../src/adapters/muse-adapter";
+import { MuseAdapter } from "../plugins/muse/src/muse-adapter";
 import { AffinityScheduler } from "../src/scheduler";
 
 const DIR = path.dirname(new URL(import.meta.url).pathname);
@@ -223,12 +223,15 @@ async function testJflEndToEnd(): Promise<void> {
   console.log("\n=== B. JudgeFixLoop end to end through the pool ===");
   const runId = "run-pool-jfl";
   const host = new Host({ stateDir: STATE_DIR, adapter: new MuseAdapter({ serverUrl: SERVER_URL }) });
-  const { entryPath } = host.prepareRun(path.join(TESTS, "workflow-judge-fix-loop.ts"), runId);
-  const bundle = await host.bundle(entryPath, "bundle-pool-jfl.js");
-  let rc = host.startRunFrom(bundle, runId);
-  rc = host.drive(runId);
-  if (rc !== 0) {
-    fail(`jfl-pool: run exited ${rc}`);
+  // The pool test drives the run through the host's run path
+  // (submit -> queue -> result) with the Muse adapter recorded on
+  // the queue entry; runQueue drives with that adapter.
+  const input = JSON.parse(fs.readFileSync(path.join(ROOT, "tests", "fixtures", "judge-fix-loop-input.json"), "utf8"));
+  host.submit(path.join(TESTS, "workflow-judge-fix-loop.ts"), { runId, input });
+  await host.runQueue();
+  const res = host.result(runId);
+  if (res.status !== "done") {
+    fail(`jfl-pool: run ended ${res.status} (${res.error ?? "no error"})`);
     console.log(host.output(runId));
     return;
   }
@@ -347,7 +350,7 @@ async function testCancelQueued(): Promise<void> {
   // No workers running: the job stays queued, so the cancel is a
   // queued-cancel. (Workers from D are killed by the caller.)
   const runId = "run-pool-cancel-q";
-  const cli = runCli(["run", path.join(TESTS, "workflow-muse-cancel.ts"), "--adapter", "muse", "--state-dir", STATE_DIR, "--run-id", runId]);
+  const cli = runCli(["run", path.join(TESTS, "workflow-muse-cancel.ts"), "--adapter", "muse", "--state-dir", STATE_DIR, "--run-id", runId, "--wait"]);
   const enqueued = await waitFor(async () => {
     const r = await http("GET", "/jobs");
     const list: any[] = r.body?.jobs ?? [];
@@ -364,10 +367,13 @@ async function testCancelQueued(): Promise<void> {
   check(cancel.status === 200 && cancel.body?.status === "cancelled", `CANCEL OK: queued job ${job.jobId} cancelled via API`);
   const res = await cli;
   check(res.rc === 0, `RUN OK: the run completed after catching the cancellation (cli rc ${res.rc}, err: ${res.err.slice(0, 200)})`);
-  check(res.out.includes("caught: JobCancelled"), `THROW OK: JobCancelled arrived at the call site (out: ${res.out.split("\n").filter((l) => l.includes("caught")).join(" | ")})`);
-  check(res.out.includes("caught is Error: true"), "ERROR OK: the caught cancellation is a real Error");
-  check(res.out.includes("finally ran"), "FINALLY OK: finally ran after the cancellation");
-  check(res.out.includes("done, caught: JobCancelled"), "DONE OK: the workflow finished after catching");
+  // The workflow's prints live in the run's .out file — the CLI's
+  // --wait prints only the result JSON, not the workflow's stdout.
+  const out = new Host({ stateDir: STATE_DIR }).output(runId);
+  check(out.includes("caught: JobCancelled"), `THROW OK: JobCancelled arrived at the call site (out: ${out.split("\n").filter((l) => l.includes("caught")).join(" | ")})`);
+  check(out.includes("caught is Error: true"), "ERROR OK: the caught cancellation is a real Error");
+  check(out.includes("finally ran"), "FINALLY OK: finally ran after the cancellation");
+  check(out.includes("done, caught: JobCancelled"), "DONE OK: the workflow finished after catching");
   const events = readLog("jobs.log").filter((e) => e.jobId === job.jobId);
   check(events.some((e) => e.event === "job-cancelled"), "LOG OK: jobs.log has job-cancelled for the queued job");
   check(!events.some((e) => e.event === "job-completed"), "NO COMPLETE OK: the cancelled job never completed");
@@ -377,7 +383,7 @@ async function testCancelRunning(): Promise<void> {
   console.log("\n=== E2. cancel a RUNNING job (worker abandons it) ===");
   const worker = startWorker("w-run");
   const runId = "run-pool-cancel-r";
-  const cli = runCli(["run", path.join(TESTS, "workflow-muse-cancel.ts"), "--adapter", "muse", "--state-dir", STATE_DIR, "--run-id", runId]);
+  const cli = runCli(["run", path.join(TESTS, "workflow-muse-cancel.ts"), "--adapter", "muse", "--state-dir", STATE_DIR, "--run-id", runId, "--wait"]);
   const running = await waitFor(async () => {
     const r = await http("GET", "/jobs");
     const list: any[] = r.body?.jobs ?? [];
@@ -395,7 +401,8 @@ async function testCancelRunning(): Promise<void> {
   check(cancel.status === 200 && cancel.body?.status === "cancelled", `CANCEL OK: running job ${job.jobId} cancelled via API`);
   const res = await cli;
   check(res.rc === 0, `RUN OK: the run completed after catching the running cancellation (cli rc ${res.rc})`);
-  check(res.out.includes("caught: JobCancelled"), "THROW OK: JobCancelled arrived at the call site for the running job");
+  const out = new Host({ stateDir: STATE_DIR }).output(runId);
+  check(out.includes("caught: JobCancelled"), "THROW OK: JobCancelled arrived at the call site for the running job");
   const events = readLog("jobs.log").filter((e) => e.jobId === job.jobId);
   check(events.some((e) => e.event === "job-cancelled"), "LOG OK: jobs.log has job-cancelled for the running job");
   check(!events.some((e) => e.event === "job-completed"), "NO COMPLETE OK: the cancelled running job never completed");
@@ -413,11 +420,10 @@ async function testJsonBoundary(): Promise<void> {
   const worker = startWorker("w-bad");
   const runId = "run-pool-bad-shape";
   const host = new Host({ stateDir: STATE_DIR, adapter: new MuseAdapter({ serverUrl: SERVER_URL }) });
-  const { entryPath } = host.prepareRun(path.join(TESTS, "workflow-muse-bad-shape.ts"), runId);
-  const bundle = await host.bundle(entryPath, "bundle-pool-bad-shape.js");
-  let rc = host.startRunFrom(bundle, runId);
-  rc = host.drive(runId);
-  check(rc !== 0, `RUN OK: the run failed on the wrong-shape result (rc ${rc})`);
+  host.submit(path.join(TESTS, "workflow-muse-bad-shape.ts"), { runId });
+  await host.runQueue();
+  const res = host.result(runId);
+  check(res.status === "failed", `RUN OK: the run failed on the wrong-shape result (status ${res.status})`);
   const errors = host.journal(runId).filter((e) => e.event === "validation-error");
   check(errors.length >= 1, `JOURNAL OK: validation-error journaled (got ${errors.length})`);
   if (errors.length) {

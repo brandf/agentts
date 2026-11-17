@@ -190,7 +190,10 @@ function testLayering(): void {
     return p;
   };
   // A host file importing the muse adapter: violation.
-  const bad = write("bad-host.ts", `import { MuseAdapter } from "../src/adapters/muse-adapter";\nvoid MuseAdapter;\n`);
+  const bad = write("bad-host.ts", `import { MuseAdapter } from "../plugins/muse/src/muse-adapter";\nvoid MuseAdapter;\n`);
+  // A host file importing the muse plugin SEAM (not the class): still
+  // a violation — the seam is layer 3 too.
+  const badSeam = write("bad-host-seam.ts", `import { createAdapter } from "../plugins/muse/src/adapter";\nvoid createAdapter;\n`);
   // A workflow importing from plugins/: two violations (MUSE + PLUGIN).
   // It lives under a workflows/ dir so the workflow layering rule
   // applies to it, as it does to real workflow files.
@@ -202,11 +205,11 @@ function testLayering(): void {
   const museDir = path.join(dir, "plugins", "muse", "src");
   fs.mkdirSync(museDir, { recursive: true });
   const layer3 = path.join(museDir, "adapter.ts");
-  fs.writeFileSync(layer3, `import { MuseAdapter } from "../../../src/adapters/muse-adapter";\nvoid MuseAdapter;\n`);
+  fs.writeFileSync(layer3, `import { MuseAdapter } from "./muse-adapter";\nvoid MuseAdapter;\n`);
   // A clean host file: no violation.
-  const clean = write("clean.ts", `import { MockAdapter } from "../src/adapters/mock-adapter";\nvoid MockAdapter;\n`);
+  const clean = write("clean.ts", `import { MockAdapter } from "../plugins/mock/src/mock-adapter";\nvoid MockAdapter;\n`);
 
-  const found = checkLayeringFiles([bad, badWf, layer3, clean]);
+  const found = checkLayeringFiles([bad, badSeam, badWf, layer3, clean]);
   const byFile = new Map<string, string[]>();
   for (const d of found) {
     const list = byFile.get(d.file) ?? [];
@@ -214,6 +217,7 @@ function testLayering(): void {
     byFile.set(d.file, list);
   }
   check((byFile.get(bad) ?? []).includes("M2-LAYER-MUSE"), `LAYER OK: host file importing muse-adapter flagged M2-LAYER-MUSE (got ${JSON.stringify(byFile.get(bad))})`);
+  check((byFile.get(badSeam) ?? []).includes("M2-LAYER-MUSE"), `LAYER OK: host file importing the muse plugin seam flagged M2-LAYER-MUSE (got ${JSON.stringify(byFile.get(badSeam))})`);
   check(
     (byFile.get(badWf) ?? []).includes("M2-LAYER-MUSE") && (byFile.get(badWf) ?? []).includes("M2-LAYER-PLUGIN"),
     `LAYER OK: workflow importing plugins/muse flagged MUSE + PLUGIN (got ${JSON.stringify(byFile.get(badWf))})`,

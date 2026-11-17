@@ -23,8 +23,8 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { HOLD, type Adapter, type TrapAnswer, type TrapContext } from "../../../src/adapter";
-import { DirectAdapter } from "../../../src/adapters/direct-adapter";
-import { MockAdapter } from "../../../src/adapters/mock-adapter";
+import { DirectAdapter } from "../../direct/src/direct-adapter";
+import { MockAdapter } from "../../mock/src/mock-adapter";
 
 const BRIEFING_SPECS = [
   "briefing-discover",

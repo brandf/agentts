@@ -16,24 +16,32 @@ interface StepResult {
 }
 
 declare function trap(type: string, arg: unknown): unknown;
-// step() is a thin wrapper over the trap builtin: trap("job", input).
-function step(input: StepInput): StepResult { return trap("job", input) as StepResult; }
 declare function print(...args: unknown[]): void;
 
-try {
-  const r = step({ op: "score", value: 7 });
-  print("first got:", JSON.stringify(r));
-} catch (e) {
-  print("first threw:", (e as Error).name);
-} finally {
-  print("first finally ran");
+export interface RunResult {
+  done: boolean;
 }
-try {
-  const s = step({ op: "score", value: 3 });
-  print("second got:", JSON.stringify(s));
-} catch (e) {
-  print("second threw:", (e as Error).name);
-} finally {
-  print("second finally ran");
+
+export default function run(): RunResult {
+  // step() is a thin wrapper over the trap builtin: trap("job", input).
+  function step(input: StepInput): StepResult { return trap("job", input) as StepResult; }
+
+  try {
+    const r = step({ op: "score", value: 7 });
+    print("first got:", JSON.stringify(r));
+  } catch (e) {
+    print("first threw:", (e as Error).name);
+  } finally {
+    print("first finally ran");
+  }
+  try {
+    const s = step({ op: "score", value: 3 });
+    print("second got:", JSON.stringify(s));
+  } catch (e) {
+    print("second threw:", (e as Error).name);
+  } finally {
+    print("second finally ran");
+  }
+  print("done");
+  return { done: true };
 }
-print("done");

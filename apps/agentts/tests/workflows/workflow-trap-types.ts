@@ -49,24 +49,31 @@ interface DecideResult {
   confidence: number;
 }
 
-const j = trap<JobInput, JobResult>("job", { op: "score", value: 7 }) as JobResult;
-print("job:", JSON.stringify(j));
+export interface RunResult {
+  done: boolean;
+}
 
-const e = trap<ExecInput, ExecResult>("exec", { cmd: "echo hi" }) as ExecResult;
-print("exec:", JSON.stringify(e));
+export default function run(): RunResult {
+  const j = trap<JobInput, JobResult>("job", { op: "score", value: 7 }) as JobResult;
+  print("job:", JSON.stringify(j));
 
-const g = trap<GateInput, GateResult>("gate", { question: "approve?" }) as GateResult;
-print("gate:", JSON.stringify(g));
+  const e = trap<ExecInput, ExecResult>("exec", { cmd: "echo hi" }) as ExecResult;
+  print("exec:", JSON.stringify(e));
 
-const s = trap<SleepInput, SleepResult>("sleep", { ms: 1000 }) as SleepResult;
-print("sleep:", JSON.stringify(s));
+  const g = trap<GateInput, GateResult>("gate", { question: "approve?" }) as GateResult;
+  print("gate:", JSON.stringify(g));
 
-const c = trap<CronInput, CronResult>("cron", { at: "2027-04-09T00:00:00Z" }) as CronResult;
-print("cron:", JSON.stringify(c));
+  const s = trap<SleepInput, SleepResult>("sleep", { ms: 1000 }) as SleepResult;
+  print("sleep:", JSON.stringify(s));
 
-const d = trap<DecideInput, DecideResult>("decide", {
-  question: "pick one",
-  options: ["a", "b"],
-}) as DecideResult;
-print("decide:", JSON.stringify(d));
-print("done");
+  const c = trap<CronInput, CronResult>("cron", { at: "2027-04-09T00:00:00Z" }) as CronResult;
+  print("cron:", JSON.stringify(c));
+
+  const d = trap<DecideInput, DecideResult>("decide", {
+    question: "pick one",
+    options: ["a", "b"],
+  }) as DecideResult;
+  print("decide:", JSON.stringify(d));
+  print("done");
+  return { done: true };
+}

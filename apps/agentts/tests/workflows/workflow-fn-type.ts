@@ -15,5 +15,12 @@ interface FnResult {
   compute: (x: number) => string;
 }
 
-const r = trap<ScoreInput, FnResult>("job", { op: "score", value: 7 });
-print("got:", JSON.stringify(r));
+export interface RunResult {
+  done: boolean;
+}
+
+export default function run(): RunResult {
+  const r = trap<ScoreInput, FnResult>("job", { op: "score", value: 7 });
+  print("got:", JSON.stringify(r));
+  return { done: true };
+}

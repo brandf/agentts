@@ -30,7 +30,7 @@ nothing in layers 1 and 3; replacing layer 1's engine changes nothing
 in layers 2–3 as long as the trap/blob interface holds.
 
 Repo mapping: `packages/durablets` (layer 1, this package),
-`apps/agentts` (layer 2), `adapters/` (layer 3).
+`apps/agentts` (layer 2), `apps/agentts/plugins/` (layer 3).
 
 ### Purity boundary
 
@@ -156,10 +156,19 @@ run.sh                        build + full test run (exit non-zero on
 ## How to build
 
 ```sh
-make durablets        # needs ~/workspace/dquickts-build-minimal
+# First, vendor the patched engine tree (once per checkout):
+./re-vendor.sh 96a9a79   # installs packages/durablets/vendor/dquickts
+make durablets        # builds against the vendored tree by default
                       # (libquickjs.a with JS_AbandonSuspended, BRA-42)
 ./run.sh              # build + full test suite (bun)
 ```
+
+The full clean-checkout build — prerequisites, the vendoring step,
+and troubleshooting — is in `BUILDING.md` at the repo root. To build
+against a tree you already have instead of the vendored one, pass
+`make DQUICKTS=/path/to/dquickts`; if the tree is missing or
+unbuilt, `make` fails fast with instructions rather than a cryptic
+linker error.
 
 Build + test outputs (the `durablets` binary, logs, snapshots,
 journals, blobs) go to a scratch dir, never into the package tree:

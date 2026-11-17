@@ -37,31 +37,51 @@ There is no second maintainer today; if one appears, name them here.
   every re-vendor. Verified 2026-11-16: the patch applies cleanly to
   a pristine `96a9a79` clone (`git apply --check` passes; the patched
   function is present in `quickjs.c` ×2 / `quickjs.h` ×1 after apply).
+  The patch is also a commit on the `agentts-patched` branch of the
+  full checkout (`a9bd6ec`, on top of the pin; the commit diff is
+  byte-identical to the `.patch` file). Re-vendor rebases that branch
+  onto the new pin. Upstream issue:
+  https://github.com/stencil-hq/dquickts/issues/19 (filed 2026-11-16;
+  watched daily by cron `dquickts-issue-19-watch` through Dec 7,
+  2026). If upstream accepts it, the patch file here is deleted and
+  the pin moves to a commit that contains it.
 
 ## Where the trees live
 
-- `~/workspace/dquickts-build` — full checkout (git repo, HEAD at the
-  pin). The BRA-42 patch sits here as an **uncommitted working-tree
-  diff**; the saved `.patch` file next to this document is the durable
-  copy, not this checkout.
-- `~/workspace/dquickts-build-minimal` — trimmed tree (no `.git`),
-  patch baked into its sources. This is what the DurableTS Makefile
-  builds by default (`DQUICKTS=$(HOME)/workspace/dquickts-build-minimal`;
-  see `Makefile`, "The engine tree is NOT modified").
+- `packages/durablets/vendor/dquickts` — the vendored trimmed tree
+  (no `.git`), patch baked into its sources. This is what the
+  DurableTS Makefile builds by default (`DQUICKTS` defaults to this
+  path; see `Makefile`, "The engine tree is NOT modified"). It is
+  installed by `packages/durablets/re-vendor.sh` (which proves the
+  candidate against the full suite before installing it), is
+  gitignored, and is rebuilt per checkout — a fresh clone has no
+  tree until `re-vendor.sh` runs. It carries a `VENDORED_FROM` stamp
+  (upstream commit, patch, date, recipe).
+- `~/workspace/dquickts-build` — Brandon's full checkout (git repo).
+  `master` tracks upstream at the pin; the BRA-42 patch is a commit
+  on the local branch `agentts-patched` (`a9bd6ec`, on top of the
+  pin). The saved `.patch` file next to this document is the durable
+  copy and the upstream-issue artifact; the branch is the working
+  copy.
+- `~/workspace/dquickts-build-minimal` — Brandon's VM-local
+  production minimal tree (no `.git`), patch baked into its sources.
+  Legacy working copy: `re-vendor.sh --swap` keeps it in sync with
+  the vendored tree above, and it remains the fallback the host
+  checks for the `VENDORED_FROM` stamp when no vendored tree is
+  present. Nothing in the repo defaults to it any more.
 - The trimming recipe is `experiments/dquickts-prototype/TRIM.md`:
-  delete the fat (Python/C API, Rust bindings, qbun, examples, tests,
-  Intl/Temporal), keep `python/opcode.h`, `compat/`, `repl.js`,
-  `LICENSE`, `README.md`, `VERSION`, `Makefile`.
+  a keep-list (31 files) — the minimal tree is built by copying only
+  those files out of a pristine checkout, so new upstream fat is
+  excluded by default and a missing keep-list file fails loudly.
 
 ## Tracking upstream
 
-Monthly, the owner runs:
-
-```sh
-git ls-remote https://github.com/stencil-hq/dquickts HEAD
-```
-
-and watches for:
+Monthly, the cron `dquickts-upstream-check` runs (1st of the month,
+~8am) and compares `git ls-remote https://github.com/stencil-hq/dquickts HEAD`
+against the pin here. It reports to the AgentTS side chat only when
+HEAD moved (with what changed and a re-vendor recommendation) or when
+the 6-month stall signal is hit; silent otherwise. The owner still
+decides re-vendor vs. stay on the pin. It watches for:
 
 - **New commits** — anything since the pin, especially in
   `quickjs-snapshot.c`, the resume/suspend paths, and `VERSION`.
@@ -78,20 +98,36 @@ and watches for:
 
 ## Vendoring procedure (re-vendor)
 
-1. Clone upstream, check out the new pin (never an unpinned HEAD).
-2. Apply the TRIM.md recipe to produce a fresh minimal tree.
-3. Apply `dquickts-bra42.patch` (`git apply --check` first; if it
-   no longer applies cleanly, the patch must be rebased by hand and
-   the new diff saved back here — do not ship a tree with a silently
-   dropped patch).
-4. Build: `make CONFIG_PYTHON= CONFIG_PYTHON_CAPI=
-   CONFIG_TEMPORAL_INTL= qjs libquickjs.a` (~1m25s on this VM).
-5. Prove the new tree: rebuild the DurableTS host against it and run
-   the staged `./run.sh` end to end (reference suite, mock suite,
-   host suite, profiler, checker, swap test 30/30). A re-vendor that
-   does not pass the full run is not a re-vendor.
-6. Update the pin in this document and in TRIM.md, and record the
-   re-vendor (commit, date, reason) on BRA-31.
+Scripted: `packages/durablets/re-vendor.sh <commit> [--swap]
+[--dest <path>]`.
+It clones upstream, checks out the pin (never an unpinned HEAD),
+applies `dquickts-bra42.patch` (`git apply --check` first — if it no
+longer applies cleanly, the patch must be rebased by hand and the new
+diff saved back here; do not ship a tree with a silently dropped
+patch), copies the TRIM.md keep-list into a candidate minimal tree,
+builds it (`make CONFIG_PYTHON= CONFIG_PYTHON_CAPI=
+CONFIG_TEMPORAL_INTL= qjs libquickjs.a`, ~1m25s on this VM), writes
+the `VENDORED_FROM` stamp, and proves the candidate by running the
+staged `./run.sh` end to end against it (`run.sh` forwards `$DQUICKTS`
+to the durablets build for this; unset means the vendored tree, the
+Makefile default). A re-vendor that does not pass the full run is not
+a re-vendor: the candidate is only installed afterwards, into
+`packages/durablets/vendor/dquickts` by default (`--dest` or
+`$DQUICKTS_DEST` overrides). `--swap` additionally syncs the proven
+candidate to the VM-local production minimal tree
+(`~/workspace/dquickts-build-minimal`) and rebases `agentts-patched`
+onto the new pin — skipped with a note when those trees do not exist.
+Then, by hand: update the pin in this document (and in TRIM.md if
+the recipe changed), and record the re-vendor (commit, date, reason)
+on BRA-31.
+
+Dry-run of this procedure at the current pin (`96a9a79`): run
+2026-11-16 — PROVEN. Clone → patch (`git apply --check` clean) →
+31 keep-list files → build → stamp → full staged `./run.sh` against
+the candidate: exit 0, 1048 OK, 14 PASS, 0 failures. The candidate's
+sources diffed identical to the current minimal tree (no
+differences), so the recipe reproduces the tree exactly at the same
+pin. Log `/tmp/re-vendor-dryrun.log`.
 
 ## Triggers
 

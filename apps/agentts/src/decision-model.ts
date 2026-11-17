@@ -10,9 +10,11 @@
 // NOT a general reasoner: a question carrying no parseable signal
 // falls back to the first option at low confidence, and the fallback
 // is journaled by the host as a decide event like any other, so the
-// fallback is visible, never silent. BRA-47 owns the canonical
-// Decision shape; until then workflows name their own decide result
-// type at the call site and this model returns {choice, confidence}.
+// fallback is visible, never silent. The canonical Decision shape
+// lives in the agentts module (BRA-47, landed 2026-11-16 — Decision
+// + decisionCascade); this model returns the decide tier's {choice,
+// confidence} (DecisionResult here, DecideTierResult there — keep the
+// two shapes aligned).
 //
 // Signals parsed (in order):
 //  1. "mean score X" + "threshold Y" (JudgeFixLoop convergence /

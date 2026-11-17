@@ -19,20 +19,27 @@ interface ScoreResult {
   label: string;
 }
 
-try {
-  trap<ScoreInput, ScoreResult>("job", { op: "score", value: 7 });
-  print("ERROR: first trap did not throw");
-} catch (e) {
-  print("caught is Error:", e instanceof Error);
-  print("caught:", (e as Error).name + ": " + (e as Error).message);
+export interface RunResult {
+  done: boolean;
 }
 
-try {
-  trap<ScoreInput, ScoreResult>("job", { op: "score", value: 3 });
-  print("ERROR: second trap did not throw");
-} catch (e) {
-  print("plain is Error:", e instanceof Error);
-  print("plain:", String(e));
-}
+export default function run(): RunResult {
+  try {
+    trap<ScoreInput, ScoreResult>("job", { op: "score", value: 7 });
+    print("ERROR: first trap did not throw");
+  } catch (e) {
+    print("caught is Error:", e instanceof Error);
+    print("caught:", (e as Error).name + ": " + (e as Error).message);
+  }
 
-print("done");
+  try {
+    trap<ScoreInput, ScoreResult>("job", { op: "score", value: 3 });
+    print("ERROR: second trap did not throw");
+  } catch (e) {
+    print("plain is Error:", e instanceof Error);
+    print("plain:", String(e));
+  }
+
+  print("done");
+  return { done: true };
+}

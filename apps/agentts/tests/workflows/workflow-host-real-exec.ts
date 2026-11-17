@@ -11,15 +11,22 @@ interface DecideResult {
   confidence: number;
 }
 
-const e = exec({ cmd: "echo", args: ["hi"] });
-print("exec:", JSON.stringify(e));
+export interface RunResult {
+  done: boolean;
+}
 
-const s = sleep({ ms: 50 });
-print("sleep:", JSON.stringify(s));
+export default function run(): RunResult {
+  const e = exec({ cmd: "echo", args: ["hi"] });
+  print("exec:", JSON.stringify(e));
 
-const d = decide<DecideResult>({
-  question: "mean score 0.9 threshold 0.8; the work is ready. Converged?",
-  options: ["converged", "continue"],
-});
-print("decide:", JSON.stringify(d));
-print("done");
+  const s = sleep({ ms: 50 });
+  print("sleep:", JSON.stringify(s));
+
+  const d = decide<DecideResult>({
+    question: "mean score 0.9 threshold 0.8; the work is ready. Converged?",
+    options: ["converged", "continue"],
+  });
+  print("decide:", JSON.stringify(d));
+  print("done");
+  return { done: true };
+}

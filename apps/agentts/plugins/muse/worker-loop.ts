@@ -2,11 +2,13 @@
 /**
  * worker-loop — the worker-side loop for the BRA-48 pool (script mode).
  *
- * A generic thread-pool worker, but an agent: it polls get-job, does
- * the work in its OWN per-worker workspace (never shared with another
- * worker), and posts complete-job with a JSON result or an exception.
- * Two tools + standing instructions — see plugins/muse/WORKER.md for
- * the subagent version of this same loop.
+ * A generic thread-pool worker, but an agent: it long-polls get-job
+ * (BRA-66: the call blocks until a job is assignable, up to 60s —
+ * the worker neither spins when idle nor waits out a poll interval),
+ * does the work in its OWN per-worker workspace (never shared with
+ * another worker), and posts complete-job with a JSON result or an
+ * exception. Two tools + standing instructions — see
+ * plugins/muse/WORKER.md for the subagent version of this same loop.
  *
  * Script mode (this file): the work for a spec is a registered Bun
  * worker script (workers config: JSON { spec: scriptPath }), run as
@@ -117,7 +119,10 @@ async function api(method: "GET" | "POST", p: string, body?: unknown): Promise<{
 }
 
 /** Content-addressed spec read: fetch the spec text only when its
- * hash changed since this worker last cached it. */
+ * hash changed since this worker last cached it. The hash goes on
+ * the request (BRA-89) so the server serves the enqueue-time
+ * snapshot for that hash — the prose as enqueued — instead of the
+ * live file, which may have changed since the job was dispatched. */
 async function ensureSpec(spec: string, hash: string | null): Promise<void> {
   if (!hash) return; // no spec file on the server: proceed from spec name + input
   const cachePath = path.join(CACHE_DIR, `${spec}.json`);
@@ -128,7 +133,7 @@ async function ensureSpec(spec: string, hash: string | null): Promise<void> {
     cached = null;
   }
   if (cached === hash) return;
-  const r = await api("GET", `/jobspec?spec=${encodeURIComponent(spec)}`);
+  const r = await api("GET", `/jobspec?spec=${encodeURIComponent(spec)}&hash=${encodeURIComponent(hash)}`);
   if (r.status !== 200 || typeof r.body?.text !== "string") {
     console.log(`[worker ${WORKER_ID}] WARNING: could not fetch jobspec "${spec}" (HTTP ${r.status}); proceeding from spec name`);
     return;
@@ -192,6 +197,14 @@ async function runOneJob(job: any): Promise<boolean> {
         cancelled = true;
         procRef?.kill("SIGTERM");
         setTimeout(() => procRef?.kill("SIGKILL"), 5000);
+      }
+      // Nudge (BRA-61): the server says this job is running long
+      // past its estimate (or silent) — surface it loudly. The
+      // heartbeat that carries the nudge is the delivery; the
+      // server will not repeat it. A subagent worker sees the same
+      // field in its own heartbeat call (see WORKER.md).
+      if (r.body?.nudge?.message) {
+        console.log(`[worker ${WORKER_ID}] ${jobId} NUDGE: ${r.body.nudge.message}`);
       }
     } catch {
       /* a missed heartbeat is not fatal; the lease may still hold */

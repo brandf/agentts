@@ -25,6 +25,7 @@
  * so later loops score higher. Notes name each criterion addressed /
  * missing, which is what the fix worker and the rubric decide read.
  */
+import * as fs from "node:fs";
 const payload = JSON.parse(process.argv[2] ?? "{}");
 const spec: string = payload.spec;
 const input: any = payload.input ?? {};
@@ -136,6 +137,213 @@ function rubricUpdate(): any {
   return { criteria, threshold: rubric.threshold ?? 0.8 };
 }
 
+// ------------------------------------------------------- improve-loop
+// The improve-loop workers (v0, deterministic keyword/coverage —
+// see plugins/muse/jobspecs/improve-*.md). They share the same
+// criterionAddressed() as the JFL judge, but over the improve-loop
+// contracts: the item's `content` (not `text`), rubric criteria as
+// {name, description} objects (not bare strings).
+//
+// Judge: one axis per criterion (1 addressed, 0 missing); judge j
+// doubles axis j (mod axis count) in the weighted mean. A missed
+// axis is a "major" finding; an addressed axis is a "nit" finding
+// (the aggregate drops nits when a major exists). v0 emits only
+// major + nit — no "blocking" (the type keeps it for future workers).
+function improveSlug(name: string): string {
+  return name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "criterion";
+}
+
+function improveJudge(): any {
+  const item = input.item ?? { content: "" };
+  const rubric = input.rubric ?? { criteria: [], threshold: 0.8 };
+  const criteria: any[] = Array.isArray(rubric.criteria) ? rubric.criteria : [];
+  const content: string = typeof item.content === "string" ? item.content : "";
+  const judgeIndex = typeof input.judge === "number" ? input.judge : 0;
+  const axisScores: any[] = [];
+  const findings: any[] = [];
+  let addressed = 0;
+  let weightedGot = 0;
+  let weightedTotal = 0;
+  criteria.forEach((c, i) => {
+    const name: string = typeof c?.name === "string" ? c.name : String(c ?? "");
+    const description: string = typeof c?.description === "string" ? c.description : "";
+    const isAddressed = criterionAddressed(name, content);
+    const weight = i % Math.max(criteria.length, 1) === judgeIndex % Math.max(criteria.length, 1) ? 2 : 1;
+    weightedTotal += weight;
+    if (isAddressed) {
+      addressed++;
+      weightedGot += weight;
+    }
+    axisScores.push({ criterion: name, score: isAddressed ? 1 : 0, note: isAddressed ? "addressed" : "not addressed" });
+    const id = `finding-${improveSlug(name)}`;
+    if (isAddressed) {
+      findings.push({
+        id,
+        criterion: name,
+        severity: "nit",
+        detail: `"${name}": addressed, but could be strengthened`,
+        suggestion: `Tighten the wording for "${name}".`,
+      });
+    } else {
+      findings.push({
+        id,
+        criterion: name,
+        severity: "major",
+        detail: `"${name}": not addressed — ${description}`,
+        suggestion: `Address the "${name}" criterion: ${description}`,
+      });
+    }
+  });
+  const mean = weightedTotal > 0 ? Math.round((weightedGot / weightedTotal) * 100) / 100 : 0;
+  return {
+    judge: judgeIndex,
+    axisScores,
+    findings,
+    summary: `judge ${judgeIndex}: ${addressed} of ${criteria.length} axes addressed (weighted mean ${mean})`,
+  };
+}
+
+// Aggregate: dedupe by finding id (keep first, drop the rest as
+// "duplicate"); filter nits when any blocking/major finding exists
+// (reason "nit filtered: higher-severity findings present"); keep
+// nits when they are all there is. meanScore is the mean over
+// scorecards of the weighted axis means (recomputed from each
+// scorecard's judge index — judge j doubles axis j).
+function improveAggregate(): any {
+  const scorecards: any[] = Array.isArray(input.scorecards) ? input.scorecards : [];
+  const findings: any[] = [];
+  const dropped: any[] = [];
+  const seen = new Set<string>();
+  for (const sc of scorecards) {
+    for (const f of sc?.findings ?? []) {
+      if (!f || typeof f.id !== "string") continue;
+      if (seen.has(f.id)) {
+        dropped.push({ finding: f, reason: "duplicate" });
+      } else {
+        seen.add(f.id);
+        findings.push(f);
+      }
+    }
+  }
+  const hasSevere = findings.some((f) => f.severity === "blocking" || f.severity === "major");
+  const kept: any[] = [];
+  if (hasSevere) {
+    for (const f of findings) {
+      if (f.severity === "nit") dropped.push({ finding: f, reason: "nit filtered: higher-severity findings present" });
+      else kept.push(f);
+    }
+  } else {
+    kept.push(...findings);
+  }
+  let meanSum = 0;
+  for (const sc of scorecards) {
+    const axes: any[] = Array.isArray(sc?.axisScores) ? sc.axisScores : [];
+    const judgeIndex = typeof sc?.judge === "number" ? sc.judge : 0;
+    let got = 0;
+    let total = 0;
+    axes.forEach((a, i) => {
+      const weight = i % Math.max(axes.length, 1) === judgeIndex % Math.max(axes.length, 1) ? 2 : 1;
+      total += weight;
+      if (a?.score === 1) got += weight;
+    });
+    meanSum += total > 0 ? got / total : 0;
+  }
+  const meanScore = scorecards.length ? Math.round((meanSum / scorecards.length) * 100) / 100 : 0;
+  return {
+    findings: kept,
+    dropped,
+    meanScore,
+    summary: `${kept.length} findings, ${dropped.length} dropped, mean ${meanScore}`,
+  };
+}
+
+// Decide: needsFix when any blocking/major finding exists; the fixes
+// are those findings, action = the finding's suggestion.
+function improveDecide(): any {
+  const aggregated = input.aggregated ?? { findings: [], dropped: [], meanScore: 0, summary: "" };
+  const findings: any[] = Array.isArray(aggregated.findings) ? aggregated.findings : [];
+  const severe = findings.filter((f) => f.severity === "blocking" || f.severity === "major");
+  if (!severe.length) {
+    return { needsFix: false, fixes: [], reason: "no blocking/major findings — no fixes needed" };
+  }
+  return {
+    needsFix: true,
+    fixes: severe.map((f) => ({ findingId: f.id, action: f.suggestion })),
+    reason: `${severe.length} finding(s) need fixes: ${severe.map((f) => f.id).join(", ")}`,
+  };
+}
+
+// Fix: for each fix, look up the finding and append a sentence that
+// addresses its criterion. "concise" cannot be fixed by appending
+// (appending makes text longer) — it is skipped, no change recorded.
+// The round is NOT in FixInput (the workflow owns it and stamps it
+// onto the changes) — the change records carry round 0 here.
+function improveFix(): any {
+  const item = input.item ?? { content: "" };
+  const rubric = input.rubric ?? { criteria: [], threshold: 0.8 };
+  const decision = input.decision ?? { needsFix: false, fixes: [], reason: "" };
+  const aggregated = input.aggregated ?? { findings: [], dropped: [], meanScore: 0, summary: "" };
+  const findings: any[] = Array.isArray(aggregated.findings) ? aggregated.findings : [];
+  const byId = new Map<string, any>(findings.map((f) => [f.id, f]));
+  const criteria: any[] = Array.isArray(rubric.criteria) ? rubric.criteria : [];
+  const descByName = new Map<string, string>(criteria.map((c) => [c?.name, c?.description ?? ""]));
+  const content: string = typeof item.content === "string" ? item.content : "";
+  const n = (content.match(/\(revised/g) ?? []).length + 1;
+  const sentences: string[] = [];
+  const changes: any[] = [];
+  for (const fix of decision.fixes ?? []) {
+    const f = byId.get(fix.findingId);
+    if (!f) continue;
+    const name: string = f.criterion ?? "";
+    const first = name.toLowerCase().split(" ")[0];
+    if (first === "concise") continue; // cannot fix by appending
+    let sentence: string;
+    if (first === "vivid") {
+      sentence = "A vivid, golden example brings the point to life.";
+    } else if (first === "concrete") {
+      sentence = "In 2026, 3 pilot teams ran this process end to end.";
+    } else {
+      sentence = `${name}: ${descByName.get(name) ?? f.detail ?? ""} (revised ${n}).`;
+    }
+    sentences.push(sentence);
+    changes.push({
+      round: 0,
+      findingId: f.id,
+      description: `Added coverage for '${name}': ${sentence}`,
+      why: f.detail,
+    });
+  }
+  const newContent = sentences.length
+    ? `${content} (revised ${n}). ${sentences.join(" ")}`
+    : content;
+  return { item: { ...item, content: newContent }, changes };
+}
+
+// Write: render improved.md + change-report.json into outDir.
+function improveWrite(): any {
+  const item = input.item ?? { kind: "", description: "", content: "" };
+  const report = input.report ?? { rounds: 0, converged: false, changes: [], outstanding: [], finalMeanScore: 0, summary: "" };
+  const outDir: string = typeof input.outDir === "string" && input.outDir ? input.outDir : ".agentts-scratch/improve-loop-out";
+  const improvedPath = `${outDir}/improved.md`;
+  const reportPath = `${outDir}/change-report.json`;
+  const improved = `# ${item.description}\n\n_kind: ${item.kind}_\n\n${item.content}` + (item.ref ? `\n\nSource: ${item.ref}` : "");
+  const reportJson = JSON.stringify(report, null, 2);
+  try {
+    fs.mkdirSync(outDir, { recursive: true });
+    fs.writeFileSync(improvedPath, improved);
+    fs.writeFileSync(reportPath, reportJson);
+  } catch (e: any) {
+    return { ok: false, error: e?.message ?? String(e), improvedPath, reportPath, bytes: 0 };
+  }
+  return {
+    ok: true,
+    error: "",
+    improvedPath,
+    reportPath,
+    bytes: Buffer.byteLength(improved, "utf8") + Buffer.byteLength(reportJson, "utf8"),
+  };
+}
+
 let result: unknown;
 switch (spec) {
   case "judge":
@@ -149,6 +357,21 @@ switch (spec) {
     break;
   case "rubric-update":
     result = rubricUpdate();
+    break;
+  case "improve-judge":
+    result = improveJudge();
+    break;
+  case "improve-aggregate":
+    result = improveAggregate();
+    break;
+  case "improve-decide":
+    result = improveDecide();
+    break;
+  case "improve-fix":
+    result = improveFix();
+    break;
+  case "improve-write":
+    result = improveWrite();
     break;
   default:
     console.error(`worker: unknown spec "${spec}"`);

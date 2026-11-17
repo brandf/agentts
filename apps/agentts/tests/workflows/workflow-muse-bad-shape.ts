@@ -21,13 +21,20 @@ interface JudgeVerdict {
   notes: string;
 }
 
-const v = job<JudgeInput, JudgeVerdict>({
-  spec: "bad-shape",
-  input: {
-    item: { text: "The quick brown fox jumps over the lazy dog.", goal: "A vivid opening." },
-    rubric: { criteria: ["vivid", "concrete", "concise"], threshold: 0.8 },
-    judge: 0,
-  },
-});
-print("verdict:", JSON.stringify(v));
-print("done");
+export interface RunResult {
+  done: boolean;
+}
+
+export default function run(): RunResult {
+  const v = job<JudgeInput, JudgeVerdict>({
+    spec: "bad-shape",
+    input: {
+      item: { text: "The quick brown fox jumps over the lazy dog.", goal: "A vivid opening." },
+      rubric: { criteria: ["vivid", "concrete", "concise"], threshold: 0.8 },
+      judge: 0,
+    },
+  });
+  print("verdict:", JSON.stringify(v));
+  print("done");
+  return { done: true };
+}

@@ -10,5 +10,12 @@ interface ScoreInput {
   value?: number;
 }
 
-const r = trap<ScoreInput, unknown>("job", { op: "score", value: 7 });
-print("got:", JSON.stringify(r));
+export interface RunResult {
+  done: boolean;
+}
+
+export default function run(): RunResult {
+  const r = trap<ScoreInput, unknown>("job", { op: "score", value: 7 });
+  print("got:", JSON.stringify(r));
+  return { done: true };
+}

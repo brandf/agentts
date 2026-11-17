@@ -134,7 +134,7 @@ function parseJflResult(stdout: string): { loops: number; converged: boolean; me
 // host mock adapter to match the mock plugin byte-identically), so
 // the CLI wires the local decision model into its mock path.
 const TARGET_FILE = "src/cli.ts";
-const MOCK_ADAPTER_FILE = "src/adapters/mock-adapter.ts";
+const MOCK_ADAPTER_FILE = "plugins/mock/src/mock-adapter.ts";
 const CANNED_DECIDE = 'return { value: { choice: "a", confidence: 0.9 } };';
 const WIRING_MARKER = 'setCanned("decide"';
 

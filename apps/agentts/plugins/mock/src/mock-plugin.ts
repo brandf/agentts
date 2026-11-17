@@ -55,7 +55,7 @@ import {
   type Extraction,
   type SiteEntry,
 } from "./extract";
-import { toJsonValue, JsonBoundaryError } from "./agentts";
+import { toJsonValue, JsonBoundaryError, TRAP_SITE_KEY, type TrapSite } from "./agentts";
 import { runChecker, runGateWithLayering } from "./checker";
 import { SchemaValidator, formatSchemaIssues, type SchemaIssue } from "./validate";
 
@@ -78,6 +78,42 @@ export function formatIssues(issues: JsonIssue[]): string {
  * fix; `what` is the machine-readable kind, `fix` the full message. */
 export function boundaryIssue(e: JsonBoundaryError): JsonIssue {
   return { path: e.path, what: e.kind, fix: e.message };
+}
+
+/**
+ * Split the wrapper-attached call site off a trap arg (BRA-73,
+ * landed in the mock copy by BRA-88 — same function as the host's
+ * splitTrapSite in src/host.ts, ported verbatim in behavior). The
+ * agentts wrappers attach the site under TRAP_SITE_KEY — the only
+ * channel from inside the engine to the plugin, since the C core
+ * emits the trap event from the arg alone. The plugin strips the
+ * key before dispatch (no adapter, repair handler, or schema
+ * lookup ever sees it) and journals the site as the trap event's
+ * top-level `site`, so the journaled arg stays exactly the spec
+ * the author passed. A malformed site value (not from our wrappers
+ * — an author who used the reserved key as a spec key) is dropped
+ * with no site, never trusted: a forged site in the journal would
+ * be worse than a missing one.
+ */
+function splitTrapSite(arg: any): { arg: any; site: TrapSite | null } {
+  if (arg === null || typeof arg !== "object" || Array.isArray(arg)) return { arg, site: null };
+  const rec = arg as Record<string, unknown>;
+  if (!(TRAP_SITE_KEY in rec)) return { arg, site: null };
+  const { [TRAP_SITE_KEY]: _dropped, ...rest } = rec;
+  const raw = rec[TRAP_SITE_KEY];
+  if (raw !== null && typeof raw === "object" && !Array.isArray(raw)) {
+    const s = raw as Record<string, unknown>;
+    if (
+      typeof s.file === "string" &&
+      typeof s.line === "number" &&
+      Number.isFinite(s.line) &&
+      typeof s.column === "number" &&
+      Number.isFinite(s.column)
+    ) {
+      return { arg: rest, site: { file: s.file, line: s.line, column: s.column } };
+    }
+  }
+  return { arg: rest, site: null };
 }
 
 export const HOLD = Symbol("mock-plugin-hold");
@@ -182,6 +218,211 @@ function resolveHostPath(): string {
   );
 }
 
+// Shared improve-loop mock logic (identical in both mock copies —
+// plugins/mock/src/mock-adapter.ts and plugins/mock/src/mock-plugin.ts.
+// The swap test requires identical answers, so this block is
+// inserted verbatim into both files; keep them in sync. It mirrors
+// workflows/worker.ts's improve-* implementations exactly (same
+// criterion checks, same dedupe/filter rules, same fix sentences),
+// except improve-write, which computes the same paths + bytes
+// WITHOUT writing files (a mock never writes).
+
+const IMPROVE_VIVID = ["vivid", "bright", "russet", "flashed", "striking", "golden", "crimson", "blazing", "shimmering", "scarlet", "gleaming"];
+const IMPROVE_CONCRETE = ["fox", "coat", "light", "morning", "dog", "river", "stone", "road", "cat", "house", "tree", "rain", "snow"];
+
+function improveCriterionAddressed(criterion: string, text: string): boolean {
+  const t = text.toLowerCase();
+  const first = criterion.toLowerCase().split(" ")[0];
+  if (first === "vivid") return IMPROVE_VIVID.some((w) => t.includes(w));
+  if (first === "concrete") {
+    if (/\d/.test(text)) return true;
+    return IMPROVE_CONCRETE.some((w) => t.includes(w));
+  }
+  if (first === "concise") return text.split(/\s+/).filter(Boolean).length <= 25;
+  return t.includes(first);
+}
+
+function improveSlug(name: string): string {
+  return name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "criterion";
+}
+
+function mockImproveJudge(arg: any): any {
+  const input = arg?.input ?? {};
+  const item = input.item ?? { content: "" };
+  const rubric = input.rubric ?? { criteria: [], threshold: 0.8 };
+  const criteria: any[] = Array.isArray(rubric.criteria) ? rubric.criteria : [];
+  const content: string = typeof item.content === "string" ? item.content : "";
+  const judgeIndex = typeof input.judge === "number" ? input.judge : 0;
+  const axisScores: any[] = [];
+  const findings: any[] = [];
+  let addressed = 0;
+  let weightedGot = 0;
+  let weightedTotal = 0;
+  criteria.forEach((c: any, i: number) => {
+    const name: string = typeof c?.name === "string" ? c.name : String(c ?? "");
+    const description: string = typeof c?.description === "string" ? c.description : "";
+    const isAddressed = improveCriterionAddressed(name, content);
+    const weight = i % Math.max(criteria.length, 1) === judgeIndex % Math.max(criteria.length, 1) ? 2 : 1;
+    weightedTotal += weight;
+    if (isAddressed) {
+      addressed++;
+      weightedGot += weight;
+    }
+    axisScores.push({ criterion: name, score: isAddressed ? 1 : 0, note: isAddressed ? "addressed" : "not addressed" });
+    const id = `finding-${improveSlug(name)}`;
+    if (isAddressed) {
+      findings.push({
+        id,
+        criterion: name,
+        severity: "nit",
+        detail: `"${name}": addressed, but could be strengthened`,
+        suggestion: `Tighten the wording for "${name}".`,
+      });
+    } else {
+      findings.push({
+        id,
+        criterion: name,
+        severity: "major",
+        detail: `"${name}": not addressed — ${description}`,
+        suggestion: `Address the "${name}" criterion: ${description}`,
+      });
+    }
+  });
+  const mean = weightedTotal > 0 ? Math.round((weightedGot / weightedTotal) * 100) / 100 : 0;
+  return {
+    judge: judgeIndex,
+    axisScores,
+    findings,
+    summary: `judge ${judgeIndex}: ${addressed} of ${criteria.length} axes addressed (weighted mean ${mean})`,
+  };
+}
+
+function mockImproveAggregate(arg: any): any {
+  const input = arg?.input ?? {};
+  const scorecards: any[] = Array.isArray(input.scorecards) ? input.scorecards : [];
+  const findings: any[] = [];
+  const dropped: any[] = [];
+  const seen = new Set<string>();
+  for (const sc of scorecards) {
+    for (const f of sc?.findings ?? []) {
+      if (!f || typeof f.id !== "string") continue;
+      if (seen.has(f.id)) {
+        dropped.push({ finding: f, reason: "duplicate" });
+      } else {
+        seen.add(f.id);
+        findings.push(f);
+      }
+    }
+  }
+  const hasSevere = findings.some((f: any) => f.severity === "blocking" || f.severity === "major");
+  const kept: any[] = [];
+  if (hasSevere) {
+    for (const f of findings) {
+      if (f.severity === "nit") dropped.push({ finding: f, reason: "nit filtered: higher-severity findings present" });
+      else kept.push(f);
+    }
+  } else {
+    kept.push(...findings);
+  }
+  let meanSum = 0;
+  for (const sc of scorecards) {
+    const axes: any[] = Array.isArray(sc?.axisScores) ? sc.axisScores : [];
+    const judgeIndex = typeof sc?.judge === "number" ? sc.judge : 0;
+    let got = 0;
+    let total = 0;
+    axes.forEach((a: any, i: number) => {
+      const weight = i % Math.max(axes.length, 1) === judgeIndex % Math.max(axes.length, 1) ? 2 : 1;
+      total += weight;
+      if (a?.score === 1) got += weight;
+    });
+    meanSum += total > 0 ? got / total : 0;
+  }
+  const meanScore = scorecards.length ? Math.round((meanSum / scorecards.length) * 100) / 100 : 0;
+  return {
+    findings: kept,
+    dropped,
+    meanScore,
+    summary: `${kept.length} findings, ${dropped.length} dropped, mean ${meanScore}`,
+  };
+}
+
+function mockImproveDecide(arg: any): any {
+  const input = arg?.input ?? {};
+  const aggregated = input.aggregated ?? { findings: [], dropped: [], meanScore: 0, summary: "" };
+  const findings: any[] = Array.isArray(aggregated.findings) ? aggregated.findings : [];
+  const severe = findings.filter((f: any) => f.severity === "blocking" || f.severity === "major");
+  if (!severe.length) {
+    return { needsFix: false, fixes: [], reason: "no blocking/major findings — no fixes needed" };
+  }
+  return {
+    needsFix: true,
+    fixes: severe.map((f: any) => ({ findingId: f.id, action: f.suggestion })),
+    reason: `${severe.length} finding(s) need fixes: ${severe.map((f: any) => f.id).join(", ")}`,
+  };
+}
+
+function mockImproveFix(arg: any): any {
+  const input = arg?.input ?? {};
+  const item = input.item ?? { content: "" };
+  const rubric = input.rubric ?? { criteria: [], threshold: 0.8 };
+  const decision = input.decision ?? { needsFix: false, fixes: [], reason: "" };
+  const aggregated = input.aggregated ?? { findings: [], dropped: [], meanScore: 0, summary: "" };
+  const findings: any[] = Array.isArray(aggregated.findings) ? aggregated.findings : [];
+  const byId = new Map<string, any>(findings.map((f: any) => [f.id, f]));
+  const criteria: any[] = Array.isArray(rubric.criteria) ? rubric.criteria : [];
+  const descByName = new Map<string, string>(criteria.map((c: any) => [c?.name, c?.description ?? ""]));
+  const content: string = typeof item.content === "string" ? item.content : "";
+  const n = (content.match(/\(revised/g) ?? []).length + 1;
+  const sentences: string[] = [];
+  const changes: any[] = [];
+  for (const fix of decision.fixes ?? []) {
+    const f = byId.get(fix.findingId);
+    if (!f) continue;
+    const name: string = f.criterion ?? "";
+    const first = name.toLowerCase().split(" ")[0];
+    if (first === "concise") continue; // cannot fix by appending
+    let sentence: string;
+    if (first === "vivid") {
+      sentence = "A vivid, golden example brings the point to life.";
+    } else if (first === "concrete") {
+      sentence = "In 2026, 3 pilot teams ran this process end to end.";
+    } else {
+      sentence = `${name}: ${descByName.get(name) ?? f.detail ?? ""} (revised ${n}).`;
+    }
+    sentences.push(sentence);
+    changes.push({
+      round: 0,
+      findingId: f.id,
+      description: `Added coverage for '${name}': ${sentence}`,
+      why: f.detail,
+    });
+  }
+  const newContent = sentences.length
+    ? `${content} (revised ${n}). ${sentences.join(" ")}`
+    : content;
+  return { item: { ...item, content: newContent }, changes };
+}
+
+// The mock write computes the same paths + bytes as the real worker
+// (same rendering) WITHOUT writing any file — a mock never writes.
+function mockImproveWrite(arg: any): any {
+  const input = arg?.input ?? {};
+  const item = input.item ?? { kind: "", description: "", content: "" };
+  const report = input.report ?? { rounds: 0, converged: false, changes: [], outstanding: [], finalMeanScore: 0, summary: "" };
+  const outDir: string = typeof input.outDir === "string" && input.outDir ? input.outDir : ".agentts-scratch/improve-loop-out";
+  const improvedPath = `${outDir}/improved.md`;
+  const reportPath = `${outDir}/change-report.json`;
+  const improved = `# ${item.description}\n\n_kind: ${item.kind}_\n\n${item.content}` + (item.ref ? `\n\nSource: ${item.ref}` : "");
+  const reportJson = JSON.stringify(report, null, 2);
+  return {
+    ok: true,
+    error: "",
+    improvedPath,
+    reportPath,
+    bytes: Buffer.byteLength(improved, "utf8") + Buffer.byteLength(reportJson, "utf8"),
+  };
+}
+
 export class MockPlugin {
   readonly hostPath: string;
   readonly workdir: string;
@@ -199,6 +440,8 @@ export class MockPlugin {
    * throwing "no run entry". */
   private finished = new Map<string, number>();
   private extractions = new Map<string, Extraction>();
+  private workflowPaths = new Map<string, string>();
+  private inputs = new Map<string, unknown>();
   private logOffsets = new Map<string, number>();
   private validator = new SchemaValidator();
   private answerQueues = new Map<string, TrapAnswer[]>();
@@ -424,6 +667,17 @@ export class MockPlugin {
           if (meta.tokens !== undefined) ev.tokens = meta.tokens;
         }
       }
+      // BRA-73 (BRA-88): promote the wrapper-captured call site to
+      // the trap event's top-level `site` and strip the transport key
+      // from the journaled arg, so the journaled arg stays exactly
+      // the spec the author passed — same as the host's ingest
+      // (src/host.ts). A trap with no site (a direct trap() caller,
+      // or an unparseable stack) simply carries none.
+      if (ev.event === "trap" && typeof ev.trapId === "string") {
+        const { arg, site } = splitTrapSite(ev.arg);
+        if (site) ev.site = site;
+        ev.arg = arg;
+      }
       // The plugin journals every core event (its journal, plugin-side).
       this.journalEvent(runId, ev);
       // The registry follows lifecycle events ONLY.
@@ -527,7 +781,8 @@ export class MockPlugin {
    * mismatch, or a layering violation is found. Either way the run
    * never starts, and a checker failure aborts before the cache
    * write, so it is never cached as gated. */
-  prepareRun(workflowPath: string, runId: string): { entryPath: string; extraction: Extraction } {
+  prepareRun(workflowPath: string, runId: string): { extraction: Extraction } {
+    this.workflowPaths.set(runId, path.resolve(workflowPath));
     const extraction = extractWorkflow(workflowPath, this.cacheDir, {
       onFirstRun: (program) => {
         this.gateRuns++;
@@ -544,11 +799,76 @@ export class MockPlugin {
       },
     });
     this.extractions.set(runId, extraction);
-    return { entryPath: path.resolve(workflowPath), extraction };
+    return { extraction };
   }
 
-  /** Bundle a workflow + the agentts module into one self-contained
-   * script with Bun.build; the C host never resolves imports. */
+  /** Validate a workflow's input against its entry contract (the
+   * workflow boundary is a trap boundary too: JSON-clean first, then
+   * schema) and store the validated input for the driver. (Same
+   * logic as the host — the mock plugin is the engine the host
+   * mirrors, so its refusals must match.) */
+  private validateAndStoreInput(runId: string, input: unknown): void {
+    const extraction = this.extractions.get(runId);
+    if (!extraction) throw new Error(`no extraction for ${runId} — call prepareRun first`);
+    const entry = extraction.entry;
+    if (!entry.inputType) {
+      if (input !== undefined) {
+        throw new Error(`workflow ${entry.name} takes no input but an input was provided`);
+      }
+      this.inputs.delete(runId);
+      return;
+    }
+    if (input === undefined) {
+      throw new Error(`workflow ${entry.name} requires an input (${entry.inputType})`);
+    }
+    let clean: unknown;
+    try {
+      clean = toJsonValue(input, "input");
+    } catch (e) {
+      if (e instanceof JsonBoundaryError) {
+        throw new Error(`input is not JSON-clean: ${e.message}`);
+      }
+      throw e;
+    }
+    const issues = this.validator.validate(clean, entry.inputSchema);
+    if (issues.length) {
+      throw new Error(
+        `input does not match ${entry.inputType}: ${issues.map((i) => `${i.path}: ${i.message}`).join("; ")}`,
+      );
+    }
+    this.inputs.set(runId, clean);
+  }
+
+  /** Generate the host driver for a run: global code that arms the
+   * entry guard (__agentts_begin) and calls the exported entry
+   * function with the validated input JSON. (Same as the host's
+   * driverFor — the driver is internal machinery, not author code.) */
+  driverFor(runId: string): string {
+    const wp = this.workflowPaths.get(runId);
+    const extraction = this.extractions.get(runId);
+    if (!wp || !extraction) {
+      throw new Error(`no prepared run ${runId} — call prepareRun first`);
+    }
+    const hasInput = extraction.entry.inputType !== null;
+    const inputJson = hasInput ? JSON.stringify(this.inputs.get(runId)) : "";
+    const driverPath = path.join(this.workdir, `${prefixFor(runId)}.driver.ts`);
+    const driver =
+      `// Mock-plugin driver for ${runId} (not author code): arm the\n` +
+      `// entry guard, then call the workflow's exported entry function\n` +
+      `// from global code with the validated input JSON.\n` +
+      `import entry from ${JSON.stringify(wp)};\n` +
+      `declare function __agentts_begin(): void;\n` +
+      `__agentts_begin();\n` +
+      (hasInput ? `entry(${inputJson});\n` : `entry();\n`);
+    fs.writeFileSync(driverPath, driver);
+    return driverPath;
+  }
+
+  /** Bundle a driver + the workflow + the agentts module into one
+   * self-contained script with Bun.build; the C host never resolves
+   * imports. Refuses loudly when the bundle still contains export
+   * or import syntax after the build — a bundle the C host would
+   * eval as a module (which cannot suspend) is a broken run. */
   async bundle(entryPath: string, outName: string): Promise<string> {
     const outPath = path.join(this.workdir, outName);
     const result = await Bun.build({
@@ -562,6 +882,12 @@ export class MockPlugin {
       throw new Error("Bun.build failed");
     }
     if (!fs.existsSync(outPath)) throw new Error("no bundle output");
+    const text = fs.readFileSync(outPath, "utf8");
+    if (/^\s*export\s/m.test(text) || /^\s*import\s/m.test(text)) {
+      throw new Error(
+        `bundle ${outPath} still contains export/import syntax after Bun.build — refusing to run a bundle the C host would eval as a module`,
+      );
+    }
     return outPath;
   }
 
@@ -600,11 +926,19 @@ export class MockPlugin {
     return rc;
   }
 
-  /** Start a workflow: extract (loud failure when a trap has no
-   * extractable type), then spawn the C host on the workflow source. */
-  startRun(workflowPath: string, runId: string): number {
-    const { entryPath } = this.prepareRun(workflowPath, runId);
-    return this.startRunFrom(entryPath, runId);
+  /** Start a workflow: gate + extract + validate the input, generate
+   * the driver, bundle it, then spawn the C host. The run suspends
+   * at its first trap/combinator (exit 2/3) or completes (exit 0).
+   * Stepwise engine control for the mock suite's cancellation tests
+   * — the mock plugin keeps its public engine interface (startRun /
+   * drive), because the mock suite tests the PLUGIN (the engine),
+   * not the host run path. */
+  async startRun(workflowPath: string, runId: string, input?: unknown): Promise<number> {
+    this.prepareRun(workflowPath, runId);
+    this.validateAndStoreInput(runId, input);
+    const driverPath = this.driverFor(runId);
+    const bundle = await this.bundle(driverPath, `bundle-${prefixFor(runId)}.js`);
+    return this.startRunFrom(bundle, runId);
   }
 
   // ------------------------------------------------------------ dispatch
@@ -614,6 +948,28 @@ export class MockPlugin {
     // (Same logic as the reference driver — the swap test requires
     // identical answers.)
     if (arg && typeof arg.spec === "string") {
+      // Improve-loop specs (standard library): input-dependent mock
+      // answers — the same logic as the host mock adapter (the block
+      // above), so the two mock copies stay identical.
+      if (arg.spec === "improve-judge") return mockImproveJudge(arg);
+      if (arg.spec === "improve-aggregate") return mockImproveAggregate(arg);
+      if (arg.spec === "improve-decide") return mockImproveDecide(arg);
+      if (arg.spec === "improve-fix") return mockImproveFix(arg);
+      if (arg.spec === "improve-write") return mockImproveWrite(arg);
+      // BRA-47: the cascade's job tier ("decision" jobspec). No canned
+      // decision exists — the mock answers the first option at 0.5, a
+      // deliberate guess: a cascade tier at/above its threshold would
+      // need a queued answer, and an unconfigured mock run escalates
+      // instead of deciding on a made-up confidence. (Same logic as
+      // the host mock adapter, so the two mock copies stay identical.)
+      if (arg.spec === "decision") {
+        const options: string[] = Array.isArray(arg.input?.options) ? arg.input.options : [];
+        return {
+          choice: options[0] ?? "yes",
+          confidence: 0.5,
+          reason: "mock default: no canned decision answer; first option at 0.5",
+        };
+      }
       if (arg.spec === "aggregate") {
         const verdicts = arg.input?.verdicts || [];
         const ok = verdicts.filter((v: any) => v.ok).length;
@@ -648,13 +1004,23 @@ export class MockPlugin {
     switch (type) {
       case "job":
         return { value: this.mockJob(arg) };
-      case "exec":
+      case "exec": {
+        // `cat <file>` reads the file for real — rubric-file
+        // resolution (improve-loop) depends on it.
+        if (arg?.cmd === "cat" && typeof arg?.args?.[0] === "string") {
+          try {
+            return { value: { stdout: fs.readFileSync(arg.args[0], "utf8"), stderr: "", exitCode: 0 } };
+          } catch (e: any) {
+            return { value: { stdout: "", stderr: e?.message ?? String(e), exitCode: 1 } };
+          }
+        }
         return {
           value:
             arg?.cmd === "echo hi"
               ? { stdout: "hi\n", exitCode: 0 }
               : { stdout: "", exitCode: 0 },
         };
+      }
       case "gate": {
         if (this.gateQueue.length) return { value: this.gateQueue.shift() };
         if (this.gates === "hold") return HOLD;
@@ -763,6 +1129,13 @@ export class MockPlugin {
     type: string,
     arg: any,
   ): TrapAnswer | typeof HOLD {
+    // BRA-73 (BRA-88): strip the wrapper-attached call-site
+    // transport key before anything consumes the arg — siteKeyFor,
+    // the adapter, and the repair handler all see exactly the spec
+    // the author passed. (The site itself was already promoted to
+    // the trap event's top-level `site` at ingest; the dispatch path
+    // only needs the clean arg.) Same as the host's dispatchTrap.
+    arg = splitTrapSite(arg).arg;
     const extraction = this.extractions.get(runId);
     const key = siteKeyFor(type, arg);
     const site: SiteEntry | undefined =

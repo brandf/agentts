@@ -16,11 +16,18 @@ interface JobResult {
   label: string;
 }
 
-try {
-  const r = trap<JobInput, JobResult>("job", { op: "score", value: 7 }) as JobResult;
-  print("ERROR: bad output was accepted:", JSON.stringify(r));
-} catch (e) {
-  print("caught:", (e as Error).name + ": " + (e as Error).message);
-  print("caught is Error:", e instanceof Error);
+export interface RunResult {
+  done: boolean;
 }
-print("done");
+
+export default function run(): RunResult {
+  try {
+    const r = trap<JobInput, JobResult>("job", { op: "score", value: 7 }) as JobResult;
+    print("ERROR: bad output was accepted:", JSON.stringify(r));
+  } catch (e) {
+    print("caught:", (e as Error).name + ": " + (e as Error).message);
+    print("caught is Error:", e instanceof Error);
+  }
+  print("done");
+  return { done: true };
+}

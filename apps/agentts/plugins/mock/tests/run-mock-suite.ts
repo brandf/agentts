@@ -74,7 +74,7 @@ async function runTest(
   const d = prefixFor(runId + "-direct");
   // Straight-through reference.
   const directPlugin = new MockPlugin({ workdir: WORKDIR });
-  let rc = directPlugin.startRun(path.join(TESTS, direct), runId + "-direct");
+  let rc = await directPlugin.startRun(path.join(TESTS, direct), runId + "-direct");
   rc = directPlugin.drive(runId + "-direct");
   if (rc !== 0) {
     fail(`${name}: direct reference exited ${rc}`);
@@ -92,10 +92,11 @@ async function runTest(
   if (bundleOut) {
     // Module variant: bundle workflow + agentts module first (the C
     // host never resolves imports), then run the bundle.
-    const { entryPath } = plugin.prepareRun(path.join(TESTS, workflow), runId);
+    plugin.prepareRun(path.join(TESTS, workflow), runId);
+  const driverPath = plugin.driverFor(runId);
     let bundle: string;
     try {
-      bundle = await plugin.bundle(entryPath, bundleOut);
+      bundle = await plugin.bundle(driverPath, bundleOut);
     } catch (e) {
       fail(`${name}: Bun.build failed: ${(e as Error).message}`);
       return null;
@@ -103,7 +104,7 @@ async function runTest(
     console.log(`BUNDLED OK: workflow + agentts module -> one self-contained script (${fs.statSync(bundle).size} bytes)`);
     rc = plugin.startRunFrom(bundle, runId);
   } else {
-    rc = plugin.startRun(path.join(TESTS, workflow), runId);
+    rc = await plugin.startRun(path.join(TESTS, workflow), runId);
   }
   if (rc !== 3) {
     fail(`${name}: parent run exited ${rc}, expected 3 (suspended at a combinator)`);
@@ -425,11 +426,11 @@ async function testRace(): Promise<void> {
   }
 }
 
-function testRaceEmpty(): void {
+async function testRaceEmpty(): Promise<void> {
   console.log("\n=== race([]) never settles (bounded drive) ===");
   const runId = "run-race-empty";
   const plugin = new MockPlugin({ workdir: WORKDIR });
-  let rc = plugin.startRun(path.join(TESTS, "workflow-race-empty.ts"), runId);
+  let rc = await plugin.startRun(path.join(TESTS, "workflow-race-empty.ts"), runId);
   if (rc !== 3) {
     fail(`race-empty: parent run exited ${rc}, expected 3 (suspended at race([]))`);
     return;
@@ -448,11 +449,11 @@ function testRaceEmpty(): void {
   check(plugin.registryHas(runId), "REGISTRY OK: still-suspended run stays in-flight");
 }
 
-function testCancelStep(): void {
+async function testCancelStep(): Promise<void> {
   console.log("\n=== 1. cancel a pending trap ===");
   const runId = "run-cancel-step";
   const plugin = new MockPlugin({ workdir: WORKDIR });
-  let rc = plugin.startRun(path.join(TESTS, "workflow-cancel-step.ts"), runId);
+  let rc = await plugin.startRun(path.join(TESTS, "workflow-cancel-step.ts"), runId);
   if (rc !== 2) {
     fail(`cancel-step: run exited ${rc}, expected 2 (suspended at the trap)`);
     return;
@@ -481,11 +482,11 @@ function testCancelStep(): void {
   check(plugin.registrySize() === 0, "REGISTRY OK: empty after completion");
 }
 
-function testCancelCombinator(): void {
+async function testCancelCombinator(): Promise<void> {
   console.log("\n=== 2. cancel a whole all() in flight ===");
   const runId = "run-cancel-combinator";
   const plugin = new MockPlugin({ workdir: WORKDIR });
-  let rc = plugin.startRun(path.join(TESTS, "workflow-cancel-combinator.ts"), runId);
+  let rc = await plugin.startRun(path.join(TESTS, "workflow-cancel-combinator.ts"), runId);
   if (rc !== 3) {
     fail(`cancel-combinator: run exited ${rc}, expected 3 (suspended at a combinator)`);
     return;
@@ -537,11 +538,11 @@ function testCancelCombinator(): void {
   check(plugin.registrySize() === 0, "REGISTRY OK: empty after completion");
 }
 
-function testSticky(): void {
+async function testSticky(): Promise<void> {
   console.log("\n=== 3. sticky cancellation ===");
   const runId = "run-sticky";
   const plugin = new MockPlugin({ workdir: WORKDIR });
-  let rc = plugin.startRun(path.join(TESTS, "workflow-sticky.ts"), runId);
+  let rc = await plugin.startRun(path.join(TESTS, "workflow-sticky.ts"), runId);
   if (rc !== 2) {
     fail(`sticky: run exited ${rc}, expected 2 (suspended at the trap)`);
     return;
@@ -564,11 +565,11 @@ function testSticky(): void {
   check(plugin.registrySize() === 0, "REGISTRY OK: empty after completion");
 }
 
-function testRaceOrder(): void {
+async function testRaceOrder(): Promise<void> {
   console.log("\n=== 4a. cancel-vs-complete race: result first ===");
   let runId = "run-race-a";
   let plugin = new MockPlugin({ workdir: WORKDIR });
-  let rc = plugin.startRun(path.join(TESTS, "workflow-race-order.ts"), runId);
+  let rc = await plugin.startRun(path.join(TESTS, "workflow-race-order.ts"), runId);
   if (rc !== 2) {
     fail(`race-a: run exited ${rc}, expected 2 (suspended at the first trap)`);
     return;
@@ -608,7 +609,7 @@ function testRaceOrder(): void {
   console.log("\n=== 4b. cancel-vs-complete race: cancel first ===");
   runId = "run-race-b";
   plugin = new MockPlugin({ workdir: WORKDIR });
-  rc = plugin.startRun(path.join(TESTS, "workflow-race-order.ts"), runId);
+  rc = await plugin.startRun(path.join(TESTS, "workflow-race-order.ts"), runId);
   if (rc !== 2) {
     fail(`race-b: run exited ${rc}, expected 2 (suspended at the first trap)`);
     return;
@@ -631,11 +632,11 @@ function testRaceOrder(): void {
   check(plugin.registrySize() === 0, "REGISTRY OK: empty after completion");
 }
 
-function testNestedCancel(): void {
+async function testNestedCancel(): Promise<void> {
   console.log("\n=== 5. nested propagation (cancel the whole tree) ===");
   const runId = "run-nested-cancel";
   const plugin = new MockPlugin({ workdir: WORKDIR });
-  let rc = plugin.startRun(path.join(TESTS, "workflow-nested-cancel.ts"), runId);
+  let rc = await plugin.startRun(path.join(TESTS, "workflow-nested-cancel.ts"), runId);
   if (rc !== 3) {
     fail(`nested-cancel: run exited ${rc}, expected 3 (suspended at a combinator)`);
     return;
@@ -727,11 +728,11 @@ function testNestedCancel(): void {
   check(plugin.registrySize() === 0, "REGISTRY OK: empty after completion");
 }
 
-function testTrapTypes(): void {
+async function testTrapTypes(): Promise<void> {
   console.log("\n=== trap dispatch by type string (all six types) ===");
   const runId = "run-trap-types";
   const plugin = new MockPlugin({ workdir: WORKDIR });
-  let rc = plugin.startRun(path.join(TESTS, "workflow-trap-types.ts"), runId);
+  let rc = await plugin.startRun(path.join(TESTS, "workflow-trap-types.ts"), runId);
   if (rc !== 2) {
     fail(`trap-types: run exited ${rc}, expected 2 (suspended at the first trap)`);
     return;
@@ -804,10 +805,11 @@ async function testAgenttsBundle(): Promise<void> {
   console.log("\n=== agentts module via Bun.build (TS host bundles, C host evals) ===");
   const runId = "run-agentts";
   const plugin = new MockPlugin({ workdir: WORKDIR });
-  const { entryPath } = plugin.prepareRun(path.join(TESTS, "workflow-agentts.ts"), runId);
+  plugin.prepareRun(path.join(TESTS, "workflow-agentts.ts"), runId);
+  const driverPath = plugin.driverFor(runId);
   let bundleOut: string;
   try {
-    bundleOut = await plugin.bundle(entryPath, "bundle-agentts.js");
+    bundleOut = await plugin.bundle(driverPath, "bundle-agentts.js");
   } catch (e) {
     fail(`agentts-bundle: ${(e as Error).message}`);
     return;
@@ -897,10 +899,11 @@ async function testJsonBoundary(): Promise<void> {
   console.log("\n=== trap-boundary JSON rule (BRA-46): dirty args throw at the call site ===");
   const runId = "run-json-boundary";
   const plugin = new MockPlugin({ workdir: WORKDIR });
-  const { entryPath } = plugin.prepareRun(path.join(TESTS, "workflow-json-boundary.ts"), runId);
+  plugin.prepareRun(path.join(TESTS, "workflow-json-boundary.ts"), runId);
+  const driverPath = plugin.driverFor(runId);
   let bundleOut: string;
   try {
-    bundleOut = await plugin.bundle(entryPath, "bundle-json-boundary.js");
+    bundleOut = await plugin.bundle(driverPath, "bundle-json-boundary.js");
   } catch (e) {
     fail(`json-boundary: ${(e as Error).message}`);
     return;
@@ -967,12 +970,12 @@ async function testJsonBoundary(): Promise<void> {
   check(plugin.registrySize() === 0, "REGISTRY OK: empty after completion");
 }
 
-function testErrorRehydration(): void {
+async function testErrorRehydration(): Promise<void> {
   console.log("\n=== error rehydration (BRA-41): throwing traps arrive as real Errors ===");
   const runId = "run-error-rehydration";
   const d = prefixFor(runId + "-direct");
   const directPlugin = new MockPlugin({ workdir: WORKDIR });
-  let rc = directPlugin.startRun(path.join(TESTS, "workflow-error-rehydration-direct.ts"), runId + "-direct");
+  let rc = await directPlugin.startRun(path.join(TESTS, "workflow-error-rehydration-direct.ts"), runId + "-direct");
   rc = directPlugin.drive(runId + "-direct");
   if (rc !== 0) {
     fail(`rehydration: direct reference exited ${rc}`);
@@ -983,7 +986,7 @@ function testErrorRehydration(): void {
   // then a plain string (a non-Error throw crosses as-is).
   plugin.queueAnswer("job", { throw: { name: "Error", message: "boom" } });
   plugin.queueAnswer("job", { throw: "plain failure" });
-  rc = plugin.startRun(path.join(TESTS, "workflow-error-rehydration.ts"), runId);
+  rc = await plugin.startRun(path.join(TESTS, "workflow-error-rehydration.ts"), runId);
   if (rc !== 2) {
     fail(`rehydration: run exited ${rc}, expected 2 (suspended at the trap)`);
     return;
@@ -1133,12 +1136,12 @@ function testJsonBoundaryUnit(): void {
   check(journalThrew, "JOURNAL OK: an event with undefined fails loudly instead of writing a corrupt line");
 }
 
-function testVirtualClock(): void {
+async function testVirtualClock(): Promise<void> {
   console.log("\n=== virtual clock (sleep advances, cron fires at absolute datetimes) ===");
   const runId = "run-clock";
   const plugin = new MockPlugin({ workdir: WORKDIR });
   const wallStart = Date.now();
-  let rc = plugin.startRun(path.join(TESTS, "workflow-clock.ts"), runId);
+  let rc = await plugin.startRun(path.join(TESTS, "workflow-clock.ts"), runId);
   if (rc !== 2) {
     fail(`clock: run exited ${rc}, expected 2 (suspended at the first trap)`);
     return;
@@ -1169,11 +1172,11 @@ function testVirtualClock(): void {
   check(plugin.registrySize() === 0, "REGISTRY OK: empty after completion");
 }
 
-function testGateHold(): void {
+async function testGateHold(): Promise<void> {
   console.log("\n=== held gate (the week-long gate in miniature) ===");
   const runId = "run-gate-hold";
   const plugin = new MockPlugin({ workdir: WORKDIR, gates: "hold" });
-  let rc = plugin.startRun(path.join(TESTS, "workflow-gate-hold.ts"), runId);
+  let rc = await plugin.startRun(path.join(TESTS, "workflow-gate-hold.ts"), runId);
   if (rc !== 2) {
     fail(`gate-hold: run exited ${rc}, expected 2 (suspended at the gate)`);
     return;
@@ -1185,6 +1188,8 @@ function testGateHold(): void {
   const held = plugin.journal(runId).filter((e) => e.event === "gate-held");
   check(held.length === 1 && held[0].question === "approve?", "JOURNAL OK: gate-held event recorded with the question");
   check(plugin.output(runId) === "", "HOLD OK: no output yet — the gate never resolved until the test delivered an answer");
+  // The mock plugin's deliverGate is the ENGINE interface: it
+  // delivers the answer AND drives to completion, returning the rc.
   rc = plugin.deliverGate(runId, { answer: "no" });
   check(rc === 0, "DELIVER OK: after the answer the run completed");
   const out = plugin.output(runId);
@@ -1193,13 +1198,13 @@ function testGateHold(): void {
   check(plugin.registrySize() === 0, "REGISTRY OK: empty after completion");
 }
 
-function testTypedValid(): void {
+async function testTypedValid(): Promise<void> {
   console.log("\n=== typed trap, valid path (configurable canned decide) ===");
   const runId = "run-typed-valid";
   const plugin = new MockPlugin({ workdir: WORKDIR });
   // "The next decide returns X at confidence 0.6."
   plugin.queueAnswer("decide", { choice: "b", confidence: 0.6 });
-  let rc = plugin.startRun(path.join(TESTS, "workflow-typed-valid.ts"), runId);
+  let rc = await plugin.startRun(path.join(TESTS, "workflow-typed-valid.ts"), runId);
   rc = plugin.drive(runId);
   if (rc !== 0) {
     fail(`typed-valid: run exited ${rc}`);
@@ -1213,12 +1218,12 @@ function testTypedValid(): void {
   check(plugin.registrySize() === 0, "REGISTRY OK: empty after completion");
 }
 
-function testTypedBadOutput(): void {
+async function testTypedBadOutput(): Promise<void> {
   console.log("\n=== typed trap, bad output (schema failure throws at the call site) ===");
   const runId = "run-typed-bad-output";
   const plugin = new MockPlugin({ workdir: WORKDIR });
   plugin.queueAnswer("job", { score: "high", label: "approved" });
-  let rc = plugin.startRun(path.join(TESTS, "workflow-typed-bad-output.ts"), runId);
+  let rc = await plugin.startRun(path.join(TESTS, "workflow-typed-bad-output.ts"), runId);
   rc = plugin.drive(runId);
   if (rc !== 0) {
     fail(`typed-bad-output: run exited ${rc}`);
@@ -1240,7 +1245,7 @@ function testTypedBadOutput(): void {
   check(plugin.registrySize() === 0, "REGISTRY OK: empty after completion");
 }
 
-function testTypedRepair(): void {
+async function testTypedRepair(): Promise<void> {
   console.log("\n=== typed trap, repair loop (same trapId, error attached) ===");
   const runId = "run-typed-repair";
   const plugin = new MockPlugin({ workdir: WORKDIR });
@@ -1250,7 +1255,7 @@ function testTypedRepair(): void {
     seen.push(ctx);
     return { value: { score: 0.92, label: "approved" } };
   });
-  let rc = plugin.startRun(path.join(TESTS, "workflow-typed-repair.ts"), runId);
+  let rc = await plugin.startRun(path.join(TESTS, "workflow-typed-repair.ts"), runId);
   rc = plugin.drive(runId);
   if (rc !== 0) {
     fail(`typed-repair: run exited ${rc}`);
@@ -1277,7 +1282,7 @@ function testTypedRepair(): void {
   check(plugin.registrySize() === 0, "REGISTRY OK: empty after completion");
 }
 
-function testTypedRepairExhausted(): void {
+async function testTypedRepairExhausted(): Promise<void> {
   console.log("\n=== typed trap, repair exhausted (throws after max attempts) ===");
   const runId = "run-typed-repair-exhausted";
   const plugin = new MockPlugin({ workdir: WORKDIR, maxRepairAttempts: 2 });
@@ -1287,7 +1292,7 @@ function testTypedRepairExhausted(): void {
     calls++;
     return { value: { score: "high", label: "approved" } };
   });
-  let rc = plugin.startRun(path.join(TESTS, "workflow-typed-repair-exhausted.ts"), runId);
+  let rc = await plugin.startRun(path.join(TESTS, "workflow-typed-repair-exhausted.ts"), runId);
   rc = plugin.drive(runId);
   if (rc !== 0) {
     fail(`typed-repair-exhausted: run exited ${rc}`);
@@ -1304,7 +1309,7 @@ function testTypedRepairExhausted(): void {
   check(plugin.registrySize() === 0, "REGISTRY OK: empty after completion");
 }
 
-function testJsonCleanDate(): void {
+async function testJsonCleanDate(): Promise<void> {
   console.log("\n=== JSON-clean ordering (Date converts first, then schema validates) ===");
   const runId = "run-json-clean-date";
   const plugin = new MockPlugin({ workdir: WORKDIR });
@@ -1312,7 +1317,7 @@ function testJsonCleanDate(): void {
   plugin.setRepairHandler("job", () => ({
     value: { score: 0.92, label: "approved", at: new Date("2027-04-09T12:00:00.000Z") },
   }));
-  let rc = plugin.startRun(path.join(TESTS, "workflow-json-clean-date.ts"), runId);
+  let rc = await plugin.startRun(path.join(TESTS, "workflow-json-clean-date.ts"), runId);
   rc = plugin.drive(runId);
   if (rc !== 0) {
     fail(`json-clean-date: run exited ${rc}`);
@@ -1328,7 +1333,7 @@ function testJsonCleanDate(): void {
   check(plugin.registrySize() === 0, "REGISTRY OK: empty after completion");
 }
 
-function testJsonCleanReject(): void {
+async function testJsonCleanReject(): Promise<void> {
   console.log("\n=== JSON-clean rejections (precise errors, phase json-clean) ===");
   const runId = "run-json-clean-reject";
   const plugin = new MockPlugin({ workdir: WORKDIR });
@@ -1343,7 +1348,7 @@ function testJsonCleanReject(): void {
     label = "approved";
   }
   plugin.queueAnswer("job", new Foo());
-  let rc = plugin.startRun(path.join(TESTS, "workflow-json-clean-reject.ts"), runId);
+  let rc = await plugin.startRun(path.join(TESTS, "workflow-json-clean-reject.ts"), runId);
   rc = plugin.drive(runId);
   if (rc !== 0) {
     fail(`json-clean-reject: run exited ${rc}`);
@@ -1367,7 +1372,7 @@ function testJsonCleanReject(): void {
   check(plugin.registrySize() === 0, "REGISTRY OK: empty after completion");
 }
 
-function testLoudFailures(): void {
+async function testLoudFailures(): Promise<void> {
   console.log("\n=== loud failures at first run (no extractable type) ===");
   const cases: [string, string][] = [
     ["workflow-no-type.ts", "exactly two"],
@@ -1378,7 +1383,7 @@ function testLoudFailures(): void {
     const plugin = new MockPlugin({ workdir: WORKDIR });
     let threw: any = null;
     try {
-      plugin.startRun(path.join(TESTS, file), "run-loud-" + file.replace(".ts", ""));
+      await plugin.startRun(path.join(TESTS, file), "run-loud-" + file.replace(".ts", ""));
     } catch (e) {
       threw = e;
     }
@@ -1391,7 +1396,7 @@ function testLoudFailures(): void {
   }
 }
 
-function testExtractionCache(): void {
+async function testExtractionCache(): Promise<void> {
   console.log("\n=== extraction cache (keyed by content hash, pinned with the frozen copy) ===");
   const cacheDir = path.join(WORKDIR, ".schema-cache");
   const before = fs.existsSync(cacheDir) ? fs.readdirSync(cacheDir).filter((f) => f.endsWith(".json")).length : 0;
@@ -1404,7 +1409,7 @@ function testExtractionCache(): void {
     .replace("after sleep 1:", "after sleep 1 (copy):");
   fs.writeFileSync(copyPath, copySrc);
   const p1 = new MockPlugin({ workdir: WORKDIR });
-  let rc = p1.startRun(copyPath, "run-cache-a");
+  let rc = await p1.startRun(copyPath, "run-cache-a");
   rc = p1.drive("run-cache-a");
   check(rc === 0, "CACHE OK: first run of the copy completed");
   const afterFirst = fs.readdirSync(cacheDir).filter((f) => f.endsWith(".json")).length;
@@ -1414,7 +1419,7 @@ function testExtractionCache(): void {
   const mtime1 = fs.statSync(newest).mtimeMs;
   // Second run, new plugin instance, same workdir (shared cache): a hit.
   const p2 = new MockPlugin({ workdir: WORKDIR });
-  rc = p2.startRun(copyPath, "run-cache-b");
+  rc = await p2.startRun(copyPath, "run-cache-b");
   rc = p2.drive("run-cache-b");
   check(rc === 0, "CACHE OK: second run completed");
   check(fs.readdirSync(cacheDir).filter((f) => f.endsWith(".json")).length === afterFirst, "CACHE OK: second run added no entry — cache hit");
@@ -1423,7 +1428,7 @@ function testExtractionCache(): void {
   // Mutate the source (append a comment): the hash changes, re-extract.
   fs.appendFileSync(copyPath, "\n// comment change: content hash must change\n");
   const p3 = new MockPlugin({ workdir: WORKDIR });
-  rc = p3.startRun(copyPath, "run-cache-c");
+  rc = await p3.startRun(copyPath, "run-cache-c");
   rc = p3.drive("run-cache-c");
   check(rc === 0, "CACHE OK: mutated copy completed");
   check(fs.readdirSync(cacheDir).filter((f) => f.endsWith(".json")).length === afterFirst + 1, "CACHE OK: changed source produced a new cache entry (re-extraction)");
@@ -1444,9 +1449,13 @@ async function testGateAgentLoop(): Promise<void> {
     `declare function print(...args: unknown[]): void;`,
     `interface ScoreInput { value: number; }`,
     `interface ScoreResult { score: number; label: string; }`,
-    `const j = job<ScoreInput, ScoreResult>({ spec: "score", input: { value: "seven" } });`,
-    `print("job:", JSON.stringify(j));`,
-    `print("done");`,
+    `interface GateAgentResult { done: boolean; }`,
+    `export default function run(): GateAgentResult {`,
+    `  const j = job<ScoreInput, ScoreResult>({ spec: "score", input: { value: "seven" } });`,
+    `  print("job:", JSON.stringify(j));`,
+    `  print("done");`,
+    `  return { done: true };`,
+    `}`,
     "",
   ].join("\n");
   fs.writeFileSync(agentPath, brokenSrc);
@@ -1491,10 +1500,11 @@ async function testGateAgentLoop(): Promise<void> {
   // never resolves imports), so the resubmission goes through
   // prepareRun (re-gate) + bundle + startRunFrom.
   fs.writeFileSync(agentPath, brokenSrc.replace('"seven"', "7"));
-  const { entryPath } = plugin.prepareRun(agentPath, "run-gate-agent");
+  plugin.prepareRun(agentPath, "run-gate-agent");
+  const driverPath = plugin.driverFor("run-gate-agent");
   let bundleOut: string;
   try {
-    bundleOut = await plugin.bundle(entryPath, "bundle-gate-agent.js");
+    bundleOut = await plugin.bundle(driverPath, "bundle-gate-agent.js");
   } catch (e) {
     fail(`gate-agent: bundle failed: ${(e as Error).message}`);
     return;
@@ -1510,7 +1520,7 @@ async function testGateAgentLoop(): Promise<void> {
   check(plugin.registrySize() === 0, "REGISTRY OK: empty after completion");
 }
 
-function testGateCache(): void {
+async function testGateCache(): Promise<void> {
   console.log("\n=== first-run gate: second run of the same version skips the gate from cache ===");
   // A scratch copy, made unique so its content hash differs from the
   // clock workflow the suite already ran.
@@ -1520,21 +1530,21 @@ function testGateCache(): void {
     fs.readFileSync(path.join(TESTS, "workflow-clock.ts"), "utf8").replace("after sleep 1:", "after sleep 1 (gate):"),
   );
   const p1 = new MockPlugin({ workdir: WORKDIR });
-  let rc = p1.startRun(copyPath, "run-gate-cache-a");
+  let rc = await p1.startRun(copyPath, "run-gate-cache-a");
   rc = p1.drive("run-gate-cache-a");
   check(rc === 0, "GATE OK: first run completed");
   check(p1.gateRuns === 1, `GATE OK: the gate ran once for the first run (gateRuns ${p1.gateRuns})`);
   // Second run, new plugin instance, same workdir (shared cache): the
   // cached gate result + schemas are reused, tsc never re-runs.
   const p2 = new MockPlugin({ workdir: WORKDIR });
-  rc = p2.startRun(copyPath, "run-gate-cache-b");
+  rc = await p2.startRun(copyPath, "run-gate-cache-b");
   rc = p2.drive("run-gate-cache-b");
   check(rc === 0, "GATE OK: second run completed");
   check(p2.gateRuns === 0, `GATE OK: the second run skipped the gate from cache (gateRuns ${p2.gateRuns})`);
   check(p1.output("run-gate-cache-a") === p2.output("run-gate-cache-b"), "GATE OK: both runs produced identical output");
 }
 
-function testGateRegate(): void {
+async function testGateRegate(): Promise<void> {
   console.log("\n=== first-run gate: a source-hash change re-gates ===");
   const copyPath = path.join(WORKDIR, "workflow-gate-regate.ts");
   const base = fs
@@ -1542,13 +1552,13 @@ function testGateRegate(): void {
     .replace("after sleep 1:", "after sleep 1 (regate):");
   fs.writeFileSync(copyPath, base);
   const plugin = new MockPlugin({ workdir: WORKDIR });
-  let rc = plugin.startRun(copyPath, "run-gate-regate-a");
+  let rc = await plugin.startRun(copyPath, "run-gate-regate-a");
   rc = plugin.drive("run-gate-regate-a");
   check(rc === 0, "GATE OK: first version completed");
   check(plugin.gateRuns === 1, `GATE OK: gate ran for the first version (gateRuns ${plugin.gateRuns})`);
   // Comment-only change: new hash, still clean — re-gated, passes.
   fs.appendFileSync(copyPath, "\n// comment change: content hash must change\n");
-  rc = plugin.startRun(copyPath, "run-gate-regate-b");
+  rc = await plugin.startRun(copyPath, "run-gate-regate-b");
   rc = plugin.drive("run-gate-regate-b");
   check(rc === 0, "GATE OK: comment-only version completed");
   check(plugin.gateRuns === 2, `GATE OK: the changed version was re-gated (gateRuns ${plugin.gateRuns})`);
@@ -1562,10 +1572,13 @@ function testGateRegate(): void {
   // workflows declare trap's arg as unknown, so tsc cannot see it —
   // the module wrappers are the ones that check args at the gate.
   // The mistyped assignment below is a genuine TS2322.)
-  fs.writeFileSync(copyPath, base + "\nconst wrongType: number = s1.sleptMs.toString();\n");
+  // (The entry function scopes the workflow's locals, so the
+  // mistyped line must not reference them — a plain top-level
+  // TS2322 is the same gate refusal the test counts.)
+  fs.writeFileSync(copyPath, base + "\nconst wrongType: number = \"not a number\";\n");
   let threw: any = null;
   try {
-    plugin.startRun(copyPath, "run-gate-regate-c");
+    await plugin.startRun(copyPath, "run-gate-regate-c");
   } catch (e) {
     threw = e;
   }
@@ -1600,13 +1613,17 @@ async function testCheckerGateLoop(): Promise<void> {
     `declare function print(...args: unknown[]): void;`,
     `interface ScoreInput { value: number; }`,
     `class ScoreResult { score = 0; label = ""; }`,
+    `interface CheckerAgentResult { done: boolean; }`,
     // Spec "checker-score", not "score": the cache is
     // content-addressed, and the gate agent loop's fixed workflow
     // (spec "score", same shape) already wrote an entry for its
     // hash — reusing it would skip the re-check this test counts.
-    `const j = job<ScoreInput, ScoreResult>({ spec: "checker-score", input: { value: 7 } });`,
-    `print("job:", JSON.stringify(j));`,
-    `print("done");`,
+    `export default function run(): CheckerAgentResult {`,
+    `  const j = job<ScoreInput, ScoreResult>({ spec: "checker-score", input: { value: 7 } });`,
+    `  print("job:", JSON.stringify(j));`,
+    `  print("done");`,
+    `  return { done: true };`,
+    `}`,
     "",
   ].join("\n");
   fs.writeFileSync(agentPath, brokenSrc);
@@ -1634,10 +1651,11 @@ async function testCheckerGateLoop(): Promise<void> {
     agentPath,
     brokenSrc.replace("class ScoreResult { score = 0; label = \"\"; }", "interface ScoreResult { score: number; label: string; }"),
   );
-  const { entryPath } = plugin.prepareRun(agentPath, "run-checker-agent");
+  plugin.prepareRun(agentPath, "run-checker-agent");
+  const driverPath = plugin.driverFor("run-checker-agent");
   let bundleOut: string;
   try {
-    bundleOut = await plugin.bundle(entryPath, "bundle-checker-agent.js");
+    bundleOut = await plugin.bundle(driverPath, "bundle-checker-agent.js");
   } catch (e) {
     fail(`checker-agent: bundle failed: ${(e as Error).message}`);
     return;
@@ -1657,7 +1675,7 @@ async function testCheckerGateLoop(): Promise<void> {
   check(plugin.registrySize() === 0, "REGISTRY OK: empty after completion");
 }
 
-function testBunTypeOnly(): void {
+async function testBunTypeOnly(): Promise<void> {
   console.log("\n=== Bun: type-only workflow runs, value workflow refused (BRA-58) ===");
   // The mock plugin runs the same checker as the host (shared
   // verbatim), so a bad workflow is refused identically on both
@@ -1682,7 +1700,7 @@ function testBunTypeOnly(): void {
   // type positions, types erase, no Bun global is touched at
   // runtime — the run completes and prints the label.
   const runId = "run-bun-type";
-  let rc = plugin.startRun(path.join(TESTS, "workflow-bun-type.ts"), runId);
+  let rc = await plugin.startRun(path.join(TESTS, "workflow-bun-type.ts"), runId);
   if (rc === 2) rc = plugin.drive(runId);
   check(rc === 0, `BUN OK: type-only workflow completes (rc ${rc})`);
   const out = plugin.output(runId);
@@ -1690,7 +1708,7 @@ function testBunTypeOnly(): void {
   check(out.includes("done"), "BUN OK: type-only workflow reached done");
 }
 
-function testResumeNoReextract(): void {
+async function testResumeNoReextract(): Promise<void> {
   console.log("\n=== first-run pipeline: a resumed run never re-extracts ===");
   const runId = "run-resume-no-reextract";
   const plugin = new MockPlugin({ workdir: WORKDIR });
@@ -1698,7 +1716,7 @@ function testResumeNoReextract(): void {
   // workflow-clock suspends at its first trap (rc 2); drive resumes
   // it from the stored blob. Neither step may re-run the gate or the
   // extraction — the contract was pinned with the run at first run.
-  let rc = plugin.startRun(path.join(TESTS, "workflow-clock.ts"), runId);
+  let rc = await plugin.startRun(path.join(TESTS, "workflow-clock.ts"), runId);
   check(rc === 2, `RESUME OK: run suspended at the first trap (rc ${rc})`);
   const gatesAfterStart = plugin.gateRuns;
   const entriesAfterStart = fs.readdirSync(cacheDir).filter((f) => f.endsWith(".json")).length;
@@ -1723,34 +1741,34 @@ async function main(): Promise<number> {
   await testFailfast();
   await testAny();
   await testRace();
-  testRaceEmpty();
-  testCancelStep();
-  testCancelCombinator();
-  testSticky();
-  testRaceOrder();
-  testNestedCancel();
-  testTrapTypes();
+  await testRaceEmpty();
+  await testCancelStep();
+  await testCancelCombinator();
+  await testSticky();
+  await testRaceOrder();
+  await testNestedCancel();
+  await testTrapTypes();
   await testAgenttsBundle();
   await testAgenttsCombinators();
   await testJsonBoundary();
-  testErrorRehydration();
-  testJsonBoundaryUnit();
-  testVirtualClock();
-  testGateHold();
-  testTypedValid();
-  testTypedBadOutput();
-  testTypedRepair();
-  testTypedRepairExhausted();
-  testJsonCleanDate();
-  testJsonCleanReject();
-  testLoudFailures();
-  testExtractionCache();
+  await testErrorRehydration();
+  await testJsonBoundaryUnit();
+  await testVirtualClock();
+  await testGateHold();
+  await testTypedValid();
+  await testTypedBadOutput();
+  await testTypedRepair();
+  await testTypedRepairExhausted();
+  await testJsonCleanDate();
+  await testJsonCleanReject();
+  await testLoudFailures();
+  await testExtractionCache();
   await testGateAgentLoop();
-  testGateCache();
-  testGateRegate();
+  await testGateCache();
+  await testGateRegate();
   await testCheckerGateLoop();
-  testBunTypeOnly();
-  testResumeNoReextract();
+  await testBunTypeOnly();
+  await testResumeNoReextract();
 
   console.log();
   if (FAILURES.length) {

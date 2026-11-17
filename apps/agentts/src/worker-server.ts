@@ -54,21 +54,33 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import * as crypto from "node:crypto";
+import { atomicWriteFile, CorruptionLog, type CorruptionRecord } from "./corruption";
 import { DEFAULT_DISPATCH_AGING_MS, DispatchScheduler } from "./scheduler";
 import { CostModel } from "./cost-model";
 import { QuotaTracker } from "./quotas";
+import { WaitHub } from "./wait-hub";
 import {
   DEFAULT_AFFINITY_HOLD_MS,
   DEFAULT_AFFINITY_TTL_MS,
+  DEFAULT_GET_JOB_WAIT_MS,
+  DEFAULT_LEASE_MAX_MS,
+  DEFAULT_LEASE_MIN_MS,
   DEFAULT_LEASE_MS,
   DEFAULT_MAX_ATTEMPTS,
+  DEFAULT_TICK_TIMEOUT_MS,
   DEFAULT_WORKER_PORT,
+  LEASE_P90_MULTIPLIER,
   MAX_FILE_EFFECT_BYTES,
+  MAX_LONG_POLL_MS,
+  NUDGE_FRACTION,
+  SYSTEM_EVENT_TYPES,
   type FileEffect,
   type GateNotice,
   type Job,
   type JobAssignment,
   type JobStatus,
+  type SystemEvent,
+  type SystemEventType,
   type WorkerInfo,
 } from "./worker-protocol";
 
@@ -79,6 +91,20 @@ interface Store {
   workers: Record<string, WorkerInfo>;
   gates: GateNotice[];
   seq: number;
+}
+
+/** store.json is corrupt AND its backup is corrupt (or missing), so
+ * there is no consistent worker store to load (BRA-76, BRA-62 G7).
+ * Thrown by loadStore — never a silent fresh store. The message
+ * names both files and what a human should do; deleting store.json
+ * to start empty is a human decision, not something the server does
+ * on its own (it would drop every queued job and worker). Mirrors
+ * the Host's CorruptQueueError (BRA-77 G5). */
+export class CorruptWorkerStoreError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "CorruptWorkerStoreError";
+  }
 }
 
 function flag(args: string[], name: string): string | undefined {
@@ -155,6 +181,20 @@ export class WorkerServer {
   private quotas: QuotaTracker;
   private server: ReturnType<typeof Bun.serve> | null = null;
   private sweepTimer: ReturnType<typeof setInterval> | null = null;
+  /** The ONE blocking-wait primitive (BRA-65/66): get-job and tick
+   * both park here. See wait-hub.ts. */
+  private hub = new WaitHub();
+  /** System events queued for the next tick call (BRA-65). A
+   * notification, not the source of truth — the tick agent re-reads
+   * state on wake. Capped (MAX_PENDING_EVENTS): when the tick agent
+   * is dead and events keep arriving, the oldest drop (counted);
+   * the state they describe is still on disk, so nothing is lost. */
+  private events: SystemEvent[] = [];
+  private droppedEvents = 0;
+  /** At most one tick call may be pending at a time (a second is a
+   * 409 — two tick agents is a real problem, and the 409 says so
+   * loudly). */
+  private tickPending = false;
 
   constructor(config: WorkerServerConfig) {
     this.config = config;
@@ -210,6 +250,74 @@ export class WorkerServer {
     return { running, cpuRunning };
   }
 
+  // ------------------------------------------------------------ tick + events (BRA-65)
+  /** Max system events held for the next tick call. Past this the
+   * oldest drop (counted in droppedEvents); the state they describe
+   * is on disk, so a drop delays a wake, never loses work. */
+  static readonly MAX_PENDING_EVENTS = 500;
+
+  /** Clamp a client-requested long-poll wait into [0, MAX]. A
+   * missing/invalid value takes the default. */
+  static clampLongPoll(raw: string | null, def: number): number {
+    const n = raw === null ? NaN : Number(raw);
+    if (!Number.isFinite(n)) return def;
+    return Math.max(0, Math.min(MAX_LONG_POLL_MS, Math.floor(n)));
+  }
+
+  /** Queue a system event for the next tick call and wake every
+   * parked waiter (tick waiters drain the queue; get-job waiters
+   * re-run selection — an event may have freed a quota slot or a
+   * hold may have expired). */
+  emitEvent(
+    type: SystemEventType,
+    detail: { runId?: string; jobId?: string; trapId?: string; detail?: unknown } = {},
+  ): void {
+    const ev: SystemEvent = { type, at: new Date().toISOString(), ...detail };
+    this.events.push(ev);
+    if (this.events.length > WorkerServer.MAX_PENDING_EVENTS) {
+      const drop = this.events.length - WorkerServer.MAX_PENDING_EVENTS;
+      this.events.splice(0, drop);
+      this.droppedEvents += drop;
+    }
+    this.hub.notify();
+  }
+
+  /** Take the pending events for one tick response (null when none
+   * are pending — the tick waiter keeps waiting). Consumes them:
+   * each event is delivered to exactly one tick call. */
+  private drainEvents(): SystemEvent[] | null {
+    if (!this.events.length) return null;
+    const evs = this.events;
+    this.events = [];
+    return evs;
+  }
+
+  /** Tick liveness, for the watchdog (BRA-65): <stateDir>/tick/
+   * state.json, written atomically on every tick call and every
+   * tick-beat. The watchdog restarts the tick agent when this goes
+   * stale AND there is pending work. */
+  tickStatePath(): string {
+    return path.join(this.config.stateDir, "tick", "state.json");
+  }
+  private recordTick(eventCount: number): void {
+    const p = this.tickStatePath();
+    fs.mkdirSync(path.dirname(p), { recursive: true });
+    let prev: { tickCount?: number } = {};
+    try {
+      prev = JSON.parse(fs.readFileSync(p, "utf8"));
+    } catch {
+      prev = {};
+    }
+    const state = {
+      lastTickAt: new Date().toISOString(),
+      tickCount: (typeof prev.tickCount === "number" ? prev.tickCount : 0) + 1,
+      lastEventCount: eventCount,
+    };
+    const tmp = p + ".tmp";
+    fs.writeFileSync(tmp, JSON.stringify(state, null, 2));
+    fs.renameSync(tmp, p);
+  }
+
   // ------------------------------------------------------------ persistence
   private storePath(): string {
     return path.join(this.dir, "store.json");
@@ -220,35 +328,141 @@ export class WorkerServer {
   private schedulerLogPath(): string {
     return path.join(this.dir, "scheduler.log");
   }
+  /** Previous good store (BRA-76 G7): saveStore backs the current
+   * store.json up here — atomically, and only when it parses — so a
+   * torn or externally corrupted store.json can be recovered. The
+   * backup is at most one save behind the store. */
+  storeBackupPath(): string {
+    return path.join(this.dir, "store.json.bak");
+  }
+  /** Durable corruption log (BRA-76 G7): stateDir/corruption.log
+   * (append-only JSONL, deduped) — the same log the Host writes
+   * queue/journal corruption to (see corruption.ts). Lazily built:
+   * the path needs config.stateDir. Best-effort: a failure to write
+   * the log never fails the load. */
+  private corruptionLogInstance: CorruptionLog | null = null;
+  private corruptionLog(): CorruptionLog {
+    if (!this.corruptionLogInstance) {
+      this.corruptionLogInstance = new CorruptionLog(path.join(this.config.stateDir, "corruption.log"));
+    }
+    return this.corruptionLogInstance;
+  }
+  private recordCorruption(rec: CorruptionRecord): void {
+    this.corruptionLog().append(rec);
+  }
+  /** Parse a store file: the parsed value must be an object with
+   * jobs + workers maps, or the file is corrupt. Returns null on
+   * any failure (missing file, unparseable JSON, wrong shape) with
+   * the reason. Gates/seq are backfilled on stores written by an
+   * older server; the per-job backfills live in backfillStore. */
+  private parseStoreFile(p: string): { store: Store | null; reason: string | null } {
+    if (!fs.existsSync(p)) return { store: null, reason: "missing" };
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(fs.readFileSync(p, "utf8"));
+    } catch (e) {
+      return { store: null, reason: `unparseable JSON (${e instanceof Error ? e.message : String(e)})` };
+    }
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      return { store: null, reason: "parsed value is not a store object" };
+    }
+    const s = parsed as Store;
+    if (
+      !s.jobs ||
+      typeof s.jobs !== "object" ||
+      Array.isArray(s.jobs) ||
+      !s.workers ||
+      typeof s.workers !== "object" ||
+      Array.isArray(s.workers)
+    ) {
+      return { store: null, reason: "parsed value is missing jobs/workers maps" };
+    }
+    if (!Array.isArray(s.gates)) s.gates = [];
+    if (typeof s.seq !== "number") s.seq = 0;
+    return { store: s, reason: null };
+  }
+  /** Backfill dispatch/lease fields on jobs written by an older
+   * server (BRA-49, BRA-61). The store is the record; missing
+   * fields must not crash selection. */
+  private backfillStore(s: Store): void {
+    for (const j of Object.values(s.jobs)) {
+      if (typeof j.priority !== "number") j.priority = 3;
+      if (typeof j.cpuHeavy !== "boolean") j.cpuHeavy = false;
+      if (typeof j.isDecision !== "boolean") j.isDecision = false;
+      if (typeof j.tokensEst !== "number") j.tokensEst = 0;
+      if (typeof j.estDurationMs !== "number" && j.estDurationMs !== null) j.estDurationMs = null;
+      if (typeof j.leaseSource !== "string") j.leaseSource = "default";
+      if (typeof j.lastHeartbeatAt !== "number" && j.lastHeartbeatAt !== null) j.lastHeartbeatAt = null;
+      if (typeof j.nudgedAt !== "number" && j.nudgedAt !== null) j.nudgedAt = null;
+      if (typeof j.nudgeCount !== "number") j.nudgeCount = 0;
+      if (typeof j.nudgeMessage !== "string" && j.nudgeMessage !== null) j.nudgeMessage = null;
+      if (typeof j.requeueReason !== "string" && j.requeueReason !== null) j.requeueReason = null;
+      // requeues backfills from attempts: the closest count an
+      // older record carries (a job re-queued once has attempts 1;
+      // a job that failed at maxAttempts may overcount by one —
+      // history, not a live decision).
+      if (typeof j.requeues !== "number") j.requeues = typeof j.attempts === "number" ? j.attempts : 0;
+      if (typeof j.idempotent !== "boolean") j.idempotent = true;
+    }
+  }
   private loadStore(): Store {
     const p = this.storePath();
-    if (fs.existsSync(p)) {
-      try {
-        const s = JSON.parse(fs.readFileSync(p, "utf8")) as Store;
-        if (s && typeof s === "object" && s.jobs && s.workers) {
-          // Backfill BRA-49 dispatch fields on jobs written by an
-          // older server (defaults: medium priority, no quota flags,
-          // no estimate). The store is the record; missing fields
-          // must not crash selection.
-          for (const j of Object.values(s.jobs)) {
-            if (typeof j.priority !== "number") j.priority = 3;
-            if (typeof j.cpuHeavy !== "boolean") j.cpuHeavy = false;
-            if (typeof j.isDecision !== "boolean") j.isDecision = false;
-            if (typeof j.tokensEst !== "number") j.tokensEst = 0;
-            if (typeof j.estDurationMs !== "number" && j.estDurationMs !== null) j.estDurationMs = null;
-          }
-          return s;
-        }
-      } catch {
-        /* corrupt store: start fresh rather than refuse (the log keeps the history) */
-      }
+    const { store, reason } = this.parseStoreFile(p);
+    if (store) {
+      this.backfillStore(store);
+      return store;
     }
-    return { jobs: {}, workers: {}, gates: [], seq: 0 };
+    // No store file yet: first boot — an empty store is correct.
+    if (reason === "missing") return { jobs: {}, workers: {}, gates: [], seq: 0 };
+    // Corrupt store.json (BRA-76 G7): recover from the backup when
+    // it parses, and say so loudly — the recovery is reported
+    // (console + corruption.log), never silent. A backup is at most
+    // one save behind, and a slightly stale store is exactly what
+    // the 1s lease sweep + trapId enqueue dedupe re-derive from —
+    // so recovering here is safe where silently returning {} was
+    // not (that dropped every queued job and worker). Same
+    // recover-from-backup / fail-loudly-only-if-backup-also-bad
+    // decision as BRA-77's queue recovery (G5).
+    const backup = this.parseStoreFile(this.storeBackupPath());
+    if (backup.store) {
+      // Restore the recovered store atomically. saveStore would
+      // back the corrupt store.json up first — it only backs up a
+      // store that parses, so the good backup is never clobbered —
+      // but this.store is not assigned yet, so write the restore
+      // directly instead of going through saveStore.
+      atomicWriteFile(p, JSON.stringify(backup.store, null, 2));
+      const at = new Date().toISOString();
+      const jobCount = Object.keys(backup.store.jobs).length;
+      this.recordCorruption({
+        kind: "worker-store-recovered",
+        file: "store.json",
+        lineNo: 0,
+        reason: `store.json is corrupt (${reason}) — recovered ${jobCount} job(s) from store.json.bak`,
+        excerpt: reason ?? "corrupt",
+        at,
+      });
+      console.warn(
+        `CORRUPT WORKER STORE: store.json is corrupt (${reason}) — recovered ${jobCount} job(s) from store.json.bak; see ${path.join(this.config.stateDir, "corruption.log")}`,
+      );
+      this.backfillStore(backup.store);
+      return backup.store;
+    }
+    // Both files corrupt (or the backup is missing): fail loudly.
+    // Never return {} — that silently dropped the whole worker queue.
+    throw new CorruptWorkerStoreError(
+      `store.json is corrupt (${reason}) and store.json.bak is ${backup.reason === "missing" ? "missing" : `also corrupt (${backup.reason})`} — refusing to guess. ` +
+        `Inspect ${p} and ${this.storeBackupPath()}, restore a known-good copy, or delete store.json to start with an empty worker store (that drops every queued job).`,
+    );
   }
   private saveStore(): void {
-    const tmp = this.storePath() + ".tmp";
-    fs.writeFileSync(tmp, JSON.stringify(this.store, null, 2));
-    fs.renameSync(tmp, this.storePath());
+    // Back the current store up first — but only when it parses.
+    // A corrupt store.json must never clobber a good backup: the
+    // backup is the recovery source, and loadStore depends on it.
+    const current = this.parseStoreFile(this.storePath());
+    if (current.store) {
+      atomicWriteFile(this.storeBackupPath(), JSON.stringify(current.store, null, 2));
+    }
+    atomicWriteFile(this.storePath(), JSON.stringify(this.store, null, 2));
   }
   private logJob(event: string, job: Job, extra: Record<string, unknown> = {}): void {
     const line = JSON.stringify({
@@ -279,10 +493,48 @@ export class WorkerServer {
     const p = path.join(this.config.jobspecDir, `${spec}.md`);
     return fs.existsSync(p) ? p : null;
   }
-  private specHash(spec: string): { specPath: string | null; specHash: string | null } {
+  /** Content-addressed snapshot of one jobspec file (BRA-89): the
+   * enqueue-time prose for a spec hash, under
+   * <stateDir>/worker-jobs/jobspecs/<sha256>.md. A pool worker
+   * re-reads its spec when the hash changes (worker-loop
+   * ensureSpec); without the snapshot that re-read serves the
+   * LIVE file, so a jobspec edited after enqueue changes what an
+   * already-dispatched job's worker does. With it, GET /jobspec
+   * with ?hash= serves the snapshot — the prose as enqueued.
+   * Content-addressed, so a snapshot is written once and never
+   * overwritten: two enqueues of the same hash share one file,
+   * and a later edit (different hash) writes a different file. */
+  private jobspecSnapshotPath(hash: string): string {
+    return path.join(this.dir, "jobspecs", `${hash}.md`);
+  }
+  /** Snapshot the jobspec text for this hash, when a spec file
+   * resolved. Best-effort is NOT an option here: the snapshot is
+   * the guarantee, so a write failure fails the enqueue loudly
+   * rather than silently leaving the pool on the live file. */
+  private snapshotJobspec(specPath: string, specHash: string): void {
+    const dest = this.jobspecSnapshotPath(specHash);
+    if (fs.existsSync(dest)) return;
+    fs.mkdirSync(path.dirname(dest), { recursive: true });
+    atomicWriteFile(dest, fs.readFileSync(specPath, "utf8"));
+  }
+  /** Jobspec metadata, read once per enqueue: path + sha256 (the
+   * content-addressed cache key workers use) + the idempotency
+   * policy (BRA-61). A spec declares
+   * `<!-- idempotency: non-idempotent -->` anywhere in its file
+   * when a re-queued attempt is NOT safe to re-run (side effects);
+   * anything else — including no declaration and no spec file —
+   * defaults to idempotent, which preserves the pre-BRA-61
+   * re-queue behavior for every existing spec. */
+  private specMeta(spec: string): { specPath: string | null; specHash: string | null; idempotent: boolean } {
     const p = this.specFile(spec);
-    if (!p) return { specPath: null, specHash: null };
-    return { specPath: p, specHash: shaFile(p) };
+    if (!p) return { specPath: null, specHash: null, idempotent: true };
+    const text = fs.readFileSync(p, "utf8");
+    const m = /idempotency:\s*(idempotent|non-idempotent)/i.exec(text);
+    return {
+      specPath: p,
+      specHash: crypto.createHash("sha256").update(text).digest("hex"),
+      idempotent: m ? m[1].toLowerCase() === "idempotent" : true,
+    };
   }
 
   // ------------------------------------------------------------ workers
@@ -327,17 +579,74 @@ export class WorkerServer {
   }
 
   // ------------------------------------------------------------ lease sweep
+  /** Nudge one running job that has passed its nudge point with no
+   * completion yet (BRA-61): once per attempt, when its age passes
+   * NUDGE_FRACTION of its lease. The nudge is a warning shot, not a
+   * punishment — it fires for a silent worker (no heartbeat since
+   * assignment, lease about to expire) and for a heartbeating worker
+   * running long past its estimate (still alive, still not done).
+   * Delivery is threefold: the record (nudgeMessage, read back on
+   * the worker's next heartbeat), jobs.log, and a "job-nudged" tick
+   * event — the tick agent / coordinator is the layer that can
+   * actually message a subagent session, so the event is what lets
+   * a human or agent reach the worker. Returns true when it fired. */
+  private nudgeJob(job: Job, now: number): boolean {
+    if (job.status !== "running" || job.nudgedAt !== null) return false;
+    if (typeof job.assignedAt !== "number") return false;
+    if (now - job.assignedAt < job.leaseMs * NUDGE_FRACTION) return false;
+    const silentMs = now - (job.lastHeartbeatAt ?? job.assignedAt);
+    const message =
+      `job ${job.jobId} spec "${job.spec}" has run ${now - job.assignedAt}ms with no completion ` +
+      `(lease ${job.leaseMs}ms, silent ${silentMs}ms) — reply with your status (heartbeat with a note) ` +
+      `or complete it; if you stay silent the lease expires and the job is re-queued to another worker` +
+      (job.idempotent ? "" : ` — this spec is non-idempotent, so on expiry it FAILS instead of re-queuing`);
+    job.nudgedAt = now;
+    job.nudgeCount += 1;
+    job.nudgeMessage = message;
+    this.logJob("job-nudged", job, { silentMs, leaseMs: job.leaseMs, message });
+    this.emitEvent("job-nudged", {
+      jobId: job.jobId,
+      runId: job.runId,
+      trapId: job.trapId,
+      detail: { silentMs, leaseMs: job.leaseMs, workerId: job.workerId, message },
+    });
+    return true;
+  }
+
   /** Re-queue expired running jobs (or fail them at max attempts).
-   * Called on every request and once a second. */
+   * Called on every request and once a second. An expiry is a tick
+   * event (BRA-65: a stuck worker wakes the tick agent) and wakes
+   * every parked waiter (a re-queued job is assignable again).
+   * Idempotency (BRA-61): a non-idempotent job is NEVER silently
+   * re-run — on lease expiry it FAILS with a JobNotRetried error
+   * naming the policy, so the coordinator/human decides instead of
+   * the pool repeating a side effect. */
   sweepLeases(now = Date.now()): void {
     let changed = false;
     for (const job of Object.values(this.store.jobs)) {
-      if (job.status !== "running" || job.leaseUntil === null || job.leaseUntil > now) continue;
+      if (job.status !== "running") continue;
+      if (this.nudgeJob(job, now)) changed = true;
+      if (job.leaseUntil === null || job.leaseUntil > now) continue;
       job.attempts += 1;
+      job.requeues += 1;
       const expiredWorker = job.workerId;
       job.workerId = null;
       job.leaseUntil = null;
-      if (job.attempts >= job.maxAttempts) {
+      if (!job.idempotent) {
+        job.status = "failed";
+        job.completedAt = now;
+        job.error = {
+          name: "JobNotRetried",
+          message: `job ${job.jobId} spec "${job.spec}" failed: lease expired with no completion (last worker ${expiredWorker ?? "unknown"}) and the spec is non-idempotent — it was NOT re-queued, because a retry may repeat a side effect; escalate to the coordinator/human`,
+        };
+        this.logJob("job-failed", job, { reason: "lease-expired-non-idempotent", lastWorker: expiredWorker });
+        this.emitEvent("job-failed", {
+          jobId: job.jobId,
+          runId: job.runId,
+          trapId: job.trapId,
+          detail: { error: job.error, reason: "lease-expired-non-idempotent", lastWorker: expiredWorker ?? null },
+        });
+      } else if (job.attempts >= job.maxAttempts) {
         job.status = "failed";
         job.completedAt = now;
         job.error = {
@@ -348,11 +657,21 @@ export class WorkerServer {
       } else {
         job.status = "queued";
         job.assignedAt = null;
+        job.requeueReason = "lease-expired";
         this.logJob("job-timeout-requeue", job, { reason: "lease-expired", lastWorker: expiredWorker });
       }
       changed = true;
+      this.emitEvent("lease-expired", {
+        jobId: job.jobId,
+        runId: job.runId,
+        trapId: job.trapId,
+        detail: { attempts: job.attempts, status: job.status, lastWorker: expiredWorker ?? null },
+      });
     }
-    if (changed) this.saveStore();
+    if (changed) {
+      this.saveStore();
+      this.hub.notify();
+    }
   }
 
   // ------------------------------------------------------------ handlers
@@ -361,15 +680,62 @@ export class WorkerServer {
     if (typeof spec !== "string" || !spec) {
       return { status: 400, body: { error: "enqueue requires a string spec" } };
     }
+    // G3 (BRA-75): trapId-keyed enqueue idempotency. A trapId names
+    // one trap execution (runId/trap-N, Q9). If a job already exists
+    // for this trapId, the host crashed mid-dispatch and is
+    // re-dispatching — return the existing job instead of creating
+    // a second one, or the work runs twice and the first result is
+    // orphaned. Any status dedupes: a live job is adopted and
+    // waited for; a terminal job's result/error is returned as-is.
+    // The spec must match — a trapId with a different spec is a
+    // trapId collision (a host bug), so fall through to a fresh job
+    // rather than adopting the wrong work, and make it visible.
+    if (typeof body?.trapId === "string" && body.trapId) {
+      const existing = Object.values(this.store.jobs).find((j) => j.trapId === body.trapId);
+      if (existing && existing.spec === spec) {
+        this.logJob("job-enqueue-deduped", existing);
+        return { status: 200, body: { jobId: existing.jobId, status: existing.status, deduped: true } };
+      }
+      if (existing) {
+        this.logJob("job-enqueue-trapId-collision", existing, { requestedSpec: spec });
+      }
+    }
     const now = Date.now();
     this.store.seq += 1;
     const jobId = `job-${this.store.seq}-${now.toString(36)}`;
-    const { specPath, specHash } = this.specHash(spec);
+    const { specPath, specHash, idempotent } = this.specMeta(spec);
+    // BRA-89: snapshot the enqueue-time jobspec prose (see
+    // snapshotJobspec) — a pool worker's re-read must serve the
+    // prose as enqueued, not the live file. The host's trap-code
+    // pin refuses LATER dispatches when the prose changes; the
+    // snapshot covers the job ALREADY dispatched.
+    if (specPath && specHash) this.snapshotJobspec(specPath, specHash);
     const priority =
       typeof body?.priority === "number" && body.priority >= 1 && body.priority <= 4
         ? Math.floor(body.priority)
         : 3;
     const est = this.costModel.estimate(`job:${spec}`);
+    // Cost-derived lease (BRA-61): an explicit per-enqueue lease
+    // wins; otherwise the lease is the cost-model p90 for this spec
+    // times LEASE_P90_MULTIPLIER, clamped into [MIN, MAX] — a long
+    // job is not killed at 5 minutes and a short one does not hold
+    // a slot for 5. With no recorded actuals the server default
+    // applies (leaseSource "default", not a guess).
+    let leaseMs: number;
+    let leaseSource: "explicit" | "cost-model" | "default";
+    if (typeof body?.leaseMs === "number" && body.leaseMs > 0) {
+      leaseMs = Math.floor(body.leaseMs);
+      leaseSource = "explicit";
+    } else if (est) {
+      leaseMs = Math.max(
+        DEFAULT_LEASE_MIN_MS,
+        Math.min(DEFAULT_LEASE_MAX_MS, Math.round(est.p90Ms * LEASE_P90_MULTIPLIER)),
+      );
+      leaseSource = "cost-model";
+    } else {
+      leaseMs = this.config.leaseMs;
+      leaseSource = "default";
+    }
     const job: Job = {
       jobId,
       spec,
@@ -392,9 +758,16 @@ export class WorkerServer {
       attempts: 0,
       maxAttempts:
         typeof body?.maxAttempts === "number" && body.maxAttempts >= 1 ? Math.floor(body.maxAttempts) : this.config.maxAttempts,
-      leaseMs:
-        typeof body?.leaseMs === "number" && body.leaseMs > 0 ? Math.floor(body.leaseMs) : this.config.leaseMs,
+      leaseMs,
+      leaseSource,
       leaseUntil: null,
+      lastHeartbeatAt: null,
+      nudgedAt: null,
+      nudgeCount: 0,
+      nudgeMessage: null,
+      requeueReason: null,
+      requeues: 0,
+      idempotent,
       enqueuedAt: now,
       assignedAt: null,
       completedAt: null,
@@ -402,15 +775,33 @@ export class WorkerServer {
     this.store.jobs[jobId] = job;
     this.saveStore();
     this.logJob("job-enqueued", job);
+    // A new job may satisfy a worker parked in a long-poll get-job.
+    this.hub.notify();
     return { status: 200, body: { jobId, status: "queued" as JobStatus } };
   }
 
-  private getJob(url: URL): { status: number; body: unknown } {
-    const workerId = url.searchParams.get("workerId") ?? "";
-    if (!workerId) return { status: 400, body: { error: "get-job requires ?workerId=" } };
+  /**
+   * One selection+assignment attempt (BRA-66): the check the
+   * long-poll get-job re-runs on every notify(). Pure on the null
+   * path — selection reads state only, and no scheduler decision is
+   * logged there (a parked wait re-checks every second; logging
+   * each re-check would spam scheduler.log). On the success path it
+   * assigns the job (status running + lease), records the quota
+   * dispatch, and persists — atomically, because the check runs
+   * synchronously inside the hub's notify() and JS is
+   * single-threaded. The caller logs the outcome once, from the
+   * returned decision/reason/blocked list.
+   */
+  private tryAssignJob(workerId: string): {
+    assignment: JobAssignment | null;
+    decision: string;
+    reason: string;
+    blocked: Array<{ jobId: string; detail: string }>;
+  } {
     const now = Date.now();
-    this.sweepLeases(now);
-    const worker = this.touchWorker(workerId, now);
+    if (!this.store.workers[workerId]) {
+      return { assignment: null, decision: "none-available", reason: `unknown worker ${workerId}`, blocked: [] };
+    }
     // Fresh estimates at selection time: actuals recorded since
     // enqueue may have changed the cost of a queued spec.
     const queued = Object.values(this.store.jobs)
@@ -428,6 +819,7 @@ export class WorkerServer {
           tokensEst: j.tokensEst,
         };
       });
+    const worker = this.store.workers[workerId];
     const workerView = {
       id: worker.id,
       lastSpec: worker.lastSpec,
@@ -440,7 +832,7 @@ export class WorkerServer {
     // job never starves the queue behind it. The loop is bounded by
     // the queue size; each iteration excludes at least one job.
     const excluded = new Set<string>();
-    const blockedReasons: string[] = [];
+    const blocked: Array<{ jobId: string; detail: string }> = [];
     let sel = this.scheduler.selectJobForWorker(
       workerView,
       queued.filter((j) => !excluded.has(j.jobId)),
@@ -456,10 +848,7 @@ export class WorkerServer {
       );
       if (check.allowed) break;
       excluded.add(job.jobId);
-      blockedReasons.push(`${job.jobId} (${check.reason}: ${check.detail})`);
-      // The exclusion itself is journaled: a blocked pick that a
-      // later pick worked around must still be visible in the log.
-      this.logScheduler(workerId, "quota-blocked", check.detail, job.jobId);
+      blocked.push({ jobId: job.jobId, detail: `${check.reason}: ${check.detail}` });
       sel = this.scheduler.selectJobForWorker(
         workerView,
         queued.filter((j) => !excluded.has(j.jobId)),
@@ -469,19 +858,15 @@ export class WorkerServer {
     }
     if (!sel.job) {
       if (excluded.size > 0) {
-        this.logScheduler(
-          workerId,
-          "none-quota",
-          `all ${excluded.size} candidate(s) quota-blocked: ${blockedReasons.join("; ")}`,
-          null,
-        );
-      } else {
-        this.logScheduler(workerId, sel.decision, sel.reason, null);
+        return {
+          assignment: null,
+          decision: "none-quota",
+          reason: `all ${excluded.size} candidate(s) quota-blocked`,
+          blocked,
+        };
       }
-      this.saveStore();
-      return { status: 200, body: { job: null } };
+      return { assignment: null, decision: sel.decision, reason: sel.reason, blocked };
     }
-    this.logScheduler(workerId, sel.decision, sel.reason, sel.job.jobId);
     const job = this.store.jobs[sel.job.jobId];
     this.quotas.recordDispatch(
       { isDecision: job.isDecision, cpuHeavy: job.cpuHeavy, tokensEst: job.tokensEst },
@@ -492,8 +877,17 @@ export class WorkerServer {
     job.workerId = workerId;
     job.assignedAt = now;
     job.leaseUntil = now + job.leaseMs;
+    // A new attempt is a fresh lease: the worker is alive at
+    // assignment (lastHeartbeatAt = assignedAt), the nudge state
+    // resets (the new worker gets its own warning shot). nudgeCount
+    // is cumulative across attempts — jobs.log is the per-attempt
+    // history. requeueReason is NOT cleared: it is the history of
+    // the last re-queue, and a poll that arrives after the retry
+    // still needs it to name the re-queue (BRA-61).
+    job.lastHeartbeatAt = now;
+    job.nudgedAt = null;
+    job.nudgeMessage = null;
     this.saveStore();
-    this.logJob("job-assigned", job, { decision: sel.decision });
     const assignment: JobAssignment = {
       jobId: job.jobId,
       spec: job.spec,
@@ -507,6 +901,66 @@ export class WorkerServer {
       leaseMs: job.leaseMs,
       leaseUntil: job.leaseUntil,
     };
+    return { assignment, decision: sel.decision, reason: sel.reason, blocked };
+  }
+
+  /**
+   * get-job, blocking (BRA-66): the call parks in the wait hub
+   * until a job is assignable to this worker, or waitMs expires.
+   * waitMs defaults to 60s (DEFAULT_GET_JOB_WAIT_MS); waitMs=0 is
+   * the old immediate return. The selection re-runs on every
+   * notify (enqueue, completion, lease expiry, the 1s sweep) — a
+   * worker neither spins when idle nor waits out a poll interval
+   * when a job arrives. The outcome is logged ONCE here, not in
+   * the check: a parked wait re-checks every second, and logging
+   * each re-check would spam scheduler.log.
+   */
+  private async getJob(url: URL, signal?: AbortSignal): Promise<{ status: number; body: unknown }> {
+    const workerId = url.searchParams.get("workerId") ?? "";
+    if (!workerId) return { status: 400, body: { error: "get-job requires ?workerId=" } };
+    const waitMs = WorkerServer.clampLongPoll(url.searchParams.get("waitMs"), DEFAULT_GET_JOB_WAIT_MS);
+    const now = Date.now();
+    this.sweepLeases(now);
+    this.touchWorker(workerId, now);
+    this.saveStore();
+    let last: { decision: string; reason: string; blocked: Array<{ jobId: string; detail: string }> } = {
+      decision: "none-available",
+      reason: "queue empty",
+      blocked: [],
+    };
+    const assignment = await this.hub.waitFor(
+      () => {
+        const r = this.tryAssignJob(workerId);
+        last = { decision: r.decision, reason: r.reason, blocked: r.blocked };
+        return r.assignment;
+      },
+      waitMs,
+      signal,
+    );
+    // The caller disconnected mid-wait (the waiter was unregistered
+    // and nothing was assigned to it): say nothing more — logging
+    // a "none-available" for a dead caller is noise, and the
+    // response goes nowhere anyway.
+    if (signal?.aborted) return { status: 200, body: { job: null } };
+    for (const b of last.blocked) {
+      this.logScheduler(workerId, "quota-blocked", b.detail, b.jobId);
+    }
+    if (!assignment) {
+      if (last.blocked.length) {
+        this.logScheduler(
+          workerId,
+          "none-quota",
+          `all ${last.blocked.length} candidate(s) quota-blocked: ${last.blocked.map((b) => b.detail).join("; ")}`,
+          null,
+        );
+      } else {
+        this.logScheduler(workerId, last.decision, last.reason, null);
+      }
+      return { status: 200, body: { job: null } };
+    }
+    this.logScheduler(workerId, last.decision, last.reason, assignment.jobId);
+    const job = this.store.jobs[assignment.jobId];
+    this.logJob("job-assigned", job, { decision: last.decision });
     return { status: 200, body: { job: assignment } };
   }
 
@@ -580,6 +1034,15 @@ export class WorkerServer {
         this.recordJobActual(job, now);
         this.saveStore();
         this.logJob("job-failed", job, { reason: "worker-error" });
+        // A terminal job wakes the tick agent (BRA-65: a job
+        // completing/failing is a wake event — the run it belonged
+        // to may now be drivable to completion or failure).
+        this.emitEvent("job-failed", {
+          jobId,
+          runId: job.runId,
+          trapId: job.trapId,
+          detail: { error: record },
+        });
         return { status: 200, body: { ok: true, status: "failed" as JobStatus } };
       }
       job.status = "queued";
@@ -587,8 +1050,12 @@ export class WorkerServer {
       job.assignedAt = null;
       job.leaseUntil = null;
       job.error = record;
+      job.requeues += 1;
+      job.requeueReason = "worker-error";
       this.saveStore();
       this.logJob("job-error-requeue", job, { reason: "worker-error" });
+      // The job is assignable again — wake parked get-job waiters.
+      this.hub.notify();
       return { status: 200, body: { ok: true, status: "queued" as JobStatus } };
     }
     job.status = "completed";
@@ -606,9 +1073,20 @@ export class WorkerServer {
     worker.totalCompleted += 1;
     this.saveStore();
     this.logJob("job-completed", job, { files: job.files?.length ?? 0 });
+    // A completed job wakes the tick agent (BRA-65) and may free a
+    // quota slot for a parked get-job waiter.
+    this.emitEvent("job-completed", { jobId, runId: job.runId, trapId: job.trapId });
     return { status: 200, body: { ok: true, status: "completed" as JobStatus } };
   }
 
+  /** Heartbeat: extend the lease by leaseMs from now. The response
+   * also carries a pending nudge (BRA-61) — the delivery channel to
+   * a worker that is still talking. A nudge is delivered once: the
+   * heartbeat that carries it clears nudgeMessage (nudgedAt /
+   * nudgeCount stay as the record). A heartbeat is also proof of
+   * life: it updates lastHeartbeatAt, so a heartbeating worker is
+   * never "silent" — only long-running, which the nudge already
+   * named. */
   private heartbeat(body: any): { status: number; body: unknown } {
     const jobId = body?.jobId;
     const workerId = body?.workerId;
@@ -626,9 +1104,16 @@ export class WorkerServer {
       };
     }
     job.leaseUntil = now + job.leaseMs;
+    job.lastHeartbeatAt = now;
     this.touchWorker(workerId, now);
+    // Deliver a pending nudge exactly once, with this heartbeat.
+    let nudge: { message: string; at: number } | null = null;
+    if (job.nudgeMessage !== null && job.nudgedAt !== null) {
+      nudge = { message: job.nudgeMessage, at: job.nudgedAt };
+      job.nudgeMessage = null;
+    }
     this.saveStore();
-    return { status: 200, body: { ok: true, cancelled: false, leaseUntil: job.leaseUntil } };
+    return { status: 200, body: { ok: true, cancelled: false, leaseUntil: job.leaseUntil, ...(nudge ? { nudge } : {}) } };
   }
 
   private cancelJob(body: any): { status: number; body: unknown } {
@@ -646,6 +1131,8 @@ export class WorkerServer {
     job.cancelReason = typeof body?.reason === "string" ? body.reason : "cancelled";
     this.saveStore();
     this.logJob("job-cancelled", job, { reason: job.cancelReason });
+    // A cancelled job may free a quota slot for a parked waiter.
+    this.hub.notify();
     return { status: 200, body: { ok: true, status: "cancelled" as JobStatus } };
   }
 
@@ -655,6 +1142,85 @@ export class WorkerServer {
     if (!job) return { status: 404, body: { error: `no job ${jobId}` } };
     this.sweepLeases();
     return { status: 200, body: this.store.jobs[jobId] };
+  }
+
+  // ------------------------------------------------------------ tick (BRA-65)
+  /**
+   * The tick agent's blocking long-poll. Holds until a system event
+   * arrives or timeoutMs fires (default 60s, max 120s). Events
+   * already queued return at once; otherwise the call parks in the
+   * wait hub (the SAME primitive get-job uses — one mechanism, not
+   * two). At most one tick call may be pending: a second concurrent
+   * call is a 409, because two tick agents driving one queue is a
+   * real problem (G13) and the 409 says so loudly. Every tick call
+   * — and every tick-beat — refreshes the liveness file the
+   * watchdog reads; a tick agent that stops calling is presumed
+   * dead once the file goes stale.
+   */
+  private async tick(url: URL, signal?: AbortSignal): Promise<{ status: number; body: unknown }> {
+    const timeoutMs = WorkerServer.clampLongPoll(url.searchParams.get("timeoutMs"), DEFAULT_TICK_TIMEOUT_MS);
+    if (this.tickPending) {
+      return {
+        status: 409,
+        body: {
+          error:
+            "a tick call is already pending (another tick agent may be running) — wait a few seconds and retry; if this persists, escalate: two tick agents must not drive one queue",
+        },
+      };
+    }
+    this.recordTick(0);
+    this.tickPending = true;
+    try {
+      // The request signal aborts when the tick client disconnects:
+      // the waiter is unregistered (BRA-81) and the slot is freed
+      // by the finally, so a dead tick agent holds it for no longer
+      // than the time its client was actually connected.
+      const events = await this.hub.waitFor(() => this.drainEvents(), timeoutMs, signal);
+      const delivered = events ?? [];
+      this.recordTick(delivered.length);
+      return {
+        status: 200,
+        body: { events: delivered, timedOut: events === null, at: new Date().toISOString() },
+      };
+    } finally {
+      this.tickPending = false;
+    }
+  }
+
+  /** Liveness heartbeat for a tick agent acting between ticks (a
+   * long queue drive is not a tick call, so the agent beats while
+   * it acts — otherwise the watchdog would presume it dead
+   * mid-drive). Refreshes the same liveness file tick() writes. */
+  private tickBeat(): { status: number; body: unknown } {
+    this.recordTick(0);
+    let lastTickAt: string | null = null;
+    try {
+      lastTickAt = (JSON.parse(fs.readFileSync(this.tickStatePath(), "utf8")) as any).lastTickAt ?? null;
+    } catch {
+      lastTickAt = null;
+    }
+    return { status: 200, body: { ok: true, lastTickAt } };
+  }
+
+  /** Ingest one system event from a host process (run-submitted,
+   * workflow-completed/failed, gate-held/answered, timer-fired).
+   * The body is a SystemEvent minus `at` (stamped here). Unknown
+   * event types are a 400 — a typo'd event must not silently
+   * vanish. Best-effort by design: the caller swallows failures,
+   * and the tick agent's timeout + catch-up sweep bound the damage
+   * of a dropped event. */
+  private ingestEvent(body: any): { status: number; body: unknown } {
+    const type = body?.type;
+    if (typeof type !== "string" || !(SYSTEM_EVENT_TYPES as string[]).includes(type)) {
+      return { status: 400, body: { error: `unknown event type ${JSON.stringify(type)} (expected one of ${SYSTEM_EVENT_TYPES.join(", ")})` } };
+    }
+    this.emitEvent(type as SystemEventType, {
+      ...(typeof body?.runId === "string" ? { runId: body.runId } : {}),
+      ...(typeof body?.jobId === "string" ? { jobId: body.jobId } : {}),
+      ...(typeof body?.trapId === "string" ? { trapId: body.trapId } : {}),
+      ...(body?.detail !== undefined ? { detail: body.detail } : {}),
+    });
+    return { status: 200, body: { ok: true, pending: this.events.length } };
   }
 
   private readJson(req: Request): Promise<any> {
@@ -686,6 +1252,10 @@ export class WorkerServer {
             stateDir: this.config.stateDir,
             jobspecDir: this.config.jobspecDir,
             scheduler: "dispatch-v1",
+            tickPending: this.tickPending,
+            pendingEvents: this.events.length,
+            droppedEvents: this.droppedEvents,
+            waiters: this.hub.waiterCount(),
             quotas: {
               maxPoolSize: this.config.maxPoolSize,
               maxCpuSlots: this.config.maxCpuSlots,
@@ -709,7 +1279,21 @@ export class WorkerServer {
           return json(r.body, r.status);
         }
         if (req.method === "GET" && url.pathname === "/get-job") {
-          const r = this.getJob(url);
+          const r = await this.getJob(url, req.signal);
+          return json(r.body, r.status);
+        }
+        if (req.method === "GET" && url.pathname === "/tick") {
+          const r = await this.tick(url, req.signal);
+          return json(r.body, r.status);
+        }
+        if (req.method === "POST" && url.pathname === "/tick-beat") {
+          const r = this.tickBeat();
+          return json(r.body, r.status);
+        }
+        if (req.method === "POST" && url.pathname === "/event") {
+          const body = await this.readJson(req);
+          if (body === null) return json({ error: "event body must be JSON" }, 400);
+          const r = this.ingestEvent(body);
           return json(r.body, r.status);
         }
         if (req.method === "POST" && url.pathname === "/complete-job") {
@@ -740,6 +1324,22 @@ export class WorkerServer {
         }
         if (req.method === "GET" && url.pathname === "/jobspec") {
           const spec = url.searchParams.get("spec") ?? "";
+          // BRA-89: a ?hash= names the enqueue-time prose — serve
+          // the content-addressed snapshot when one exists, so a
+          // pool worker re-reading its spec gets the prose as
+          // enqueued even when the live file has since changed.
+          // No snapshot (a job enqueued before BRA-89, or a hash
+          // that was never enqueued): fall back to the live file,
+          // whose hash the response carries — the worker's cache
+          // check then re-fetches on the next job, never trusting
+          // mismatched prose as the pinned one.
+          const hash = url.searchParams.get("hash") ?? "";
+          if (/^[0-9a-f]{64}$/.test(hash)) {
+            const snap = this.jobspecSnapshotPath(hash);
+            if (fs.existsSync(snap)) {
+              return json({ spec, hash, text: fs.readFileSync(snap, "utf8") });
+            }
+          }
           const p = this.specFile(spec);
           if (!p) return json({ error: `no jobspec file for "${spec}"` }, 404);
           return json({ spec, hash: shaFile(p), text: fs.readFileSync(p, "utf8") });
@@ -779,8 +1379,25 @@ export class WorkerServer {
         return json({ error: e instanceof Error ? e.message : String(e) }, 500);
       }
     };
-    this.server = Bun.serve({ port: this.config.port, hostname: "127.0.0.1", fetch: handler });
-    this.sweepTimer = setInterval(() => this.sweepLeases(), 1000);
+    // idleTimeout must cover the longest long-poll (MAX_LONG_POLL_MS
+    // = 120s): Bun.serve() defaults to 10s and RESETS any request
+    // that takes longer (the client sees ECONNRESET). 180s gives the
+    // 120s max poll 60s of margin. Without this, get-job and tick
+    // long-polls die at 10s.
+    this.server = Bun.serve({
+      port: this.config.port,
+      hostname: "127.0.0.1",
+      idleTimeout: Math.ceil(MAX_LONG_POLL_MS / 1000) + 60,
+      fetch: handler,
+    });
+    // The sweep re-queues expired leases AND re-notifies every
+    // second even when nothing expired: a parked get-job waiter's
+    // selection is time-based (affinity-hold expiry, quota windows),
+    // so it must re-check on the clock, not only on state changes.
+    this.sweepTimer = setInterval(() => {
+      this.sweepLeases();
+      this.hub.notify();
+    }, 1000);
     console.log(
       `agentts worker queue listening on http://127.0.0.1:${this.config.port} (state ${this.dir}, lease ${this.config.leaseMs}ms, maxAttempts ${this.config.maxAttempts}, affinityHold ${this.config.affinityHoldMs}ms)`,
     );

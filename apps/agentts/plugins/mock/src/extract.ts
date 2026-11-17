@@ -109,6 +109,21 @@ export interface SiteEntry {
   callSites: SiteCall[];
 }
 
+export interface WorkflowEntry {
+  /** The default-exported entry function's name (for diagnostics;
+   * the driver imports the default, so the name does not matter to
+   * it). */
+  name: string;
+  /** Named input type, or null when the entry takes no parameter. */
+  inputType: string | null;
+  /** Named output type. */
+  outputType: string;
+  /** JSON Schema for the input type, or null when inputType is null. */
+  inputSchema: any | null;
+  /** JSON Schema for the output type. */
+  outputSchema: any;
+}
+
 export interface Extraction {
   sourceHash: string;
   /** Frozen copy of the workflow source the schemas were derived from. */
@@ -119,6 +134,15 @@ export interface Extraction {
   moduleHash: string | null;
   /** Site table keyed by runtime key. */
   sites: Record<string, SiteEntry>;
+  /** The workflow's entry function (the default export): its input
+   * and output types and schemas. A workflow is a function — one
+   * JSON-capable input in, one JSON-capable output out — and the gate
+   * refuses a file with no exported entry function. */
+  entry: WorkflowEntry;
+  /** SHA-256 over the transitive relative imports' contents (null
+   * when the workflow imports no local files). A library change
+   * invalidates the cache even when the workflow source is unchanged. */
+  depHash: string | null;
   /** The first-run gate result for this content hash. A cache entry
    * is only trusted when gate.passed is true AND the compiler
    * version matches the one installed now AND the checker version
@@ -187,6 +211,114 @@ function readTypeArg(
     return null;
   }
   return arg.getText();
+}
+
+/** The workflow's entry function: the file's default export. A
+ * workflow is a function — `export default function <name>(input:
+ * <Input>): <Output>` — and the gate refuses a file with no exported
+ * entry function (a global script). The entry takes 0 or 1
+ * parameters (one JSON-capable input); its return type is the one
+ * JSON-capable output. Returns null when the entry is missing or
+ * malformed (problems recorded). */
+interface EntryInfo {
+  name: string;
+  inputType: string | null;
+  outputType: string;
+  inputNode?: ts.TypeNode;
+  outputNode?: ts.TypeNode;
+}
+
+function findEntry(sf: ts.SourceFile, problems: string[]): EntryInfo | null {
+  let fn: ts.FunctionDeclaration | ts.FunctionExpression | ts.ArrowFunction | null = null;
+  let fnName = "default";
+  for (const st of sf.statements) {
+    if (ts.isFunctionDeclaration(st)) {
+      const mods = ts.getModifiers(st) ?? [];
+      const isDefault = mods.some((m) => m.kind === ts.SyntaxKind.DefaultKeyword);
+      const isExport = mods.some((m) => m.kind === ts.SyntaxKind.ExportKeyword);
+      if (isDefault && isExport) {
+        fn = st;
+        fnName = st.name?.text ?? "default";
+        break;
+      }
+    } else if (ts.isExportAssignment(st) && !st.isExportEquals) {
+      const expr = st.expression;
+      if (ts.isFunctionExpression(expr) || ts.isArrowFunction(expr)) {
+        fn = expr;
+        fnName = "default";
+      } else if (ts.isIdentifier(expr)) {
+        const target = expr.text;
+        for (const s2 of sf.statements) {
+          if (ts.isFunctionDeclaration(s2) && s2.name?.text === target) {
+            fn = s2;
+            fnName = target;
+            break;
+          }
+          if (ts.isVariableStatement(s2)) {
+            for (const d of s2.declarationList.declarations) {
+              if (
+                ts.isIdentifier(d.name) &&
+                d.name.text === target &&
+                d.initializer &&
+                (ts.isFunctionExpression(d.initializer) || ts.isArrowFunction(d.initializer))
+              ) {
+                fn = d.initializer;
+                fnName = target;
+                break;
+              }
+            }
+            if (fn) break;
+          }
+        }
+        if (!fn) {
+          problems.push(
+            `the default export \`${target}\` is not a function — a workflow must export a default entry function: \`export default function <name>(input: <Input>): <Output>\``,
+          );
+        }
+      } else {
+        problems.push(
+          `the default export is not a function — a workflow must export a default entry function: \`export default function <name>(input: <Input>): <Output>\``,
+        );
+      }
+      break;
+    }
+  }
+  if (!fn) {
+    problems.push(
+      `workflow must export a default entry function: \`export default function <name>(input: <Input>): <Output>\` — a workflow file that is a global script (top-level code, no exported entry function) is refused by the gate`,
+    );
+    return null;
+  }
+  const params = fn.parameters;
+  if (params.length > 1) {
+    problems.push(
+      `the entry function \`${fnName}\` takes ${params.length} parameters — it must take 0 or 1 (one JSON-capable input)`,
+    );
+    return null;
+  }
+  let inputType: string | null = null;
+  let inputNode: ts.TypeNode | undefined;
+  if (params.length === 1) {
+    const p = params[0];
+    if (!p.type) {
+      problems.push(
+        `the entry function \`${fnName}\`'s input parameter must declare a concrete, named type — write \`export default function ${fnName}(input: <Input>): <Output>\``,
+      );
+      return null;
+    }
+    inputType = readTypeArg(p.type, "input", `entry function \`${fnName}\``, problems);
+    inputNode = p.type;
+    if (inputType === null) return null;
+  }
+  if (!fn.type) {
+    problems.push(
+      `the entry function \`${fnName}\` must declare a return type — one JSON-capable output — write \`export default function ${fnName}(input: <Input>): <Output>\``,
+    );
+    return null;
+  }
+  const outputType = readTypeArg(fn.type, "output", `entry function \`${fnName}\``, problems);
+  if (!outputType) return null;
+  return { name: fnName, inputType, outputType, inputNode, outputNode: fn.type };
 }
 
 /** A generated schema containing an empty `{}` subschema is
@@ -336,6 +468,10 @@ function checkJsonLikeType(
   label: string,
   ancestors: Set<ts.Type>,
   problems: string[],
+  // BRA-106: parameter-name -> concrete-type substitution from one
+  // instantiation; a type parameter present in the map is walked as
+  // its mapped type instead of rejected.
+  subst?: Map<string, ts.Type>,
 ): void {
   const flags = t.getFlags();
   if (flags & ts.TypeFlags.Any) {
@@ -347,6 +483,17 @@ function checkJsonLikeType(
     return;
   }
   if (flags & ts.TypeFlags.TypeParameter) {
+    // BRA-106: a type parameter replaced by one instantiation's
+    // substitution is concrete — walk the mapped type instead. A
+    // parameter with no mapping (never instantiated, or nested
+    // generics) is still the loud unresolved-parameter error; a
+    // mapping back to the same parameter (a self-recursive generic
+    // call) cannot specialize either.
+    const mapped = subst?.get(checker.typeToString(t));
+    if (mapped && mapped !== t) {
+      checkJsonLikeType(checker, mapped, path, label, ancestors, problems, subst);
+      return;
+    }
     problems.push(`${label} at ${path}: unresolved type parameter ${checker.typeToString(t)} — the M2 checker requires concrete, named types at the call site`);
     return;
   }
@@ -399,11 +546,11 @@ function checkJsonLikeType(
         problems.push(`${label} at ${path}: union is only undefined — use null instead`);
         return;
       }
-      for (const m of members) checkJsonLikeType(checker, m, path, label, ancestors, problems);
+      for (const m of members) checkJsonLikeType(checker, m, path, label, ancestors, problems, subst);
       return;
     }
     if (t.isIntersection()) {
-      for (const m of t.types) checkJsonLikeType(checker, m, path, label, ancestors, problems);
+      for (const m of t.types) checkJsonLikeType(checker, m, path, label, ancestors, problems, subst);
       return;
     }
     if (checker.isArrayType(t)) {
@@ -412,12 +559,12 @@ function checkJsonLikeType(
         problems.push(`${label} at ${path}: array without an element type`);
         return;
       }
-      checkJsonLikeType(checker, el, `${path}[]`, label, ancestors, problems);
+      checkJsonLikeType(checker, el, `${path}[]`, label, ancestors, problems, subst);
       return;
     }
     if (checker.isTupleType(t)) {
       const els = (t as ts.TypeReference).typeArguments ?? [];
-      els.forEach((el, i) => checkJsonLikeType(checker, el, `${path}[${i}]`, label, ancestors, problems));
+      els.forEach((el, i) => checkJsonLikeType(checker, el, `${path}[${i}]`, label, ancestors, problems, subst));
       return;
     }
     if (flags & ts.TypeFlags.Object) {
@@ -431,15 +578,19 @@ function checkJsonLikeType(
             problems.push(`${label} at ${path}.${prop.getName()}: property is only undefined — use null instead`);
             continue;
           }
-          pt = rest.length === 1 ? rest[0] : checker.getUnionType(rest);
+          // Check each remaining member directly: TypeChecker.getUnionType
+          // is internal-only in TS 5.9 (not on the public interface), so
+          // the union is never reconstituted — same check, member-wise.
+          for (const m of rest) checkJsonLikeType(checker, m, `${path}.${prop.getName()}`, label, ancestors, problems, subst);
+          continue;
         }
-        checkJsonLikeType(checker, pt, `${path}.${prop.getName()}`, label, ancestors, problems);
+        checkJsonLikeType(checker, pt, `${path}.${prop.getName()}`, label, ancestors, problems, subst);
       }
       const strIdx = t.getStringIndexType();
-      if (strIdx) checkJsonLikeType(checker, strIdx, `${path}[string]`, label, ancestors, problems);
+      if (strIdx) checkJsonLikeType(checker, strIdx, `${path}[string]`, label, ancestors, problems, subst);
       else {
         const numIdx = t.getNumberIndexType();
-        if (numIdx) checkJsonLikeType(checker, numIdx, `${path}[number]`, label, ancestors, problems);
+        if (numIdx) checkJsonLikeType(checker, numIdx, `${path}[number]`, label, ancestors, problems, subst);
       }
       return;
     }
@@ -481,8 +632,11 @@ function resolveContractType(
  * host's fixed-type schemas and the pre-check resolve from). The
  * workflow's own import specifier decides — the plugin's copy is
  * only the fallback when the workflow imports no agentts module
- * (fixed types cannot arise then anyway). */
-function resolveAgenttsModule(source: string, workflowDir: string): string | null {
+ * (fixed types cannot arise then anyway). Exported for the host's
+ * frozen-copy freeze (BRA-71): the module is part of the frozen
+ * closure, at its relative position, so the frozen entry's import
+ * resolves exactly as the live one did. */
+export function resolveAgenttsModule(source: string, workflowDir: string): string | null {
   const probe = ts.createSourceFile("probe.ts", source, ts.ScriptTarget.Latest, false);
   for (const st of probe.statements) {
     if (ts.isImportDeclaration(st) && ts.isStringLiteral(st.moduleSpecifier) && st.moduleSpecifier.text.includes("agentts")) {
@@ -496,6 +650,54 @@ function resolveAgenttsModule(source: string, workflowDir: string): string | nul
     }
   }
   return null;
+}
+
+/**
+ * The workflow file plus its transitive RELATIVE imports (library
+ * workflows like JudgeFixLoop live in imported files — their trap
+ * calls must extract too). The agentts module itself is excluded:
+ * its internal trap() calls are the module implementation, not
+ * workflow trap calls (fixed types resolve from it separately).
+ * Non-relative and node_modules imports are excluded.
+ */
+export function collectWorkflowFiles(entryAbs: string): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  const walk = (fileAbs: string): void => {
+    const abs = path.resolve(fileAbs);
+    if (seen.has(abs) || !fs.existsSync(abs)) return;
+    seen.add(abs);
+    out.push(abs);
+    const source = fs.readFileSync(abs, "utf8");
+    const probe = ts.createSourceFile(abs, source, ts.ScriptTarget.Latest, false);
+    for (const st of probe.statements) {
+      if (!ts.isImportDeclaration(st) || !ts.isStringLiteral(st.moduleSpecifier)) continue;
+      const spec = st.moduleSpecifier.text;
+      if (!spec.startsWith(".")) continue;
+      if (spec.includes("agentts")) continue;
+      const resolved = ts.resolveModuleName(spec, abs, GATE_COMPILER_OPTIONS, ts.sys);
+      const target = resolved.resolvedModule?.resolvedFileName;
+      if (!target || target.includes("node_modules")) continue;
+      walk(target);
+    }
+  };
+  walk(entryAbs);
+  return out;
+}
+
+/** Combined hash of the workflow's relative imports (contents, sorted
+ * by path) — null when there are none. */
+export function depHashFor(files: string[], entryAbs: string): string | null {
+  const deps = files.filter((f) => path.resolve(f) !== path.resolve(entryAbs)).sort();
+  if (!deps.length) return null;
+  const h = crypto.createHash("sha256");
+  for (const f of deps) {
+    h.update(path.relative(path.dirname(entryAbs), f));
+    h.update("\0");
+    h.update(fs.readFileSync(f));
+    h.update("\0");
+  }
+  return h.digest("hex");
 }
 
 export function extractWorkflow(
@@ -520,12 +722,28 @@ export function extractWorkflow(
   const abs = path.resolve(workflowPath);
   const source = fs.readFileSync(abs, "utf8");
   const sourceHash = crypto.createHash("sha256").update(source).digest("hex");
+  // Library files: a change there must invalidate the cache even
+  // when the workflow source is unchanged.
+  const workflowFiles = collectWorkflowFiles(abs);
+  const depHash = depHashFor(workflowFiles, abs);
   fs.mkdirSync(cacheDir, { recursive: true });
   const cachePath = path.join(cacheDir, `${sourceHash}.json`);
-  // The agentts module this workflow imports (resolved from its own
-  // import specifier) — the fixed-type schemas and the pre-check
-  // resolve from this file, and its hash invalidates the cache.
-  const importedModule = resolveAgenttsModule(source, path.dirname(abs));
+  // The agentts module this workflow imports — resolved from every
+  // file in the closure, not just the entry: a workflow that only
+  // calls a library (BRA-106: the trap calls live in the lib) never
+  // imports agentts itself, so entry-only resolution falls back to
+  // the module beside this file, which is NOT in the extraction
+  // program when the entry is a frozen copy — and the pre-check then
+  // fails to resolve the fixed types (DecideSpec, ...). First hit
+  // wins; every file in one closure resolves to the same module.
+  let importedModule = resolveAgenttsModule(source, path.dirname(abs));
+  if (!importedModule) {
+    for (const f of workflowFiles) {
+      if (path.resolve(f) === abs) continue;
+      importedModule = resolveAgenttsModule(fs.readFileSync(f, "utf8"), path.dirname(f));
+      if (importedModule) break;
+    }
+  }
   const modulePath = importedModule ?? path.join(import.meta.dir, "agentts.ts");
   const moduleHash = fs.existsSync(modulePath)
     ? crypto.createHash("sha256").update(fs.readFileSync(modulePath)).digest("hex")
@@ -543,6 +761,7 @@ export function extractWorkflow(
         entry.sourceHash === sourceHash &&
         crypto.createHash("sha256").update(entry.source).digest("hex") === sourceHash &&
         (entry.moduleHash === null || entry.moduleHash === moduleHash) &&
+        entry.depHash === depHash &&
         entry.gate?.passed === true &&
         entry.gate.compilerVersion === ts.version &&
         entry.gate.checkerVersion === CHECKER_VERSION
@@ -576,40 +795,50 @@ export function extractWorkflow(
   // "sourceFile.text" on program nodes.
   program.getSemanticDiagnostics();
 
-  // Walk the PROGRAM's SourceFile, not a fresh parse: the checker can
+  // Walk the PROGRAM's SourceFiles, not fresh parses: the checker can
   // only resolve types from nodes that belong to the program — nodes
   // from a standalone createSourceFile resolve to `any`, which the
-  // pre-check would (correctly but uselessly) reject.
-  const sf = program.getSourceFile(abs);
-  if (!sf) {
-    throw new ExtractionError([`could not load ${abs} into the type-checker program`]);
-  }
+  // pre-check would (correctly but uselessly) reject. The walk covers
+  // the workflow file AND its transitive relative imports (library
+  // workflows): a trap call in an imported library file is a trap
+  // call of this workflow, with its contract types declared there.
   const problems: string[] = [];
-
-  // Which names are the agentts module's wrappers in this file: the
-  // names imported from a module specifier containing "agentts".
-  const importedWrappers = new Set<string>();
   let importsAgentts = false;
-  for (const st of sf.statements) {
-    if (ts.isImportDeclaration(st) && ts.isStringLiteral(st.moduleSpecifier) && st.moduleSpecifier.text.includes("agentts")) {
-      importsAgentts = true;
-      const clause = st.importClause;
-      if (clause?.namedBindings && ts.isNamedImports(clause.namedBindings)) {
-        for (const el of clause.namedBindings.elements) {
-          importedWrappers.add(el.name.text);
+
+  interface FileCtx {
+    sf: ts.SourceFile;
+    fileAbs: string;
+    importedWrappers: Set<string>;
+    localNames: Set<string>;
+  }
+  function fileCtx(fileAbs: string): FileCtx | null {
+    const sf = program.getSourceFile(fileAbs);
+    if (!sf) return null;
+    // Which names are the agentts module's wrappers in this file: the
+    // names imported from a module specifier containing "agentts".
+    const importedWrappers = new Set<string>();
+    for (const st of sf.statements) {
+      if (ts.isImportDeclaration(st) && ts.isStringLiteral(st.moduleSpecifier) && st.moduleSpecifier.text.includes("agentts")) {
+        importsAgentts = true;
+        const clause = st.importClause;
+        if (clause?.namedBindings && ts.isNamedImports(clause.namedBindings)) {
+          for (const el of clause.namedBindings.elements) {
+            importedWrappers.add(el.name.text);
+          }
         }
       }
     }
+    // Local declarations of the wrapper names (a workflow's own helper
+    // named job/exec/... is not a trap call).
+    const localNames = new Set<string>();
+    function collectLocals(node: ts.Node): void {
+      if (ts.isFunctionDeclaration(node) && node.name) localNames.add(node.name.text);
+      if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name)) localNames.add(node.name.text);
+      ts.forEachChild(node, collectLocals);
+    }
+    collectLocals(sf);
+    return { sf, fileAbs, importedWrappers, localNames };
   }
-  // Local declarations of the wrapper names (a workflow's own helper
-  // named job/exec/... is not a trap call).
-  const localNames = new Set<string>();
-  function collectLocals(node: ts.Node): void {
-    if (ts.isFunctionDeclaration(node) && node.name) localNames.add(node.name.text);
-    if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name)) localNames.add(node.name.text);
-    ts.forEachChild(node, collectLocals);
-  }
-  collectLocals(sf);
 
   interface FoundSite {
     key: string;
@@ -629,10 +858,32 @@ export function extractWorkflow(
      * declaration name in the module file. */
     inputNode?: ts.TypeNode;
     outputNode?: ts.TypeNode;
+    /** BRA-106: when this site's trap call sits inside a generic
+     * function, the enclosing generic function (its declaration +
+     * file + type-parameter names), recorded by pushSite so the
+     * specialization pass can re-resolve the site per instantiation.
+     * Absent for concrete sites. */
+    genericFn?: { decl: ts.FunctionLikeDeclaration; file: string; paramNames: string[] };
+    /** BRA-106: for a specialized site, the parameter-name ->
+     * concrete-type substitution from one instantiation, used by the
+     * pre-check to walk the resolved (unsubstituted) type with its
+     * type parameters replaced. Absent for concrete sites. */
+    subst?: Map<string, ts.Type>;
+    /** BRA-106: for a specialized site, the synthetic alias the
+     * schema generator must generate per side (name + alias file),
+     * because the generator resolves root types by declaration name.
+     * The site's inputType/outputType keep the specialized TEXT (the
+     * human-meaningful contract name); the alias is only the
+     * generator's entry point. One side carries a gen entry only when
+     * its type mentions a parameter; the other side keeps its
+     * original file and no alias. */
+    inputGen?: { file: string; name: string };
+    outputGen?: { file: string; name: string };
   }
   const found: FoundSite[] = [];
 
   function pushSite(
+    ctx: FileCtx,
     node: ts.CallExpression,
     key: string,
     kind: string,
@@ -644,15 +895,34 @@ export function extractWorkflow(
     outputNode?: ts.TypeNode,
   ): void {
     if (!outputType) return; // problem already recorded
-    const { line, character } = sf.getLineAndCharacterOfPosition(node.getStart(sf));
-    found.push({ key, kind, line: line + 1, column: character + 1, inputType, outputType, inputFile, outputFile, inputNode, outputNode });
+    const { line, character } = ctx.sf.getLineAndCharacterOfPosition(node.getStart(ctx.sf));
+    // BRA-106: the enclosing generic function, if any — the
+    // specialization pass re-resolves this site per instantiation of
+    // that function. Walk up past non-generic thunks (e.g. the `all()`
+    // branch callbacks) to the nearest function-like declaration that
+    // declares type parameters.
+    let genericFn: FoundSite["genericFn"];
+    let cur: ts.Node | undefined = node.parent;
+    while (cur) {
+      if (
+        (ts.isFunctionDeclaration(cur) || ts.isFunctionExpression(cur) || ts.isArrowFunction(cur) || ts.isMethodDeclaration(cur)) &&
+        cur.typeParameters &&
+        cur.typeParameters.length > 0
+      ) {
+        genericFn = { decl: cur, file: ctx.fileAbs, paramNames: cur.typeParameters.map((p) => p.name.text) };
+        break;
+      }
+      cur = cur.parent;
+    }
+    found.push({ key, kind, line: line + 1, column: character + 1, inputType, outputType, inputFile, outputFile, inputNode, outputNode, genericFn });
   }
 
-  function visit(node: ts.Node): void {
+  function visit(ctx: FileCtx, node: ts.Node): void {
+    const { sf, fileAbs, importedWrappers, localNames } = ctx;
     if (ts.isCallExpression(node)) {
       const name = calleeName(node.expression);
       if (name !== null && (name === "trap" || WRAPPER_NAMES.has(name))) {
-        const where = `${abs}:${loc(sf, node)}`;
+        const where = `${fileAbs}:${loc(sf, node)}`;
         const args = node.typeArguments ?? [];
         if (name === "trap") {
           // Direct trap() call.
@@ -707,7 +977,7 @@ export function extractWorkflow(
                 const spec = literalProp(argExpr, "spec") ?? literalProp(argExpr, "op");
                 if (spec !== null) key = `job:${spec}`;
               }
-              pushSite(node, key, "trap", inputType, outputType, abs, abs, inputNode, outputNode);
+              pushSite(ctx, node, key, "trap", inputType, outputType, fileAbs, fileAbs, inputNode, outputNode);
             }
           }
         } else if (importedWrappers.has(name)) {
@@ -727,7 +997,7 @@ export function extractWorkflow(
               );
             }
             if (inputType && outputType && spec !== null) {
-              pushSite(node, `job:${spec}`, "job", inputType, outputType, abs, abs, args[0], args[1]);
+              pushSite(ctx, node, `job:${spec}`, "job", inputType, outputType, fileAbs, fileAbs, args[0], args[1]);
             }
           } else if (name === "decide") {
             if (args.length !== 1) {
@@ -739,7 +1009,7 @@ export function extractWorkflow(
             if (outputType) {
               // Input DecideSpec lives in the module; the output type
               // is declared in the workflow.
-              pushSite(node, "decide", "decide", "DecideSpec", outputType, modulePath, abs, undefined, args[0]);
+              pushSite(ctx, node, "decide", "decide", "DecideSpec", outputType, modulePath, fileAbs, undefined, args[0]);
             }
           } else {
             // Fixed-result wrappers: no type args, types from the module.
@@ -749,7 +1019,7 @@ export function extractWorkflow(
               );
             } else {
               const [inputType, outputType] = FIXED_WRAPPER_TYPES[name];
-              pushSite(node, name, name, inputType, outputType, modulePath, modulePath);
+              pushSite(ctx, node, name, name, inputType, outputType, modulePath, modulePath);
             }
           }
         } else if (!localNames.has(name)) {
@@ -760,11 +1030,315 @@ export function extractWorkflow(
         // A locally-declared job/exec/... is the workflow's own helper,
         // not a trap call: skip silently.
       }
+      // BRA-47: a decisionCascade(...) call synthesizes the four tier
+      // sites. The extractor walks the workflow file and its relative
+      // imports but EXCLUDES the agentts module (its internal trap()
+      // calls are the implementation, not workflow trap calls) — so
+      // the trap calls inside decisionCascade never extract on their
+      // own, and without these sites dispatch would fail loudly ("no
+      // extracted schema"). One cascade call synthesizes all four
+      // tier sites, with the contracts from the module's own types
+      // (resolved from modulePath, the same way the fixed-wrapper
+      // types resolve). The job tier's spec is the literal
+      // "decision" jobspec (see decisionCascade in agentts.ts). Two
+      // cascade calls in one workflow synthesize identical sites —
+      // the byKey dedupe keeps the first; a direct decide<Other> (or
+      // a direct job<"decision"> with different types) for the same
+      // key is the usual one-key-one-contract extraction conflict.
+      // A decisionCascade that is NOT imported from the agentts
+      // module (a local helper sharing the name) synthesizes nothing.
+      if (name === "decisionCascade" && importedWrappers.has(name)) {
+        pushSite(ctx, node, "exec", "exec", "ExecSpec", "ExecResult", modulePath, modulePath);
+        pushSite(ctx, node, "decide", "decide", "DecideSpec", "DecideTierResult", modulePath, modulePath);
+        pushSite(ctx, node, "job:decision", "job", "DecisionJobInput", "DecisionJobResult", modulePath, modulePath);
+        pushSite(ctx, node, "gate", "gate", "GateSpec", "GateResult", modulePath, modulePath);
+      }
     }
-    ts.forEachChild(node, visit);
+    ts.forEachChild(node, (child) => visit(ctx, child));
   }
-  visit(sf);
+  // BRA-106 specialization: trap sites inside generic functions are
+  // re-resolved per instantiation of that function, so a generic
+  // library workflow can call traps directly. The checker fully
+  // resolves generics at instantiation sites — the extractor just
+  // never asked there: it resolved each trap site in place, where the
+  // type parameters are still unresolved. This pass asks at the call
+  // sites instead: for each generic function with trap calls, enumerate
+  // its call sites in the workflow closure, read the concrete type
+  // arguments there, and re-resolve the inner trap sites under that
+  // substitution. Boundaries (loud, never silent):
+  //  - explicit type arguments are required at the call site: the
+  //    checker's instantiation mapping is not retrievable for inferred
+  //    calls through the public API (verified by probe, TS 5.9.3), so
+  //    an inferred call is a loud problem telling the author to pass
+  //    explicit type arguments;
+  //  - nested generics (a generic function called from generic
+  //    context) do not specialize transitively: the specialized text
+  //    still mentions a parameter and the pre-check rejects it loudly.
+  function specializeGenericSites(checker: ts.TypeChecker): void {
+    function fnName(decl: ts.FunctionLikeDeclaration): string {
+      if (ts.isFunctionDeclaration(decl) && decl.name) return decl.name.text;
+      const parent = decl.parent;
+      if (
+        (ts.isFunctionExpression(decl) || ts.isArrowFunction(decl)) &&
+        ts.isVariableDeclaration(parent) &&
+        ts.isIdentifier(parent.name)
+      ) {
+        return parent.name.text;
+      }
+      return "anonymous";
+    }
+    function fnSymbol(decl: ts.FunctionLikeDeclaration): ts.Symbol | null {
+      if (ts.isFunctionDeclaration(decl) && decl.name) {
+        return checker.getSymbolAtLocation(decl.name) ?? null;
+      }
+      const parent = decl.parent;
+      if (
+        (ts.isFunctionExpression(decl) || ts.isArrowFunction(decl)) &&
+        ts.isVariableDeclaration(parent) &&
+        ts.isIdentifier(parent.name)
+      ) {
+        return checker.getSymbolAtLocation(parent.name) ?? null;
+      }
+      return null;
+    }
+    // Call sites of one generic function in the workflow closure:
+    // call expressions whose callee resolves (through import aliases)
+    // to the function's symbol. Property-access calls (ns.fn) are not
+    // enumerated — library workflows are called by bare name.
+    function findCallSites(decl: ts.FunctionLikeDeclaration): { call: ts.CallExpression; file: string }[] {
+      const sym = fnSymbol(decl);
+      if (!sym) return [];
+      const out: { call: ts.CallExpression; file: string }[] = [];
+      for (const fileAbs of workflowFiles) {
+        const sf = program.getSourceFile(fileAbs);
+        if (!sf) continue;
+        const visitCall = (node: ts.Node): void => {
+          if (ts.isCallExpression(node) && ts.isIdentifier(node.expression)) {
+            const calleeSym = checker.getSymbolAtLocation(node.expression);
+            if (calleeSym) {
+              const target =
+                calleeSym.flags & ts.SymbolFlags.Alias ? checker.getAliasedSymbol(calleeSym) : calleeSym;
+              if (target === sym) out.push({ call: node, file: fileAbs });
+            }
+          }
+          ts.forEachChild(node, visitCall);
+        };
+        visitCall(sf);
+      }
+      return out;
+    }
+    // The file declaring a top-level named type: the library file
+    // first (the base type lives there), then the caller file (the
+    // concrete arguments usually live there), then the rest of the
+    // workflow closure, then the agentts module. Lib types (Array,
+    // Date, ...) are ambient and need no import — null when not found.
+    // Also reports whether the declaration is exported: the alias
+    // imports the name, so a non-exported type would silently resolve
+    // to `any` under skipTypeCheck and surface only as a cryptic
+    // unconstrained-part schema error. Fail loudly here instead.
+    function findDeclaringFile(
+      name: string,
+      libFile: string,
+      callerFile: string,
+    ): { file: string; exported: boolean } | null {
+      const ordered = [libFile, callerFile, ...workflowFiles.filter((f) => f !== libFile && f !== callerFile), modulePath];
+      for (const fileAbs of ordered) {
+        const sf = program.getSourceFile(fileAbs);
+        if (!sf) continue;
+        for (const st of sf.statements) {
+          if (
+            (ts.isInterfaceDeclaration(st) || ts.isTypeAliasDeclaration(st) || ts.isClassDeclaration(st) || ts.isEnumDeclaration(st)) &&
+            st.name?.text === name
+          ) {
+            const modified =
+              ts.canHaveModifiers(st) &&
+              ts.getModifiers(st)?.some((m) => m.kind === ts.SyntaxKind.ExportKeyword);
+            const listed = sf.statements.some(
+              (s) =>
+                ts.isExportDeclaration(s) &&
+                !s.moduleSpecifier &&
+                s.exportClause &&
+                ts.isNamedExports(s.exportClause) &&
+                s.exportClause.elements.some((e) => e.propertyName?.text === name || e.name.text === name),
+            );
+            return { file: fileAbs, exported: Boolean(modified || listed) };
+          }
+        }
+      }
+      return null;
+    }
+    // Replace whole-word occurrences of each parameter name in a type
+    // text with its concrete text from one instantiation.
+    function substituteText(text: string, byName: Map<string, string>): string {
+      let out = text;
+      for (const [param, concrete] of byName) {
+        out = out.replace(new RegExp(`\\b${param}\\b`, "g"), concrete);
+      }
+      return out;
+    }
+    // Synthetic alias for one specialized type, in the extraction
+    // cache dir (derived data, like the JSON entries): the schema
+    // generator resolves root types by declaration name, so a
+    // parameterized name (JudgeInput<FixItem, FixRubric>) cannot be
+    // generated directly — the alias names the instantiation.
+    const aliasCache = new Map<string, { file: string; name: string }>();
+    function aliasFor(specializedText: string, callerFile: string, libFile: string): { file: string; name: string } {
+      const key = `${specializedText}\0${callerFile}`;
+      const hit = aliasCache.get(key);
+      if (hit) return hit;
+      const hash = crypto.createHash("sha256").update(key).digest("hex").slice(0, 16);
+      const name = `__bra106_${hash}`;
+      const file = path.join(cacheDir, `${name}.ts`);
+      const imports = new Map<string, Set<string>>();
+      for (const m of specializedText.matchAll(/\b[A-Za-z_$][A-Za-z0-9_$]*\b/g)) {
+        const ident = m[0];
+        if (ident === name) continue;
+        const declaring = findDeclaringFile(ident, libFile, callerFile);
+        if (!declaring || declaring.file === file) continue;
+        if (!declaring.exported) {
+          throw new Error(
+            `type '${ident}' (used as a generic argument for specialized trap contract '${specializedText}' in ${callerFile}) ` +
+              `is declared in ${declaring.file} but not exported — the specialization alias must import it by name; export the type`,
+          );
+        }
+        let rel = path.relative(path.dirname(file), declaring.file).replace(/\.tsx?$/, "").replace(/\.d$/, "");
+        if (!rel.startsWith(".")) rel = `./${rel}`;
+        if (!imports.has(rel)) imports.set(rel, new Set());
+        imports.get(rel)!.add(ident);
+      }
+      const lines: string[] = [
+        `// Derived by the BRA-106 specialization pass: a concrete alias for a`,
+        `// generic trap contract, so the schema generator (which resolves root`,
+        `// types by declaration name) can generate the instantiated schema.`,
+        `// Regenerated on every extraction; keyed by content hash.`,
+      ];
+      for (const [rel, names] of [...imports.entries()].sort()) {
+        lines.push(`import type { ${[...names].sort().join(", ")} } from "${rel}";`);
+      }
+      lines.push(`export type ${name} = ${specializedText};`);
+      fs.writeFileSync(file, lines.join("\n") + "\n");
+      const entry = { file, name };
+      aliasCache.set(key, entry);
+      return entry;
+    }
+    // Group sites by their enclosing generic function.
+    const byFn = new Map<ts.FunctionLikeDeclaration, FoundSite[]>();
+    for (const site of found) {
+      if (!site.genericFn) continue;
+      const list = byFn.get(site.genericFn.decl) ?? [];
+      list.push(site);
+      byFn.set(site.genericFn.decl, list);
+    }
+    // Usable instantiations per function: one entry per call site
+    // with explicit type arguments of the right arity.
+    interface Instantiation {
+      byName: Map<string, string>;
+      subst: Map<string, ts.Type>;
+      callerFile: string;
+    }
+    const fnCalls = new Map<ts.FunctionLikeDeclaration, Instantiation[]>();
+    for (const [decl, sites] of byFn) {
+      const paramNames = sites[0].genericFn!.paramNames;
+      const usable: Instantiation[] = [];
+      for (const { call, file: callerFile } of findCallSites(decl)) {
+        const typeArgs = call.typeArguments ?? [];
+        if (typeArgs.length !== paramNames.length) {
+          const sf = program.getSourceFile(callerFile);
+          const at = sf
+            ? (() => {
+                const { line, character } = sf.getLineAndCharacterOfPosition(call.getStart(sf));
+                return `${callerFile}:${line + 1}:${character + 1}`;
+              })()
+            : callerFile;
+          problems.push(
+            `${at}: generic function '${fnName(decl)}' called with ${typeArgs.length} explicit type argument(s) but declares ${paramNames.length} type parameter(s) — the extractor cannot specialize its trap calls; pass explicit type arguments matching the parameters`,
+          );
+          continue;
+        }
+        const byName = new Map<string, string>();
+        const subst = new Map<string, ts.Type>();
+        for (let i = 0; i < paramNames.length; i++) {
+          byName.set(paramNames[i], typeArgs[i].getText());
+          subst.set(paramNames[i], checker.getTypeFromTypeNode(typeArgs[i]));
+        }
+        usable.push({ byName, subst, callerFile });
+      }
+      fnCalls.set(decl, usable);
+    }
+    // Rewrite the site list: a site whose types mention no parameter
+    // passes through untouched; a site that does is replaced by one
+    // specialized copy per usable instantiation — or kept as-is when
+    // the function is never called, so the pre-check rejects it
+    // loudly with the unresolved-parameter error.
+    const out: FoundSite[] = [];
+    for (const site of found) {
+      const g = site.genericFn;
+      if (!g) {
+        out.push(site);
+        continue;
+      }
+      const mentions = (t: string | null): boolean =>
+        t !== null && g.paramNames.some((p) => new RegExp(`\\b${p}\\b`).test(t));
+      const calls = fnCalls.get(g.decl) ?? [];
+      if ((!mentions(site.inputType) && !mentions(site.outputType)) || calls.length === 0) {
+        out.push(site);
+        continue;
+      }
+      for (const c of calls) {
+        const inText = site.inputType ? substituteText(site.inputType, c.byName) : null;
+        const outText = substituteText(site.outputType, c.byName);
+        let inputGen: FoundSite["inputGen"];
+        let outputGen: FoundSite["outputGen"];
+        if (inText !== null && inText !== site.inputType) {
+          inputGen = aliasFor(inText, c.callerFile, g.file);
+        }
+        if (outText !== site.outputType) {
+          outputGen = aliasFor(outText, c.callerFile, g.file);
+        }
+        out.push({
+          ...site,
+          inputType: inText,
+          outputType: outText,
+          inputFile: inputGen ? inputGen.file : site.inputFile,
+          outputFile: outputGen ? outputGen.file : site.outputFile,
+          inputGen,
+          outputGen,
+          subst: c.subst,
+        });
+      }
+    }
+    found.splice(0, found.length, ...out);
+  }
 
+  for (const fileAbs of workflowFiles) {
+    const ctx = fileCtx(fileAbs);
+    if (!ctx) {
+      throw new ExtractionError([`could not load ${fileAbs} into the type-checker program`]);
+    }
+    visit(ctx, ctx.sf);
+  }
+
+  // The entry function: the workflow file's default export. A file
+  // with no exported entry function is refused (a global script).
+  const workflowSf = program.getSourceFile(abs);
+  let entryInfo: EntryInfo | null = null;
+  if (!workflowSf) {
+    problems.push(`could not load ${abs} into the type-checker program`);
+  } else {
+    entryInfo = findEntry(workflowSf, problems);
+  }
+
+  if (problems.length) throw new ExtractionError(problems);
+  if (!entryInfo) throw new ExtractionError([`workflow must export a default entry function`]);
+
+  // BRA-106 specialization: re-resolve trap sites inside generic
+  // functions per instantiation, before the byKey dedupe (two
+  // instantiations with different contracts for one key conflict
+  // here, exactly as two concrete sites would). The checker is created
+  // here — it is cached by the program, so the pre-check below reuses
+  // the same instance.
+  const checker = program.getTypeChecker();
+  specializeGenericSites(checker);
   if (problems.length) throw new ExtractionError(problems);
 
   // Same key, different contract = a conflict: the key IS the contract
@@ -783,7 +1357,6 @@ export function extractWorkflow(
   // Pre-check (EXTRACT, step 2): every contract type must be
   // JSON-like data, verified by the checker BEFORE the generator
   // runs — the generator silently drops what it cannot represent.
-  const checker = program.getTypeChecker();
   const likeProblems: string[] = [];
   {
     const seen = new Set<string>();
@@ -802,8 +1375,29 @@ export function extractWorkflow(
           likeProblems.push(`${label} — the type could not be resolved — simplify it to a concrete, named JSON-like type`);
           continue;
         }
-        checkJsonLikeType(checker, resolved, "$", label, new Set(), likeProblems);
+        // BRA-106: a specialized site carries its instantiation's
+        // substitution, so the pre-check walks the resolved type with
+        // its type parameters replaced.
+        checkJsonLikeType(checker, resolved, "$", label, new Set(), likeProblems, s.subst);
       }
+    }
+    // The entry function's input/output types get the same JSON-like
+    // pre-check (the workflow boundary is a trap boundary too).
+    for (const [side, typeName, node] of [
+      ["input", entryInfo.inputType, entryInfo.inputNode],
+      ["output", entryInfo.outputType, entryInfo.outputNode],
+    ] as const) {
+      if (!typeName) continue;
+      const key = `${abs}\0${typeName}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      const label = `type \`${typeName}\` (the entry function's ${side}) cannot be validated`;
+      const resolved = resolveContractType(checker, program, abs, typeName, node);
+      if (!resolved) {
+        likeProblems.push(`${label} — the type could not be resolved — simplify it to a concrete, named JSON-like type`);
+        continue;
+      }
+      checkJsonLikeType(checker, resolved, "$", label, new Set(), likeProblems);
     }
   }
   if (likeProblems.length) throw new ExtractionError(likeProblems);
@@ -815,8 +1409,13 @@ export function extractWorkflow(
   // loud generator error.
   const schemas = new Map<string, any>();
   const genByFile = new Map<string, any>();
-  function schemaFor(typeName: string, file: string): any {
-    const cacheKey = `${file}\0${typeName}`;
+  // genName is the type the generator must generate: the type name
+  // itself, except for BRA-106 specialized sites, where it is the
+  // synthetic alias name in the alias file (the generator resolves
+  // root types by declaration name, so a parameterized name cannot be
+  // generated directly).
+  function schemaFor(typeName: string, file: string, genName: string = typeName): any {
+    const cacheKey = `${file}\0${genName}`;
     if (schemas.has(cacheKey)) return schemas.get(cacheKey);
     let gen = genByFile.get(file);
     if (!gen) {
@@ -846,7 +1445,7 @@ export function extractWorkflow(
     }
     let schema: any;
     try {
-      schema = gen.createSchema(typeName);
+      schema = gen.createSchema(genName);
     } catch (e: any) {
     const users = found
         .filter((s) => s.inputType === typeName || s.outputType === typeName)
@@ -875,20 +1474,30 @@ export function extractWorkflow(
       key,
       inputType: s.inputType,
       outputType: s.outputType,
-      inputSchema: s.inputType && s.inputFile ? schemaFor(s.inputType, s.inputFile) : null,
-      outputSchema: schemaFor(s.outputType, s.outputFile),
+      inputSchema: s.inputType && s.inputFile ? schemaFor(s.inputType, s.inputFile, s.inputGen?.name) : null,
+      outputSchema: schemaFor(s.outputType, s.outputFile, s.outputGen?.name),
       callSites,
     };
   }
+
+  const workflowEntry: WorkflowEntry = {
+    name: entryInfo.name,
+    inputType: entryInfo.inputType,
+    outputType: entryInfo.outputType,
+    inputSchema: entryInfo.inputType ? schemaFor(entryInfo.inputType, abs) : null,
+    outputSchema: schemaFor(entryInfo.outputType, abs),
+  };
 
   const entry: Extraction = {
     sourceHash,
     source,
     moduleHash: importsAgentts ? moduleHash : null,
+    depHash,
     gate: opts?.onFirstRun && opts?.onExtracted
       ? { passed: true as const, checkedAt: new Date().toISOString(), compilerVersion: ts.version, checkerVersion: CHECKER_VERSION }
       : null,
     sites,
+    entry: workflowEntry,
   };
   // The M2 checker runs here, before the cache write: a throw aborts
   // before the entry is written, so a checker-failing workflow is

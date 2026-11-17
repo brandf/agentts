@@ -4,18 +4,25 @@
 
 declare function print(...args: unknown[]): void;
 
-try {
-  throw new Error("boom");
-} catch (e) {
-  print("caught is Error:", e instanceof Error);
-  print("caught:", (e as Error).name + ": " + (e as Error).message);
+export interface RunResult {
+  done: boolean;
 }
 
-try {
-  throw "plain failure";
-} catch (e) {
-  print("plain is Error:", e instanceof Error);
-  print("plain:", String(e));
-}
+export default function run(): RunResult {
+  try {
+    throw new Error("boom");
+  } catch (e) {
+    print("caught is Error:", e instanceof Error);
+    print("caught:", (e as Error).name + ": " + (e as Error).message);
+  }
 
-print("done");
+  try {
+    throw "plain failure";
+  } catch (e) {
+    print("plain is Error:", e instanceof Error);
+    print("plain:", String(e));
+  }
+
+  print("done");
+  return { done: true };
+}

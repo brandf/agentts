@@ -103,8 +103,11 @@ export const EXPECTED_TS_VERSION = "5.9.3";
  * bra29.2 (BRA-58): the M2-BUN rule + the gate program now includes
  * bun-types when resolvable, so a cached pre-BRA-58 gate result
  * (which refused any `Bun` reference with TS2867/TS2503) must not
- * be trusted for a workflow whose Bun use is now legal. */
-export const CHECKER_VERSION = "bra29.2";
+ * be trusted for a workflow whose Bun use is now legal.
+ * bra29.3: the extraction now records the workflow's entry function
+ * (input/output types + schemas) — a cached pre-bra29.3 entry has no
+ * `entry` field and must be re-extracted. */
+export const CHECKER_VERSION = "bra29.3";
 
 /** The version of the compiler actually loaded. */
 export function compilerVersion(): string {

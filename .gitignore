@@ -1,0 +1,15 @@
+# Build outputs — produced by `make` / re-vendor.sh, never committed.
+packages/durablets/out/
+packages/durablets/durablets
+packages/durablets/test-runs/
+# Vendored engine tree (built by packages/durablets/re-vendor.sh).
+packages/durablets/vendor/
+# re-vendor.sh work dir (removed on exit).
+packages/durablets/.re-vendor-*/
+# Installed dependencies (recreated by `bun install`).
+node_modules/
+# Frozen-experiment build outputs (each experiment Makefile builds in-tree).
+experiments/dquickts-prototype/proto
+experiments/restore-eval/reval
+experiments/all-combinator/host
+experiments/cancellation/host

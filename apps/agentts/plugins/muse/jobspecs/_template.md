@@ -4,7 +4,17 @@
 about the tools: the worker adapts it to its own environment. One
 file per spec, named <spec>.md, in plugins/muse/jobspecs/. The server
 serves it at GET /jobspec?spec=<spec> and reports its sha256 so
-workers read it only when the hash changed. -->
+workers read it only when the hash changed.
+
+Idempotency (BRA-61): declare the re-queue policy with this line
+when a re-run is NOT safe — a job that already performed a side
+effect (sent something, published, charged, wrote outside its own
+workspace). On lease expiry such a job FAILS instead of re-queuing,
+so the coordinator/human decides. Omit the line (or write
+`idempotent`) and the job re-queues as before — the default is
+idempotent. Pure computation (judging, aggregating, revising text
+whose effects are returned, not applied) is idempotent. -->
+<!-- idempotency: idempotent -->
 
 ## What this job does
 

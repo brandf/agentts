@@ -12,8 +12,9 @@
 // Pure logic: no I/O, no Linear, no host. The caller (CLI `admit`)
 // supplies the backlog, the in-flight links, and the workflow map,
 // and performs the side effects (setTaskRun + host enqueue) for the
-// admitted set. Admission itself becoming a workflow /
-// decisionCascade is a someday idea — NOT now.
+// admitted set. Admission itself becoming a workflow is a someday
+// idea — NOT now. (decisionCascade itself exists — BRA-47, in the
+// agentts module — but admittance is still pure logic here.)
 //
 // Priority scale is Linear's: 1 urgent, 2 high, 3 medium, 4 low,
 // 0 / absent = no priority, treated as medium (3) for ordering.

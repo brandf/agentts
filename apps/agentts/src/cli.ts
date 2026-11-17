@@ -2,10 +2,11 @@
 /**
  * AgentTS host CLI (BRA-44, v0).
  *
- *   agentts run <workflow> [--run-id ID] [--adapter mock|direct]
- *           [--clock virtual|real] [--state-dir DIR] [--task TASK]
- *           [--gates auto|hold] [--enqueue]
- *           [--workers-config workers.json] [--mock-answers answers.json]
+ *   agentts run <workflow> [--run-id ID] [--input-file FILE | --input JSON] [--wait]
+ *           [--adapter mock|direct] [--clock virtual|real] [--state-dir DIR]
+ *           [--task TASK] [--gates auto|hold] [--workers-config workers.json]
+ *           [--mock-answers answers.json]
+ *   agentts result <runId> [--state-dir DIR]
  *   agentts check <workflow> [--state-dir DIR] [--json]
  *           (first-run gate + extraction + M2 checker, no run:
  *           exit 0 when the workflow would start, 1 with structured
@@ -15,9 +16,26 @@
  *           never import Muse-specific things; default dirs
  *           src + plugins under the cwd)
  *   agentts deliver-gate <runId> <answer-json> [--state-dir DIR]
+  agentts deliver-result <runId> [--state-dir DIR]
+           (record a terminal run's delivery in the outbox — the
+           tick agent's delivery path; exit 1 when the run is not
+           terminal yet)
+  agentts deliveries [--state-dir DIR] [--json]
+           (list the delivery outbox)
+  agentts escalate '<json>' [--state-dir DIR]
+           (write an escalation record: {"kind":"gate-held"|
+           "stuck-running"|"other","runId"?,"reason","detail"?})
+  agentts watchdog [--state-dir DIR] [--stale-minutes N] [--json]
+           (tick-agent health check: exit 0 healthy / nothing
+           pending, 2 tick agent dead AND pending work — restart
+           it, 1 error)
  *   agentts status <runId> [--state-dir DIR]
  *   agentts queue list [--state-dir DIR]
  *   agentts queue run [--state-dir DIR]
+ *   agentts queue repair [--force] [--state-dir DIR]
+ *           (repair stranded "running" entries without driving;
+ *            --force breaks a held lock — human-only, never the
+ *            tick agent)
  *   agentts sync-task <taskId> <runId> [--state-dir DIR]
  *           [--backend linear|local]
  *   agentts admit [--state-dir DIR] [--backend linear|local]
@@ -55,11 +73,12 @@
  * bad JSON, never silently.
  */
 import * as fs from "node:fs";
+import * as os from "node:os";
 import * as path from "node:path";
 import { spawnSync } from "node:child_process";
-import { Host, HostRefusalError } from "./host";
-import { MockAdapter } from "./adapters/mock-adapter";
-import { DirectAdapter } from "./adapters/direct-adapter";
+import { Host, HostRefusalError, type RepairReport } from "./host";
+import { MockAdapter } from "../plugins/mock/src/mock-adapter";
+import { DirectAdapter } from "../plugins/direct/src/direct-adapter";
 import {
   LinearTaskBackend,
   LocalTaskBackend,
@@ -75,6 +94,7 @@ import { admitTasks, type InFlightLink } from "./admittance";
 import { workerServerUrl } from "./worker-protocol";
 import { httpAsync } from "./worker-http";
 import { serverConfigFromArgs, WorkerServer } from "./worker-server";
+import { checkWatchdog, DEFAULT_WATCHDOG_STALE_MINUTES } from "./watchdog";
 import {
   loadJournalTree,
   loadJournalTreeFromFile,
@@ -85,13 +105,20 @@ import {
 
 function usage(): never {
   console.error(`usage:
-  agentts run <workflow> [--run-id ID] [--adapter mock|direct] [--clock virtual|real] [--state-dir DIR] [--task TASK] [--gates auto|hold] [--enqueue] [--workers-config workers.json] [--mock-answers answers.json]
+  agentts run <workflow> [--run-id ID] [--input-file FILE | --input JSON] [--wait] [--adapter mock|direct] [--clock virtual|real] [--state-dir DIR] [--task TASK] [--gates auto|hold] [--workers-config workers.json] [--mock-answers answers.json]
+  (--adapter default: direct on the production state dir ~/workspace/agentts-state, mock elsewhere)
+  agentts result <runId> [--state-dir DIR]
   agentts check <workflow> [--state-dir DIR] [--json]
   agentts check --layering [dirs...] [--json]
   agentts deliver-gate <runId> <answer-json> [--state-dir DIR]
+  agentts deliver-result <runId> [--state-dir DIR]
+  agentts deliveries [--state-dir DIR] [--json]
+  agentts escalate '<json>' [--state-dir DIR]
+  agentts watchdog [--state-dir DIR] [--stale-minutes N] [--json]
   agentts status <runId> [--state-dir DIR]
   agentts queue list [--state-dir DIR]
   agentts queue run [--state-dir DIR]
+  agentts queue repair [--force] [--state-dir DIR]
   agentts sync-task <taskId> <runId> [--state-dir DIR] [--backend linear|local]
   agentts admit [--state-dir DIR] [--backend linear|local] [--wip N] [--map FILE] [--workflow PATH] [--dry-run]
   agentts cost-model [--state-dir DIR]
@@ -143,7 +170,17 @@ function readJsonConfig(file: string, what: string): Record<string, unknown> {
 }
 
 async function makeHost(args: string[]): Promise<Host> {
-  const adapterName = flag(args, "--adapter") ?? "mock";
+  // Production default (Brandon, Nov 16, 2026 — smoke-test finding 1):
+  // runs submitted to the production state dir execute for real (the
+  // direct adapter) by default. The mock adapter's canned exec results
+  // silently fake success, so a production submit that forgets
+  // --adapter must not fake it. Tests and scratch state dirs keep the
+  // mock default. An explicit --adapter always wins over this default.
+  const PROD_STATE_DIR = path.join(os.homedir(), "workspace", "agentts-state");
+  const isProdStateDir =
+    path.resolve(stateDir(args)) === path.resolve(PROD_STATE_DIR);
+  const adapterName =
+    flag(args, "--adapter") ?? (isProdStateDir ? "direct" : "mock");
   const clock = (flag(args, "--clock") ?? "virtual") as "virtual" | "real";
   if (clock !== "virtual" && clock !== "real") {
     console.error(`unknown clock mode "${clock}" (virtual|real)`);
@@ -208,47 +245,57 @@ async function makeHost(args: string[]): Promise<Host> {
   return new Host({ stateDir: stateDir(args), adapter, clock });
 }
 
+/** Submit a workflow + input: gate + extract + validate the input,
+ * enqueue, print the runId immediately. --wait is a blocking fetch
+ * on that SAME path (submit, then `queue run`, then result) — NOT a
+ * separate in-process drive mode. There is no in-process drive mode
+ * anymore. Input comes from --input-file (a JSON file) or --input
+ * (inline JSON); giving both is refused. */
 async function cmdRun(args: string[]): Promise<number> {
   const workflow = args[0];
   if (!workflow) usage();
   const runId = flag(args, "--run-id") ?? `run-${path.basename(workflow, ".ts")}-${Date.now()}`;
   const taskId = flag(args, "--task");
   const host = await makeHost(args);
-  if (has(args, "--enqueue")) {
-    host.enqueue(workflow, runId, { taskId });
-    console.log(`enqueued ${runId} (workflow ${workflow})`);
-    return 0;
+  const inputFile = flag(args, "--input-file");
+  const inputInline = flag(args, "--input");
+  let input: unknown;
+  if (inputFile && inputInline) {
+    console.error(`--input and --input-file conflict: give exactly one input source`);
+    return 1;
+  }
+  if (inputFile) {
+    try {
+      input = JSON.parse(fs.readFileSync(inputFile, "utf8"));
+    } catch (e) {
+      console.error(`--input-file ${inputFile} is not valid JSON: ${e instanceof Error ? e.message : String(e)}`);
+      return 1;
+    }
+  }
+  if (inputInline) {
+    try {
+      input = JSON.parse(inputInline);
+    } catch (e) {
+      console.error(`--input is not valid JSON: ${e instanceof Error ? e.message : String(e)}`);
+      return 1;
+    }
   }
   try {
-    // Module workflows (imports) must be bundled: the C host never
-    // resolves imports. Direct-trap workflows run as-is.
-    const src = fs.readFileSync(workflow, "utf8");
-    let rc: number;
-    if (/^\s*import\s/m.test(src) || src.includes('from "') || src.includes("from '")) {
-      const { entryPath } = host.prepareRun(workflow, runId);
-      const bundle = await host.bundle(entryPath, `bundle-${runId.replace(/\//g, "_")}.js`);
-      rc = host.startRunFrom(bundle, runId);
-    } else {
-      rc = host.startRun(workflow, runId);
-    }
-    rc = host.drive(runId);
-    if (taskId) {
-      const backend = new LocalTaskBackend(host.stateDir);
-      await backend.setTaskRun(taskId, runId);
-      await syncRunToTask(backend, taskId, runId, host.journal(runId));
-    }
-    if (host.isGatePending(runId)) {
-      console.log(`GATE PENDING ${runId} — deliver an answer with:`);
-      console.log(`  agentts deliver-gate ${runId} '{"answer":"yes"}' --state-dir ${host.stateDir}`);
-      return 2;
-    }
-    if (rc === 0) {
-      console.log(host.output(runId));
-      console.log(`DONE ${runId}`);
+    const { runId: submitted } = host.submit(workflow, { runId, input, taskId });
+    if (!has(args, "--wait")) {
+      console.log(`RUN ${submitted}`);
       return 0;
     }
-    console.error(`run ${runId} exited ${rc}`);
-    return 1;
+    // --wait: submit, then drive the queue, then fetch the result —
+    // the same path `queue run` + `result` take, not a second mode.
+    const q = await host.runQueue();
+    const entry = q.find((e) => e.runId === submitted);
+    if (entry && entry.status === "held") {
+      console.log(`GATE PENDING ${submitted} — deliver an answer with:`);
+      console.log(`  agentts deliver-gate ${submitted} '{"answer":"yes"}' --state-dir ${host.stateDir}`);
+      return 2;
+    }
+    return printResult(host, submitted);
   } catch (e) {
     if (e instanceof HostRefusalError) {
       console.error(`REFUSED: ${e.message}`);
@@ -256,6 +303,137 @@ async function cmdRun(args: string[]): Promise<number> {
     }
     throw e;
   }
+}
+
+/** Print a run's result (or its status). Exit 0 done, 2 held,
+ * 1 failed, 0 pending/running with the status printed. */
+function printResult(host: Host, runId: string): number {
+  const res = host.result(runId);
+  if (res.status === "done") {
+    console.log(JSON.stringify(res.output, null, 2));
+    return 0;
+  }
+  if (res.status === "failed") {
+    console.error(`run ${runId} failed: ${res.error ?? "unknown error"}`);
+    return 1;
+  }
+  if (res.status === "held") {
+    console.log(`GATE PENDING ${runId} — deliver an answer with:`);
+    console.log(`  agentts deliver-gate ${runId} '{"answer":"yes"}' --state-dir ${host.stateDir}`);
+    return 2;
+  }
+  console.log(`run ${runId}: ${res.status}`);
+  return 0;
+}
+
+async function cmdResult(args: string[]): Promise<number> {
+  const runId = args[0];
+  if (!runId) usage();
+  const host = await makeHost(args);
+  return printResult(host, runId);
+}
+
+async function cmdDeliverResult(args: string[]): Promise<number> {
+  const runId = args[0];
+  if (!runId) usage();
+  const host = await makeHost(args);
+  try {
+    const record = host.recordDelivery(runId);
+    console.log(JSON.stringify(record, null, 2));
+    return 0;
+  } catch (e) {
+    console.error(`deliver-result: ${e instanceof Error ? e.message : String(e)}`);
+    return 1;
+  }
+}
+
+async function cmdDeliveries(args: string[]): Promise<number> {
+  const host = await makeHost(args);
+  const records = host.listDeliveries();
+  if (has(args, "--json")) {
+    console.log(JSON.stringify(records, null, 2));
+    return 0;
+  }
+  if (!records.length) {
+    console.log(`no deliveries in ${host.stateDir}`);
+    return 0;
+  }
+  for (const r of records) {
+    const what =
+      r.status === "done"
+        ? JSON.stringify(r.output)
+        : `FAILED: ${r.error ?? "unknown error"}`;
+    console.log(
+      `${r.status} ${r.runId} delivered ${r.deliveredAt} by ${r.deliveredBy}${r.needsAttention ? " NEEDS ATTENTION" : ""} — ${String(what).slice(0, 300)}`,
+    );
+  }
+  return 0;
+}
+
+async function cmdEscalate(args: string[]): Promise<number> {
+  const raw = args[0];
+  if (!raw) usage();
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    console.error(`escalate: not valid JSON: ${raw}`);
+    return 1;
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    console.error(`escalate: expected a JSON object {"kind","runId"?,"reason","detail"?}`);
+    return 1;
+  }
+  const rec = parsed as { kind?: unknown; runId?: unknown; reason?: unknown; detail?: unknown };
+  if (typeof rec.kind !== "string" || typeof rec.reason !== "string" || !rec.reason) {
+    console.error(`escalate: requires a kind and a non-empty reason`);
+    return 1;
+  }
+  const host = await makeHost(args);
+  try {
+    const p = host.writeEscalation({
+      kind: rec.kind as "gate-held" | "stuck-running" | "other",
+      ...(typeof rec.runId === "string" ? { runId: rec.runId } : {}),
+      reason: rec.reason,
+      ...(rec.detail !== undefined ? { detail: rec.detail } : {}),
+    });
+    console.log(`escalation written: ${p}`);
+    return 0;
+  } catch (e) {
+    console.error(`escalate: ${e instanceof Error ? e.message : String(e)}`);
+    return 1;
+  }
+}
+
+/** The watchdog check (BRA-65): tick-agent liveness + pending work.
+ * Exit 0 healthy / nothing pending, 2 tick agent dead AND pending
+ * work (restart it), 1 error. The check itself never drives the
+ * queue or flips state — it reports, and the runtime cron that runs
+ * it restarts the tick agent when the report says to. */
+async function cmdWatchdog(args: string[]): Promise<number> {
+  const dir = stateDir(args);
+  const staleArg = flag(args, "--stale-minutes");
+  const staleMinutes =
+    staleArg !== undefined ? Number(staleArg) : DEFAULT_WATCHDOG_STALE_MINUTES;
+  if (!Number.isFinite(staleMinutes) || staleMinutes <= 0) {
+    console.error(`--stale-minutes must be a positive number (got "${staleArg}")`);
+    return 1;
+  }
+  const report = checkWatchdog(dir, staleMinutes);
+  if (has(args, "--json")) {
+    console.log(JSON.stringify(report, null, 2));
+  } else {
+    console.log(report.summary);
+    const p = report.pending;
+    if (p.queuedRuns.length) console.log(`  queued: ${p.queuedRuns.join(", ")}`);
+    if (p.heldRuns.length) console.log(`  held: ${p.heldRuns.join(", ")}`);
+    if (p.undeliveredResults.length) console.log(`  undelivered results: ${p.undeliveredResults.join(", ")}`);
+    if (p.stuckRunning.length) console.log(`  stuck running (report, never auto-flip): ${p.stuckRunning.join(", ")}`);
+    for (const e of p.escalations) {
+      console.log(`  escalation ${e.kind}${e.runId ? ` ${e.runId}` : ""}: ${e.reason}`);
+    }
+  }
+  return report.needsRestart ? 2 : 0;
 }
 
 async function cmdDeliverGate(args: string[]): Promise<number> {
@@ -274,18 +452,10 @@ async function cmdDeliverGate(args: string[]): Promise<number> {
     console.error(`no suspended run ${runId} in ${host.stateDir}`);
     return 1;
   }
-  const rc = host.deliverGate(runId, answer);
-  if (host.isGatePending(runId)) {
-    console.log(`GATE PENDING ${runId} (another gate)`);
-    return 2;
-  }
-  if (rc === 0) {
-    console.log(host.output(runId));
-    console.log(`DONE ${runId}`);
-    return 0;
-  }
-  console.error(`run ${runId} exited ${rc}`);
-  return 1;
+  host.deliverGate(runId, answer);
+  console.log(`gate answer delivered for ${runId} — drive it with:`);
+  console.log(`  agentts queue run --state-dir ${host.stateDir}`);
+  return 0;
 }
 
 async function cmdStatus(args: string[]): Promise<number> {
@@ -304,6 +474,19 @@ async function cmdStatus(args: string[]): Promise<number> {
   return 0;
 }
 
+/** Print a queue-repair report (BRA-72). Verbose (the `queue repair`
+ * command) names the empty case too; `queue run` stays quiet when
+ * nothing was stranded. */
+function printRepairReport(report: RepairReport | null, verbose: boolean): void {
+  if (!report) return;
+  for (const a of report.actions) {
+    console.log(`REPAIR ${a.runId}: running -> ${a.to} — ${a.reason}`);
+  }
+  if (verbose && report.actions.length === 0) {
+    console.log("REPAIR: no stranded running entries");
+  }
+}
+
 async function cmdQueue(args: string[]): Promise<number> {
   const sub = args[0];
   const host = await makeHost(args);
@@ -313,9 +496,31 @@ async function cmdQueue(args: string[]): Promise<number> {
     }
     return 0;
   }
+  if (sub === "repair") {
+    // BRA-72: repair stranded "running" entries (re-drive them after
+    // verifying their state) without driving the queue. --force breaks
+    // an ambiguous (or live) lock — human-only, after confirming the
+    // holder is dead; never the tick agent, never automation.
+    const report = host.repairQueue({ force: has(args, "--force") });
+    printRepairReport(report, true);
+    return 0;
+  }
   if (sub === "run") {
-    const q = host.runQueue();
-    for (const e of q) console.log(`${e.status} ${e.runId}${e.error ? ` — ${e.error}` : ""}`);
+    const q = await host.runQueue();
+    // runQueue repairs stranded entries itself before driving (under
+    // the lock — see host.ts); print what it repaired, never silently.
+    printRepairReport(host.lastRepairReport, false);
+    for (const e of q) {
+      console.log(`${e.status} ${e.runId}${e.error ? ` — ${e.error}` : ""}`);
+      // A run submitted with --task syncs to the task when the queue
+      // drives it to a terminal status (the run path is async, so
+      // the sync cannot live in `run` anymore).
+      if (e.taskId && (e.status === "done" || e.status === "failed")) {
+        const backend = new LocalTaskBackend(host.stateDir);
+        await backend.setTaskRun(e.taskId, e.runId);
+        await syncRunToTask(backend, e.taskId, e.runId, host.journal(e.runId));
+      }
+    }
     return q.some((e) => e.status === "failed") ? 1 : 0;
   }
   usage();
@@ -594,7 +799,7 @@ async function cmdCheck(args: string[]): Promise<number> {
   if (has(args, "--layering")) {
     // `agentts check --layering [dirs...]`: the CI import lint.
     const dirs = args.filter((a) => !a.startsWith("--") && a !== "--layering");
-    const roots = dirs.length ? dirs : ["src", "plugins"];
+    const roots = dirs.length ? dirs : ["src", "plugins", "workflows"];
     const files = collectTsFiles(roots);
     const diagnostics = checkLayeringFiles(files);
     if (!diagnostics.length) {
@@ -611,7 +816,7 @@ async function cmdCheck(args: string[]): Promise<number> {
     const extraction = checkWorkflowFile(workflow, cacheDir);
     const sites = Object.keys(extraction.sites).length;
     console.log(
-      `CHECK OK ${workflow}: ${sites} trap site(s), gate + checker passed (typescript ${compilerVersion()}, checker ${CHECKER_VERSION})`,
+      `CHECK OK ${workflow}: ${sites} trap site(s), entry ${extraction.entry.name}(${extraction.entry.inputType ?? "no input"}): ${extraction.entry.outputType}, gate + checker passed (typescript ${compilerVersion()}, checker ${CHECKER_VERSION})`,
     );
     return 0;
   } catch (e) {
@@ -645,10 +850,20 @@ async function main(): Promise<number> {
     switch (cmd) {
       case "run":
         return await cmdRun(args);
+      case "result":
+        return await cmdResult(args);
       case "check":
         return await cmdCheck(args);
       case "deliver-gate":
         return await cmdDeliverGate(args);
+      case "deliver-result":
+        return await cmdDeliverResult(args);
+      case "deliveries":
+        return await cmdDeliveries(args);
+      case "escalate":
+        return await cmdEscalate(args);
+      case "watchdog":
+        return await cmdWatchdog(args);
       case "status":
         return await cmdStatus(args);
       case "queue":

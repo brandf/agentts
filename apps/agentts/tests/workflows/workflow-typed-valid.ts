@@ -24,12 +24,19 @@ interface DecideResult {
   confidence: number;
 }
 
-const r = trap<JobInput, JobResult>("job", { op: "score", value: 7 }) as JobResult;
-print("job:", JSON.stringify(r));
+export interface RunResult {
+  done: boolean;
+}
 
-const d = trap<DecideInput, DecideResult>("decide", {
-  question: "pick one",
-  options: ["a", "b"],
-}) as DecideResult;
-print("decide:", JSON.stringify(d));
-print("done");
+export default function run(): RunResult {
+  const r = trap<JobInput, JobResult>("job", { op: "score", value: 7 }) as JobResult;
+  print("job:", JSON.stringify(r));
+
+  const d = trap<DecideInput, DecideResult>("decide", {
+    question: "pick one",
+    options: ["a", "b"],
+  }) as DecideResult;
+  print("decide:", JSON.stringify(d));
+  print("done");
+  return { done: true };
+}

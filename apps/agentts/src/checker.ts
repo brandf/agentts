@@ -565,13 +565,13 @@ function checkContractType(
  * the module (layer 1), the host (layer 2), workflows and their
  * libraries — is not. */
 function isLayer3File(file: string): boolean {
-  return file.includes("/plugins/muse/") || file.endsWith("/adapters/muse-adapter.ts");
+  return file.includes("/plugins/muse/") || file.endsWith("/plugins/muse/src/muse-adapter.ts");
 }
 
 function isMuseTarget(spec: string, resolvedAbs: string | null): boolean {
   if (spec.includes("muse-adapter") || spec.includes("plugins/muse")) return true;
   if (!resolvedAbs) return false;
-  return resolvedAbs.includes("/plugins/muse/") || resolvedAbs.endsWith("/adapters/muse-adapter.ts");
+  return resolvedAbs.includes("/plugins/muse/") || resolvedAbs.endsWith("/plugins/muse/src/muse-adapter.ts");
 }
 
 /** The layering boundary over a list of files (AST-only, no
@@ -610,7 +610,7 @@ export function checkLayeringFiles(files: string[]): CheckerDiagnostic[] {
           diag(
             file, line, column, "M2-LAYER-MUSE",
             `layering violation: ${path.basename(file)} imports Muse-specific module \`${spec}\` — only the adapter (layer 3) may touch Muse (subagent/chat APIs); core + host never import them`,
-            "move the Muse interaction behind the adapter seam (src/adapters/muse-adapter.ts), and call it through the adapter interface",
+            "move the Muse interaction behind the adapter seam (plugins/muse/src/muse-adapter.ts), and call it through the adapter interface",
             null, spec,
           ),
         );

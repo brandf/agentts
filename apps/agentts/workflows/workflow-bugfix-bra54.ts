@@ -33,26 +33,19 @@
 // workers build runnable scratch copies of the staged repo for the
 // CLI/suite runs, so no run output ever lands in the staged tree.
 //
-// The JFL judging step is advisory, not a gate: under --adapter mock
-// it loops 6 times unconverged (the mock adapter's canned decide is
-// the very bug being fixed — the workflow's own loop demonstrates
-// BRA-54), while under --adapter direct it converges at loop 1 via
-// the local decision model. The fix's acceptance comes from the test
-// and verify job results, not from the JFL outcome.
+// The JFL judging step is advisory, not a gate. BRA-54 is fixed: the
+// CLI wires the local decision model into its mock path, so reproduce
+// reports already-fixed and the workflow returns before the loop on
+// the current tree. The pre-fix signature was 6 loops unconverged,
+// mean 0.55 under mock; the post-fix signature is 5 loops converged,
+// mean 0.85. The fix's acceptance comes from the test and verify job
+// results, not from the JFL outcome.
 
-import { job, decide } from "../src/agentts";
-import {
-  judgeFixLoop,
-  type AggregateScore,
-  type JudgeVerdict,
-  type LoopDecision,
-} from "./judge-fix-loop";
+import { job } from "../src/agentts";
+import { judgeFixLoop } from "./judge-fix-loop";
 
 declare function print(...args: unknown[]): void;
 
-const REPO = "/home/hatch/workspace/agentts-repo/apps/agentts";
-const WORKFLOW = "tests/workflows/workflow-judge-fix-loop.ts";
-const TARGET = "src/cli.ts";
 
 interface ReproduceInput {
   repoRoot: string;
@@ -135,171 +128,156 @@ interface VerifyResult {
   simulated: boolean;
 }
 
-interface FixItem {
+export interface FixItem {
   text: string;
   goal: string;
 }
 
-interface FixRubric {
+export interface FixRubric {
   criteria: string[];
   threshold: number;
 }
 
-interface FixJudgeInput {
-  item: FixItem;
-  rubric: FixRubric;
-  judge: number;
+/** The workflow's input (typed params, not hardcoded constants):
+ * the staged repo root, the workflow to reproduce/verify against,
+ * and the target file to diagnose. */
+export interface BugfixInput {
+  repoRoot: string;
+  workflow: string;
+  targetFile: string;
 }
 
-interface FixAggregateInput {
-  verdicts: JudgeVerdict[];
-  failed: number;
-  threshold: number;
+export interface BugfixResult {
+  status: string;
+  reproduced: boolean;
+  reproduceSimulated: boolean;
+  fixApplied: boolean;
+  fixSimulated: boolean;
+  jflLoops: number;
+  jflConverged: boolean;
+  jflMean: number;
+  suitePassed: boolean;
+  suiteSimulated: boolean;
+  cliConverged: boolean;
+  cliLoops: number;
+  cliMean: number;
+  verifySimulated: boolean;
 }
 
-interface FixFixInput {
-  item: FixItem;
-  rubric: FixRubric;
-  verdicts: JudgeVerdict[];
-}
+export default function bugfixBra54(input: BugfixInput): BugfixResult {
+  // Input-derived constants (were hardcoded module-level consts).
+  const REPO = input.repoRoot;
+  const WORKFLOW = input.workflow;
+  const TARGET = input.targetFile;
 
-interface FixRubricUpdateInput {
-  rubric: FixRubric;
-  verdicts: JudgeVerdict[];
-}
-
-// 1. Reproduce BRA-54: the CLI mock path on the JudgeFixLoop
-// workflow must loop 6 times, unconverged, mean 0.55.
-const repro = job<ReproduceInput, ReproduceResult>({
-  spec: "bugfix-reproduce",
-  input: { repoRoot: REPO, workflow: WORKFLOW },
-});
-print("reproduce:", JSON.stringify(repro));
-
-let status = "failed";
-let fixApplied = false;
-let fixSimulated = false;
-let jflLoops = 0;
-let jflConverged = false;
-let jflMean = 0;
-let suitePassed = false;
-let suiteSimulated = false;
-let cliConverged = false;
-let cliLoops = 0;
-let cliMean = 0;
-let verifySimulated = false;
-
-if (!repro.reproduced) {
-  status = repro.error !== "" ? "failed-reproduce" : "already-fixed";
-} else {
-  // 2. Diagnose: read the code, find the root cause, build the patch.
-  const diag = job<DiagnoseInput, DiagnoseResult>({
-    spec: "bugfix-diagnose",
-    input: { repoRoot: REPO, targetFile: TARGET },
+  // 1. Reproduce BRA-54: the CLI mock path on the JudgeFixLoop
+  // workflow loops 6 times, unconverged, mean 0.55 when the bug is
+  // present. On the fixed tree reproduce reports already-fixed
+  // (5 loops, converged, mean 0.85) and the workflow returns here.
+  const repro = job<ReproduceInput, ReproduceResult>({
+    spec: "bugfix-reproduce",
+    input: { repoRoot: REPO, workflow: WORKFLOW },
   });
-  print("diagnose:", JSON.stringify(diag));
-  if (!diag.found) {
-    status = "failed-diagnose";
-  } else {
-    // 3. Fix: apply the patch (verified before any write; the worker
-    // checks every edit before applying any of them).
-    const fix = job<FixInput, FixResult>({
-      spec: "bugfix-fix",
-      input: { repoRoot: REPO, file: diag.file, edits: diag.edits },
-    });
-    print("fix:", JSON.stringify(fix));
-    fixApplied = fix.applied;
-    fixSimulated = fix.simulated;
-    if (!fix.applied && !fix.wouldApply && !fix.alreadyApplied) {
-      status = "failed-fix";
-    } else {
-      // 4. Judge the fix with the JudgeFixLoop library: 3 parallel
-      // judges (all()), decide cadence from the library. Advisory:
-      // the outcome is recorded, not a gate (see the header).
-      const jfl = judgeFixLoop<FixItem, FixRubric>(
-        {
-          text: "The fix is minimal and targeted: the CLI wires the local decision model into the mock path, with no regression to canned answers for other traps.",
-          goal: "A minimal, targeted BRA-54 fix with no regression.",
-        },
-        { criteria: ["minimal", "targeted", "no regression"], threshold: 0.8 },
-        6,
-        {
-          judge: (item, rubric, judge) =>
-            job<FixJudgeInput, JudgeVerdict>({ spec: "judge", input: { item, rubric, judge } }),
-          aggregate: (verdicts, failed) =>
-            job<FixAggregateInput, AggregateScore>({
-              spec: "aggregate",
-              input: { verdicts, failed, threshold: 0.8 },
-            }),
-          fix: (item, rubric, verdicts) =>
-            job<FixFixInput, FixItem>({ spec: "fix", input: { item, rubric, verdicts } }),
-          updateRubric: (rubric, verdicts) =>
-            job<FixRubricUpdateInput, FixRubric>({ spec: "rubric-update", input: { rubric, verdicts } }),
-          decideRevise: (agg, loop) =>
-            decide<LoopDecision>({
-              question: `loop ${loop}: mean score ${agg.meanScore} threshold 0.8; ${agg.approved} of 3 approved. Should the work item be revised or kept?`,
-              options: ["revise", "keep"],
-            }),
-          decideRubric: (loop, misses) =>
-            decide<LoopDecision>({
-              question: `loop ${loop}: misses: ${misses} missed criteria across judges; update the rubric if misses >= 2. Should the rubric be updated or kept?`,
-              options: ["update", "keep"],
-            }),
-          decideConverged: (agg, loop, since) =>
-            decide<LoopDecision>({
-              question: `loop ${loop}: mean score ${agg.meanScore} threshold 0.8, loops since rubric change ${since}. Converged?`,
-              options: ["converged", "continue"],
-            }),
-        },
-      );
-      print("jfl:", JSON.stringify(jfl));
-      jflLoops = jfl.loops;
-      jflConverged = jfl.converged;
-      jflMean = jfl.lastAggregate ? jfl.lastAggregate.meanScore : 0;
+  print("reproduce:", JSON.stringify(repro));
 
-      // 5. Test: the full staged suite (run.sh) must stay green.
-      const test = job<TestInput, TestResult>({
-        spec: "bugfix-test",
-        input: { repoRoot: REPO },
+  let status = "failed";
+  let fixApplied = false;
+  let fixSimulated = false;
+  let jflLoops = 0;
+  let jflConverged = false;
+  let jflMean = 0;
+  let suitePassed = false;
+  let suiteSimulated = false;
+  let cliConverged = false;
+  let cliLoops = 0;
+  let cliMean = 0;
+  let verifySimulated = false;
+
+  if (!repro.reproduced) {
+    status = repro.error !== "" ? "failed-reproduce" : "already-fixed";
+  } else {
+    // 2. Diagnose: read the code, find the root cause, build the patch.
+    const diag = job<DiagnoseInput, DiagnoseResult>({
+      spec: "bugfix-diagnose",
+      input: { repoRoot: REPO, targetFile: TARGET },
+    });
+    print("diagnose:", JSON.stringify(diag));
+    if (!diag.found) {
+      status = "failed-diagnose";
+    } else {
+      // 3. Fix: apply the patch (verified before any write; the worker
+      // checks every edit before applying any of them).
+      const fix = job<FixInput, FixResult>({
+        spec: "bugfix-fix",
+        input: { repoRoot: REPO, file: diag.file, edits: diag.edits },
       });
-      print("test:", JSON.stringify(test));
-      suitePassed = test.passed;
-      suiteSimulated = test.simulated;
-      if (!test.passed) {
-        status = "failed-test";
+      print("fix:", JSON.stringify(fix));
+      fixApplied = fix.applied;
+      fixSimulated = fix.simulated;
+      if (!fix.applied && !fix.wouldApply && !fix.alreadyApplied) {
+        status = "failed-fix";
       } else {
-        // 6. Verify: the CLI mock path on the JFL workflow must now
-        // converge (reusing the reproduce step's runnable copy).
-        const verify = job<VerifyInput, VerifyResult>({
-          spec: "bugfix-verify",
-          input: { repoRoot: REPO, workflow: WORKFLOW, runnableCopy: repro.runnableCopy, hostBin: repro.hostBin },
+        // 4. Judge the fix with the JudgeFixLoop library: 3 parallel
+        // judges (all()), decide cadence from the library. Advisory:
+        // the outcome is recorded, not a gate (see the header).
+        const jfl = judgeFixLoop<FixItem, FixRubric>(
+          {
+            text: "The fix is minimal and targeted: the CLI wires the local decision model into the mock path, with no regression to canned answers for other traps.",
+            goal: "A minimal, targeted BRA-54 fix with no regression.",
+          },
+          { criteria: ["minimal", "targeted", "no regression"], threshold: 0.8 },
+          6,
+        );
+        print("jfl:", JSON.stringify(jfl));
+        jflLoops = jfl.loops;
+        jflConverged = jfl.converged;
+        jflMean = jfl.lastAggregate ? jfl.lastAggregate.meanScore : 0;
+
+        // 5. Test: the full staged suite (run.sh) must stay green.
+        const test = job<TestInput, TestResult>({
+          spec: "bugfix-test",
+          input: { repoRoot: REPO },
         });
-        print("verify:", JSON.stringify(verify));
-        cliConverged = verify.converged;
-        cliLoops = verify.loops;
-        cliMean = verify.mean;
-        verifySimulated = verify.simulated;
-        status = verify.converged ? "fixed" : "failed-verify";
+        print("test:", JSON.stringify(test));
+        suitePassed = test.passed;
+        suiteSimulated = test.simulated;
+        if (!test.passed) {
+          status = "failed-test";
+        } else {
+          // 6. Verify: the CLI mock path on the JFL workflow must now
+          // converge (reusing the reproduce step's runnable copy).
+          const verify = job<VerifyInput, VerifyResult>({
+            spec: "bugfix-verify",
+            input: { repoRoot: REPO, workflow: WORKFLOW, runnableCopy: repro.runnableCopy, hostBin: repro.hostBin },
+          });
+          print("verify:", JSON.stringify(verify));
+          cliConverged = verify.converged;
+          cliLoops = verify.loops;
+          cliMean = verify.mean;
+          verifySimulated = verify.simulated;
+          status = verify.converged ? "fixed" : "failed-verify";
+        }
       }
     }
   }
-}
 
-const result = {
-  status,
-  reproduced: repro.reproduced,
-  reproduceSimulated: repro.simulated,
-  fixApplied,
-  fixSimulated,
-  jflLoops,
-  jflConverged,
-  jflMean,
-  suitePassed,
-  suiteSimulated,
-  cliConverged,
-  cliLoops,
-  cliMean,
-  verifySimulated,
-};
-print("result:", JSON.stringify(result));
-print("done");
+  const result: BugfixResult = {
+    status,
+    reproduced: repro.reproduced,
+    reproduceSimulated: repro.simulated,
+    fixApplied,
+    fixSimulated,
+    jflLoops,
+    jflConverged,
+    jflMean,
+    suitePassed,
+    suiteSimulated,
+    cliConverged,
+    cliLoops,
+    cliMean,
+    verifySimulated,
+  };
+  print("result:", JSON.stringify(result));
+
+  return result;
+}

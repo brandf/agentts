@@ -28,27 +28,35 @@ interface Outcome {
 }
 
 declare function trap(type: string, arg: unknown): unknown;
-// step() is a thin wrapper over the trap builtin: trap("job", input).
-function step(input: StepInput): StepResult | AggregateResult { return trap("job", input) as StepResult | AggregateResult; }
 declare function print(...args: unknown[]): void;
 
-function judgePath(x: number): string {
-  const a = step({ op: "score", value: x }) as StepResult;
-  if (x === 5) throw new Error("judge crashed");
-  const b = step({ op: "verify", value: x }) as StepResult;
-  return a.label + "/" + b.label;
+export interface RunResult {
+  done: boolean;
 }
 
-function runBranch(f: () => string): Outcome {
-  try {
-    return { ok: true, value: f() };
-  } catch (e) {
-    const err = e as Error;
-    return { ok: false, error: { name: err.name, message: err.message } };
+export default function run(): RunResult {
+  // step() is a thin wrapper over the trap builtin: trap("job", input).
+  function step(input: StepInput): StepResult | AggregateResult { return trap("job", input) as StepResult | AggregateResult; }
+
+  function judgePath(x: number): string {
+    const a = step({ op: "score", value: x }) as StepResult;
+    if (x === 5) throw new Error("judge crashed");
+    const b = step({ op: "verify", value: x }) as StepResult;
+    return a.label + "/" + b.label;
   }
-}
 
-const verdicts = [runBranch(() => judgePath(7)), runBranch(() => judgePath(3)), runBranch(() => judgePath(5))];
-print("verdicts:", JSON.stringify(verdicts));
-const agg = step({ op: "aggregate", verdicts: verdicts }) as AggregateResult;
-print("aggregate:", JSON.stringify(agg));
+  function runBranch(f: () => string): Outcome {
+    try {
+      return { ok: true, value: f() };
+    } catch (e) {
+      const err = e as Error;
+      return { ok: false, error: { name: err.name, message: err.message } };
+    }
+  }
+
+  const verdicts = [runBranch(() => judgePath(7)), runBranch(() => judgePath(3)), runBranch(() => judgePath(5))];
+  print("verdicts:", JSON.stringify(verdicts));
+  const agg = step({ op: "aggregate", verdicts: verdicts }) as AggregateResult;
+  print("aggregate:", JSON.stringify(agg));
+  return { done: true };
+}

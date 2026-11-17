@@ -17,18 +17,25 @@ interface JobResult {
   label: string;
 }
 
-function attempt(n: number): void {
-  try {
-    const r = trap<JobInput, JobResult>("job", { op: "score", value: 7 }) as JobResult;
-    print(`caught ${n}: ERROR accepted:`, JSON.stringify(r));
-  } catch (e) {
-    print(`caught ${n}:`, (e as Error).name + ": " + (e as Error).message);
-  }
+export interface RunResult {
+  done: boolean;
 }
 
-attempt(1); // undefined score
-attempt(2); // NaN score
-attempt(3); // circular reference
-attempt(4); // Map as the whole result
-attempt(5); // class instance as the whole result
-print("done");
+export default function run(): RunResult {
+  function attempt(n: number): void {
+    try {
+      const r = trap<JobInput, JobResult>("job", { op: "score", value: 7 }) as JobResult;
+      print(`caught ${n}: ERROR accepted:`, JSON.stringify(r));
+    } catch (e) {
+      print(`caught ${n}:`, (e as Error).name + ": " + (e as Error).message);
+    }
+  }
+
+  attempt(1); // undefined score
+  attempt(2); // NaN score
+  attempt(3); // circular reference
+  attempt(4); // Map as the whole result
+  attempt(5); // class instance as the whole result
+  print("done");
+  return { done: true };
+}

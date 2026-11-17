@@ -14,11 +14,22 @@ interface ScoreInput {
   value: number;
 }
 
+// The class MUST stay at top level: the schema generator resolves
+// the trap output type by name from the program's top-level
+// declarations, and a function-local class is not findable as a root
+// type (the extractor would throw before the checker ever runs).
 class ScoreResult {
   score = 0;
   label = "";
 }
 
-const j = job<ScoreInput, ScoreResult>({ spec: "score", input: { value: 7 } });
-print("job:", JSON.stringify(j));
-print("done");
+export interface RunResult {
+  done: boolean;
+}
+
+export default function run(): RunResult {
+  const j = job<ScoreInput, ScoreResult>({ spec: "score", input: { value: 7 } });
+  print("job:", JSON.stringify(j));
+  print("done");
+  return { done: true };
+}

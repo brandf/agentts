@@ -1,0 +1,655 @@
+{
+  "date": "2026-11-17T05:27:18.427Z",
+  "outDir": "/tmp/bra90-measure-hD5mbM",
+  "results": [
+    {
+      "workload": "control-1k",
+      "mode": "full",
+      "rows": [
+        {
+          "ordinal": 0,
+          "type": "sleep:0",
+          "size": 15295,
+          "kind": "full",
+          "baseSize": null
+        },
+        {
+          "ordinal": 1,
+          "type": "sleep:0",
+          "size": 15295,
+          "kind": "full",
+          "baseSize": null
+        },
+        {
+          "ordinal": 2,
+          "type": "sleep:0",
+          "size": 15295,
+          "kind": "full",
+          "baseSize": null
+        }
+      ],
+      "finalRc": 0,
+      "fingerprint": "live-len: 1024 head: abababab\n",
+      "resultJson": "{\"len\":1024}",
+      "totalWritten": 45885,
+      "storedAtEnd": 15295,
+      "baseSize": null
+    },
+    {
+      "workload": "control-1k",
+      "mode": "delta",
+      "rows": [
+        {
+          "ordinal": 0,
+          "type": "sleep:0",
+          "size": 15272,
+          "kind": "{\"kind\":\"base\",\"ordinal\":0,\"sinceKeyframe\":0,\"baseSize\":15272,\"lastDelta\":null,\"ratio\":null,\"trigger\":\"initial\"}",
+          "baseSize": 15272
+        },
+        {
+          "ordinal": 1,
+          "type": "sleep:0",
+          "size": 111,
+          "kind": "{\"kind\":\"delta\",\"ordinal\":1,\"sinceKeyframe\":1,\"baseSize\":15272,\"lastDelta\":111,\"ratio\":0.007,\"trigger\":null}",
+          "baseSize": 15272
+        },
+        {
+          "ordinal": 2,
+          "type": "sleep:0",
+          "size": 111,
+          "kind": "{\"kind\":\"delta\",\"ordinal\":2,\"sinceKeyframe\":2,\"baseSize\":15272,\"lastDelta\":111,\"ratio\":0.007,\"trigger\":null}",
+          "baseSize": 15272
+        }
+      ],
+      "finalRc": 0,
+      "fingerprint": "live-len: 1024 head: abababab\n",
+      "resultJson": "{\"len\":1024}",
+      "totalWritten": 15494,
+      "storedAtEnd": 15383,
+      "baseSize": 15272
+    },
+    {
+      "workload": "control-500k",
+      "mode": "full",
+      "rows": [
+        {
+          "ordinal": 0,
+          "type": "sleep:0",
+          "size": 526283,
+          "kind": "full",
+          "baseSize": null
+        },
+        {
+          "ordinal": 1,
+          "type": "sleep:0",
+          "size": 526283,
+          "kind": "full",
+          "baseSize": null
+        },
+        {
+          "ordinal": 2,
+          "type": "sleep:0",
+          "size": 526283,
+          "kind": "full",
+          "baseSize": null
+        }
+      ],
+      "finalRc": 0,
+      "fingerprint": "live-len: 512000 head: abababab\n",
+      "resultJson": "{\"len\":512000}",
+      "totalWritten": 1578849,
+      "storedAtEnd": 526283,
+      "baseSize": null
+    },
+    {
+      "workload": "control-500k",
+      "mode": "delta",
+      "rows": [
+        {
+          "ordinal": 0,
+          "type": "sleep:0",
+          "size": 526260,
+          "kind": "{\"kind\":\"base\",\"ordinal\":0,\"sinceKeyframe\":0,\"baseSize\":526260,\"lastDelta\":null,\"ratio\":null,\"trigger\":\"initial\"}",
+          "baseSize": 526260
+        },
+        {
+          "ordinal": 1,
+          "type": "sleep:0",
+          "size": 111,
+          "kind": "{\"kind\":\"delta\",\"ordinal\":1,\"sinceKeyframe\":1,\"baseSize\":526260,\"lastDelta\":111,\"ratio\":0.000,\"trigger\":null}",
+          "baseSize": 526260
+        },
+        {
+          "ordinal": 2,
+          "type": "sleep:0",
+          "size": 111,
+          "kind": "{\"kind\":\"delta\",\"ordinal\":2,\"sinceKeyframe\":2,\"baseSize\":526260,\"lastDelta\":111,\"ratio\":0.000,\"trigger\":null}",
+          "baseSize": 526260
+        }
+      ],
+      "finalRc": 0,
+      "fingerprint": "live-len: 512000 head: abababab\n",
+      "resultJson": "{\"len\":512000}",
+      "totalWritten": 526482,
+      "storedAtEnd": 526371,
+      "baseSize": 526260
+    },
+    {
+      "workload": "control-2m",
+      "mode": "full",
+      "rows": [
+        {
+          "ordinal": 0,
+          "type": "sleep:0",
+          "size": 2111430,
+          "kind": "full",
+          "baseSize": null
+        },
+        {
+          "ordinal": 1,
+          "type": "sleep:0",
+          "size": 2111430,
+          "kind": "full",
+          "baseSize": null
+        },
+        {
+          "ordinal": 2,
+          "type": "sleep:0",
+          "size": 2111430,
+          "kind": "full",
+          "baseSize": null
+        }
+      ],
+      "finalRc": 0,
+      "fingerprint": "live-len: 2097152 head: abababab\n",
+      "resultJson": "{\"len\":2097152}",
+      "totalWritten": 6334290,
+      "storedAtEnd": 2111430,
+      "baseSize": null
+    },
+    {
+      "workload": "control-2m",
+      "mode": "delta",
+      "rows": [
+        {
+          "ordinal": 0,
+          "type": "sleep:0",
+          "size": 2111407,
+          "kind": "{\"kind\":\"base\",\"ordinal\":0,\"sinceKeyframe\":0,\"baseSize\":2111407,\"lastDelta\":null,\"ratio\":null,\"trigger\":\"initial\"}",
+          "baseSize": 2111407
+        },
+        {
+          "ordinal": 1,
+          "type": "sleep:0",
+          "size": 111,
+          "kind": "{\"kind\":\"delta\",\"ordinal\":1,\"sinceKeyframe\":1,\"baseSize\":2111407,\"lastDelta\":111,\"ratio\":0.000,\"trigger\":null}",
+          "baseSize": 2111407
+        },
+        {
+          "ordinal": 2,
+          "type": "sleep:0",
+          "size": 111,
+          "kind": "{\"kind\":\"delta\",\"ordinal\":2,\"sinceKeyframe\":2,\"baseSize\":2111407,\"lastDelta\":111,\"ratio\":0.000,\"trigger\":null}",
+          "baseSize": 2111407
+        }
+      ],
+      "finalRc": 0,
+      "fingerprint": "live-len: 2097152 head: abababab\n",
+      "resultJson": "{\"len\":2097152}",
+      "totalWritten": 2111629,
+      "storedAtEnd": 2111518,
+      "baseSize": 2111407
+    },
+    {
+      "workload": "briefing",
+      "mode": "full",
+      "rows": [
+        {
+          "ordinal": 0,
+          "type": "job:fetch",
+          "size": 14916,
+          "kind": "full",
+          "baseSize": null
+        },
+        {
+          "ordinal": 1,
+          "type": "job:refine",
+          "size": 18513,
+          "kind": "full",
+          "baseSize": null
+        },
+        {
+          "ordinal": 2,
+          "type": "job:fetch",
+          "size": 19702,
+          "kind": "full",
+          "baseSize": null
+        },
+        {
+          "ordinal": 3,
+          "type": "job:refine",
+          "size": 23246,
+          "kind": "full",
+          "baseSize": null
+        },
+        {
+          "ordinal": 4,
+          "type": "job:fetch",
+          "size": 24435,
+          "kind": "full",
+          "baseSize": null
+        },
+        {
+          "ordinal": 5,
+          "type": "job:refine",
+          "size": 27979,
+          "kind": "full",
+          "baseSize": null
+        },
+        {
+          "ordinal": 6,
+          "type": "job:fetch",
+          "size": 29168,
+          "kind": "full",
+          "baseSize": null
+        },
+        {
+          "ordinal": 7,
+          "type": "job:refine",
+          "size": 32712,
+          "kind": "full",
+          "baseSize": null
+        },
+        {
+          "ordinal": 8,
+          "type": "job:fetch",
+          "size": 33901,
+          "kind": "full",
+          "baseSize": null
+        },
+        {
+          "ordinal": 9,
+          "type": "job:refine",
+          "size": 37445,
+          "kind": "full",
+          "baseSize": null
+        },
+        {
+          "ordinal": 10,
+          "type": "job:fetch",
+          "size": 38634,
+          "kind": "full",
+          "baseSize": null
+        },
+        {
+          "ordinal": 11,
+          "type": "job:refine",
+          "size": 42178,
+          "kind": "full",
+          "baseSize": null
+        }
+      ],
+      "finalRc": 0,
+      "fingerprint": "papers: 6 brief-chars: 3774\n",
+      "resultJson": "{\"papers\":6,\"briefChars\":3774}",
+      "totalWritten": 342829,
+      "storedAtEnd": 42178,
+      "baseSize": null
+    },
+    {
+      "workload": "briefing",
+      "mode": "delta",
+      "rows": [
+        {
+          "ordinal": 0,
+          "type": "job:fetch",
+          "size": 14893,
+          "kind": "{\"kind\":\"base\",\"ordinal\":0,\"sinceKeyframe\":0,\"baseSize\":14893,\"lastDelta\":null,\"ratio\":null,\"trigger\":\"initial\"}",
+          "baseSize": 14893
+        },
+        {
+          "ordinal": 1,
+          "type": "job:refine",
+          "size": 3763,
+          "kind": "{\"kind\":\"delta\",\"ordinal\":1,\"sinceKeyframe\":1,\"baseSize\":14893,\"lastDelta\":3763,\"ratio\":0.202,\"trigger\":null}",
+          "baseSize": 14893
+        },
+        {
+          "ordinal": 2,
+          "type": "job:fetch",
+          "size": 4951,
+          "kind": "{\"kind\":\"delta\",\"ordinal\":2,\"sinceKeyframe\":2,\"baseSize\":14893,\"lastDelta\":4951,\"ratio\":0.249,\"trigger\":null}",
+          "baseSize": 14893
+        },
+        {
+          "ordinal": 3,
+          "type": "job:refine",
+          "size": 8506,
+          "kind": "{\"kind\":\"delta\",\"ordinal\":3,\"sinceKeyframe\":3,\"baseSize\":14893,\"lastDelta\":8506,\"ratio\":0.364,\"trigger\":null}",
+          "baseSize": 14893
+        },
+        {
+          "ordinal": 4,
+          "type": "job:fetch",
+          "size": 9684,
+          "kind": "{\"kind\":\"delta\",\"ordinal\":4,\"sinceKeyframe\":4,\"baseSize\":14893,\"lastDelta\":9684,\"ratio\":0.394,\"trigger\":null}",
+          "baseSize": 14893
+        },
+        {
+          "ordinal": 5,
+          "type": "job:refine",
+          "size": 13239,
+          "kind": "{\"kind\":\"delta\",\"ordinal\":5,\"sinceKeyframe\":5,\"baseSize\":14893,\"lastDelta\":13239,\"ratio\":0.471,\"trigger\":null}",
+          "baseSize": 14893
+        },
+        {
+          "ordinal": 6,
+          "type": "job:fetch",
+          "size": 14417,
+          "kind": "{\"kind\":\"delta\",\"ordinal\":6,\"sinceKeyframe\":6,\"baseSize\":14893,\"lastDelta\":14417,\"ratio\":0.492,\"trigger\":null}",
+          "baseSize": 14893
+        },
+        {
+          "ordinal": 7,
+          "type": "job:refine",
+          "size": 17972,
+          "kind": "{\"kind\":\"delta\",\"ordinal\":7,\"sinceKeyframe\":7,\"baseSize\":14893,\"lastDelta\":17972,\"ratio\":0.547,\"trigger\":null}",
+          "baseSize": 14893
+        },
+        {
+          "ordinal": 8,
+          "type": "job:fetch",
+          "size": 19150,
+          "kind": "{\"kind\":\"delta\",\"ordinal\":8,\"sinceKeyframe\":8,\"baseSize\":14893,\"lastDelta\":19150,\"ratio\":0.563,\"trigger\":null}",
+          "baseSize": 14893
+        },
+        {
+          "ordinal": 9,
+          "type": "job:refine",
+          "size": 22705,
+          "kind": "{\"kind\":\"delta\",\"ordinal\":9,\"sinceKeyframe\":9,\"baseSize\":14893,\"lastDelta\":22705,\"ratio\":0.604,\"trigger\":null}",
+          "baseSize": 14893
+        },
+        {
+          "ordinal": 10,
+          "type": "job:fetch",
+          "size": 23883,
+          "kind": "{\"kind\":\"delta\",\"ordinal\":10,\"sinceKeyframe\":10,\"baseSize\":14893,\"lastDelta\":23883,\"ratio\":0.616,\"trigger\":null}",
+          "baseSize": 14893
+        },
+        {
+          "ordinal": 11,
+          "type": "job:refine",
+          "size": 27438,
+          "kind": "{\"kind\":\"delta\",\"ordinal\":11,\"sinceKeyframe\":11,\"baseSize\":14893,\"lastDelta\":27438,\"ratio\":0.648,\"trigger\":null}",
+          "baseSize": 14893
+        }
+      ],
+      "finalRc": 0,
+      "fingerprint": "papers: 6 brief-chars: 3774\n",
+      "resultJson": "{\"papers\":6,\"briefChars\":3774}",
+      "totalWritten": 180601,
+      "storedAtEnd": 42331,
+      "baseSize": 14893
+    },
+    {
+      "workload": "judgefix",
+      "mode": "full",
+      "rows": [
+        {
+          "ordinal": 0,
+          "type": "job:judge",
+          "size": 14950,
+          "kind": "full",
+          "baseSize": null
+        },
+        {
+          "ordinal": 1,
+          "type": "job:judge",
+          "size": 17539,
+          "kind": "full",
+          "baseSize": null
+        },
+        {
+          "ordinal": 2,
+          "type": "job:judge",
+          "size": 20103,
+          "kind": "full",
+          "baseSize": null
+        },
+        {
+          "ordinal": 3,
+          "type": "job:fix",
+          "size": 22693,
+          "kind": "full",
+          "baseSize": null
+        },
+        {
+          "ordinal": 4,
+          "type": "job:judge",
+          "size": 26753,
+          "kind": "full",
+          "baseSize": null
+        },
+        {
+          "ordinal": 5,
+          "type": "job:judge",
+          "size": 29317,
+          "kind": "full",
+          "baseSize": null
+        },
+        {
+          "ordinal": 6,
+          "type": "job:judge",
+          "size": 31881,
+          "kind": "full",
+          "baseSize": null
+        },
+        {
+          "ordinal": 7,
+          "type": "job:fix",
+          "size": 34471,
+          "kind": "full",
+          "baseSize": null
+        },
+        {
+          "ordinal": 8,
+          "type": "job:aggregate",
+          "size": 34485,
+          "kind": "full",
+          "baseSize": null
+        }
+      ],
+      "finalRc": 0,
+      "fingerprint": "rounds: 2 verdicts: 6 draft-chars: 4096 agg: 2 approved, 1 failed\n",
+      "resultJson": "{\"rounds\":2,\"verdicts\":6,\"draftChars\":4096}",
+      "totalWritten": 232192,
+      "storedAtEnd": 34485,
+      "baseSize": null
+    },
+    {
+      "workload": "judgefix",
+      "mode": "delta",
+      "rows": [
+        {
+          "ordinal": 0,
+          "type": "job:judge",
+          "size": 14927,
+          "kind": "{\"kind\":\"base\",\"ordinal\":0,\"sinceKeyframe\":0,\"baseSize\":14927,\"lastDelta\":null,\"ratio\":null,\"trigger\":\"initial\"}",
+          "baseSize": 14927
+        },
+        {
+          "ordinal": 1,
+          "type": "job:judge",
+          "size": 2735,
+          "kind": "{\"kind\":\"delta\",\"ordinal\":1,\"sinceKeyframe\":1,\"baseSize\":14927,\"lastDelta\":2735,\"ratio\":0.155,\"trigger\":null}",
+          "baseSize": 14927
+        },
+        {
+          "ordinal": 2,
+          "type": "job:judge",
+          "size": 5299,
+          "kind": "{\"kind\":\"delta\",\"ordinal\":2,\"sinceKeyframe\":2,\"baseSize\":14927,\"lastDelta\":5299,\"ratio\":0.262,\"trigger\":null}",
+          "baseSize": 14927
+        },
+        {
+          "ordinal": 3,
+          "type": "job:fix",
+          "size": 7901,
+          "kind": "{\"kind\":\"delta\",\"ordinal\":3,\"sinceKeyframe\":3,\"baseSize\":14927,\"lastDelta\":7901,\"ratio\":0.346,\"trigger\":null}",
+          "baseSize": 14927
+        },
+        {
+          "ordinal": 4,
+          "type": "job:judge",
+          "size": 11965,
+          "kind": "{\"kind\":\"delta\",\"ordinal\":4,\"sinceKeyframe\":4,\"baseSize\":14927,\"lastDelta\":11965,\"ratio\":0.445,\"trigger\":null}",
+          "baseSize": 14927
+        },
+        {
+          "ordinal": 5,
+          "type": "job:judge",
+          "size": 14529,
+          "kind": "{\"kind\":\"delta\",\"ordinal\":5,\"sinceKeyframe\":5,\"baseSize\":14927,\"lastDelta\":14529,\"ratio\":0.493,\"trigger\":null}",
+          "baseSize": 14927
+        },
+        {
+          "ordinal": 6,
+          "type": "job:judge",
+          "size": 17093,
+          "kind": "{\"kind\":\"delta\",\"ordinal\":6,\"sinceKeyframe\":6,\"baseSize\":14927,\"lastDelta\":17093,\"ratio\":0.534,\"trigger\":null}",
+          "baseSize": 14927
+        },
+        {
+          "ordinal": 7,
+          "type": "job:fix",
+          "size": 19691,
+          "kind": "{\"kind\":\"delta\",\"ordinal\":7,\"sinceKeyframe\":7,\"baseSize\":14927,\"lastDelta\":19691,\"ratio\":0.569,\"trigger\":null}",
+          "baseSize": 14927
+        },
+        {
+          "ordinal": 8,
+          "type": "job:aggregate",
+          "size": 19707,
+          "kind": "{\"kind\":\"delta\",\"ordinal\":8,\"sinceKeyframe\":8,\"baseSize\":14927,\"lastDelta\":19707,\"ratio\":0.569,\"trigger\":null}",
+          "baseSize": 14927
+        }
+      ],
+      "finalRc": 0,
+      "fingerprint": "rounds: 2 verdicts: 6 draft-chars: 4096 agg: 2 approved, 1 failed\n",
+      "resultJson": "{\"rounds\":2,\"verdicts\":6,\"draftChars\":4096}",
+      "totalWritten": 113847,
+      "storedAtEnd": 34634,
+      "baseSize": 14927
+    },
+    {
+      "workload": "churn",
+      "mode": "full",
+      "rows": [
+        {
+          "ordinal": 0,
+          "type": "job:rewrite",
+          "size": 14376,
+          "kind": "full",
+          "baseSize": null
+        },
+        {
+          "ordinal": 1,
+          "type": "job:rewrite",
+          "size": 34844,
+          "kind": "full",
+          "baseSize": null
+        },
+        {
+          "ordinal": 2,
+          "type": "job:rewrite",
+          "size": 34844,
+          "kind": "full",
+          "baseSize": null
+        },
+        {
+          "ordinal": 3,
+          "type": "job:rewrite",
+          "size": 34844,
+          "kind": "full",
+          "baseSize": null
+        },
+        {
+          "ordinal": 4,
+          "type": "job:rewrite",
+          "size": 34844,
+          "kind": "full",
+          "baseSize": null
+        },
+        {
+          "ordinal": 5,
+          "type": "job:rewrite",
+          "size": 34844,
+          "kind": "full",
+          "baseSize": null
+        }
+      ],
+      "finalRc": 0,
+      "fingerprint": "rewrites: 6 doc-chars: 20480 head: The transformer \n",
+      "resultJson": "{\"rewrites\":6,\"docChars\":20480}",
+      "totalWritten": 188596,
+      "storedAtEnd": 34844,
+      "baseSize": null
+    },
+    {
+      "workload": "churn",
+      "mode": "delta",
+      "rows": [
+        {
+          "ordinal": 0,
+          "type": "job:rewrite",
+          "size": 14353,
+          "kind": "{\"kind\":\"base\",\"ordinal\":0,\"sinceKeyframe\":0,\"baseSize\":14353,\"lastDelta\":null,\"ratio\":null,\"trigger\":\"initial\"}",
+          "baseSize": 14353
+        },
+        {
+          "ordinal": 1,
+          "type": "job:rewrite",
+          "size": 20605,
+          "kind": "{\"kind\":\"delta\",\"ordinal\":1,\"sinceKeyframe\":1,\"baseSize\":14353,\"lastDelta\":20605,\"ratio\":0.589,\"trigger\":null}",
+          "baseSize": 14353
+        },
+        {
+          "ordinal": 2,
+          "type": "job:rewrite",
+          "size": 20605,
+          "kind": "{\"kind\":\"delta\",\"ordinal\":2,\"sinceKeyframe\":2,\"baseSize\":14353,\"lastDelta\":20605,\"ratio\":0.589,\"trigger\":null}",
+          "baseSize": 14353
+        },
+        {
+          "ordinal": 3,
+          "type": "job:rewrite",
+          "size": 20605,
+          "kind": "{\"kind\":\"delta\",\"ordinal\":3,\"sinceKeyframe\":3,\"baseSize\":14353,\"lastDelta\":20605,\"ratio\":0.589,\"trigger\":null}",
+          "baseSize": 14353
+        },
+        {
+          "ordinal": 4,
+          "type": "job:rewrite",
+          "size": 20605,
+          "kind": "{\"kind\":\"delta\",\"ordinal\":4,\"sinceKeyframe\":4,\"baseSize\":14353,\"lastDelta\":20605,\"ratio\":0.589,\"trigger\":null}",
+          "baseSize": 14353
+        },
+        {
+          "ordinal": 5,
+          "type": "job:rewrite",
+          "size": 20605,
+          "kind": "{\"kind\":\"delta\",\"ordinal\":5,\"sinceKeyframe\":5,\"baseSize\":14353,\"lastDelta\":20605,\"ratio\":0.589,\"trigger\":null}",
+          "baseSize": 14353
+        }
+      ],
+      "finalRc": 0,
+      "fingerprint": "rewrites: 6 doc-chars: 20480 head: The transformer \n",
+      "resultJson": "{\"rewrites\":6,\"docChars\":20480}",
+      "totalWritten": 117378,
+      "storedAtEnd": 34958,
+      "baseSize": 14353
+    }
+  ],
+  "failures": []
+}

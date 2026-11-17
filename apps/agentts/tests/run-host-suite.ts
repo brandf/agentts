@@ -21,8 +21,8 @@ import * as os from "node:os";
 import * as crypto from "node:crypto";
 import { spawnSync } from "node:child_process";
 import { Host, HostRefusalError, prefixFor } from "../src/host";
-import { MockAdapter } from "../src/adapters/mock-adapter";
-import { DirectAdapter } from "../src/adapters/direct-adapter";
+import { MockAdapter } from "../plugins/mock/src/mock-adapter";
+import { DirectAdapter } from "../plugins/direct/src/direct-adapter";
 import { decideLocal } from "../src/decision-model";
 import { ExtractionError } from "../src/extract";
 import { toJsonValue, JsonBoundaryError } from "../src/agentts";
@@ -78,16 +78,17 @@ async function runTest(
   direct: string,
   runId: string,
   branches: number,
-  bundleOut?: string,
+  input?: unknown,
 ): Promise<{ host: Host; runId: string; branches: number } | null> {
   console.log(`\n=== ${name} ===`);
   const d = prefixFor(runId + "-direct");
-  // Straight-through reference.
+  // Straight-through reference: submit -> queue -> result.
   const directHost = new Host({ stateDir: WORKDIR });
-  let rc = directHost.startRun(path.join(TESTS, direct), runId + "-direct");
-  rc = directHost.drive(runId + "-direct");
-  if (rc !== 0) {
-    fail(`${name}: direct reference exited ${rc}`);
+  directHost.submit(path.join(TESTS, direct), { runId: runId + "-direct", input });
+  await directHost.runQueue();
+  const directRes = directHost.result(runId + "-direct");
+  if (directRes.status !== "done") {
+    fail(`${name}: direct reference ${directRes.status} (${directRes.error ?? ""})`);
     return null;
   }
   console.log(`--- direct output ---`);
@@ -97,38 +98,27 @@ async function runTest(
     return null;
   }
 
-  // Fork version: the parent suspends at a combinator (exit 3).
+  // Fork version: submit -> queue -> result. The intermediate
+  // "suspended at a combinator" is asserted from the journal (a fork
+  // event), not from an exit code — there is no in-process drive
+  // mode anymore; `queue run` is the thing that drives submitted runs.
   const host = new Host({ stateDir: WORKDIR });
-  if (bundleOut) {
-    const { entryPath } = host.prepareRun(path.join(TESTS, workflow), runId);
-    let bundle: string;
-    try {
-      bundle = await host.bundle(entryPath, bundleOut);
-    } catch (e) {
-      fail(`${name}: Bun.build failed: ${(e as Error).message}`);
-      return null;
-    }
-    console.log(`BUNDLED OK: workflow + agentts module -> one self-contained script (${fs.statSync(bundle).size} bytes)`);
-    rc = host.startRunFrom(bundle, runId);
-  } else {
-    rc = host.startRun(path.join(TESTS, workflow), runId);
+  host.submit(path.join(TESTS, workflow), { runId, input });
+  await host.runQueue();
+  const res = host.result(runId);
+  if (res.status !== "done") {
+    fail(`${name}: parent ${res.status} (${res.error ?? ""})`);
+    return null;
   }
-  if (rc !== 3) {
-    fail(`${name}: parent run exited ${rc}, expected 3 (suspended at a combinator)`);
+  const events = host.journal(runId);
+  const forks = events.filter((e) => e.event === "fork");
+  if (forks.length < 1) {
+    fail(`${name}: no fork event in the journal — the parent never suspended at a combinator`);
     return null;
   }
   console.log(
     `parent suspended at a combinator, snapshot ${fs.statSync(path.join(SLICES, prefixFor(runId) + ".snap")).size} bytes`,
   );
-  if (!host.registryHas(runId)) {
-    fail(`${name}: registry does not hold suspended parent ${runId}`);
-    return null;
-  }
-  rc = host.drive(runId);
-  if (rc !== 0) {
-    fail(`${name}: parent exited ${rc}`);
-    return null;
-  }
   console.log(`--- parent output ---`);
   console.log(fs.readFileSync(outPathFor(runId), "utf8"));
   const parentOut = fs.readFileSync(outPathFor(runId));
@@ -145,6 +135,16 @@ async function runTest(
     fail(`${name}: registry not empty after completion: ${host.registryIds().join(", ")}`);
   }
   return { host, runId, branches };
+}
+
+/** Run a workflow to completion through the ONE run path (submit ->
+ * queue -> result) and return the result. The old `startRun + drive`
+ * pair is gone; this is how a test drives a run that is not being
+ * cancelled mid-flight. */
+async function runToCompletion(host: Host, workflow: string, runId: string, input?: unknown): Promise<any> {
+  host.submit(workflow, { runId, input });
+  await host.runQueue();
+  return host.result(runId);
 }
 
 function checkJournalPair(
@@ -382,11 +382,11 @@ async function testRace(): Promise<void> {
   }
 }
 
-function testRaceEmpty(): void {
+async function testRaceEmpty(): Promise<void> {
   console.log("\n=== race([]) never settles (bounded drive) ===");
   const runId = "run-race-empty";
   const host = new Host({ stateDir: WORKDIR });
-  let rc = host.startRun(path.join(TESTS, "workflow-race-empty.ts"), runId);
+  let rc = await host.startRun(path.join(TESTS, "workflow-race-empty.ts"), runId);
   if (rc !== 3) {
     fail(`race-empty: parent run exited ${rc}, expected 3 (suspended at race([]))`);
     return;
@@ -398,7 +398,7 @@ function testRaceEmpty(): void {
     !!fork && fork.kind === "race" && fork.branches === 0 && JSON.stringify(fork.childRuns) === "[]",
     "FORK OK: 0-branch race fork, no children",
   );
-  rc = host.drive(runId, { allowUnresolved: true });
+  rc = host.driveStep(runId, { allowUnresolved: true });
   check(rc === 3, "BOUNDED DRIVE OK: still suspended (rc 3)");
   check(!host.journal(runId).some((e) => e.event === "join"), "NO JOIN OK: race([]) spuriously resolved");
   check(host.output(runId) === "", "NO OUTPUT OK: the workflow printed nothing");
@@ -414,11 +414,11 @@ function testRaceEmpty(): void {
   check(host.registrySize() === 0, "REGISTRY OK: empty after cleanup");
 }
 
-function testCancelStep(): void {
+async function testCancelStep(): Promise<void> {
   console.log("\n=== 1. cancel a pending trap ===");
   const runId = "run-cancel-step";
   const host = new Host({ stateDir: WORKDIR });
-  let rc = host.startRun(path.join(TESTS, "workflow-cancel-step.ts"), runId);
+  let rc = await host.startRun(path.join(TESTS, "workflow-cancel-step.ts"), runId);
   if (rc !== 2) {
     fail(`cancel-step: run exited ${rc}, expected 2 (suspended at the trap)`);
     return;
@@ -447,11 +447,11 @@ function testCancelStep(): void {
   check(host.registrySize() === 0, "REGISTRY OK: empty after completion");
 }
 
-function testCancelCombinator(): void {
+async function testCancelCombinator(): Promise<void> {
   console.log("\n=== 2. cancel a whole all() in flight ===");
   const runId = "run-cancel-combinator";
   const host = new Host({ stateDir: WORKDIR });
-  let rc = host.startRun(path.join(TESTS, "workflow-cancel-combinator.ts"), runId);
+  let rc = await host.startRun(path.join(TESTS, "workflow-cancel-combinator.ts"), runId);
   if (rc !== 3) {
     fail(`cancel-combinator: run exited ${rc}, expected 3 (suspended at a combinator)`);
     return;
@@ -502,11 +502,11 @@ function testCancelCombinator(): void {
   check(host.registrySize() === 0, "REGISTRY OK: empty after completion");
 }
 
-function testSticky(): void {
+async function testSticky(): Promise<void> {
   console.log("\n=== 3. sticky cancellation ===");
   const runId = "run-sticky";
   const host = new Host({ stateDir: WORKDIR });
-  let rc = host.startRun(path.join(TESTS, "workflow-sticky.ts"), runId);
+  let rc = await host.startRun(path.join(TESTS, "workflow-sticky.ts"), runId);
   if (rc !== 2) {
     fail(`sticky: run exited ${rc}, expected 2 (suspended at the trap)`);
     return;
@@ -529,11 +529,11 @@ function testSticky(): void {
   check(host.registrySize() === 0, "REGISTRY OK: empty after completion");
 }
 
-function testRaceOrder(): void {
+async function testRaceOrder(): Promise<void> {
   console.log("\n=== 4a. cancel-vs-complete race: result first ===");
   let runId = "run-race-a";
   let host = new Host({ stateDir: WORKDIR });
-  let rc = host.startRun(path.join(TESTS, "workflow-race-order.ts"), runId);
+  let rc = await host.startRun(path.join(TESTS, "workflow-race-order.ts"), runId);
   if (rc !== 2) {
     fail(`race-a: run exited ${rc}, expected 2 (suspended at the first trap)`);
     return;
@@ -572,7 +572,7 @@ function testRaceOrder(): void {
   console.log("\n=== 4b. cancel-vs-complete race: cancel first ===");
   runId = "run-race-b";
   host = new Host({ stateDir: WORKDIR });
-  rc = host.startRun(path.join(TESTS, "workflow-race-order.ts"), runId);
+  rc = await host.startRun(path.join(TESTS, "workflow-race-order.ts"), runId);
   if (rc !== 2) {
     fail(`race-b: run exited ${rc}, expected 2 (suspended at the first trap)`);
     return;
@@ -595,11 +595,11 @@ function testRaceOrder(): void {
   check(host.registrySize() === 0, "REGISTRY OK: empty after completion");
 }
 
-function testNestedCancel(): void {
+async function testNestedCancel(): Promise<void> {
   console.log("\n=== 5. nested propagation (cancel the whole tree) ===");
   const runId = "run-nested-cancel";
   const host = new Host({ stateDir: WORKDIR });
-  let rc = host.startRun(path.join(TESTS, "workflow-nested-cancel.ts"), runId);
+  let rc = await host.startRun(path.join(TESTS, "workflow-nested-cancel.ts"), runId);
   if (rc !== 3) {
     fail(`nested-cancel: run exited ${rc}, expected 3 (suspended at a combinator)`);
     return;
@@ -690,11 +690,11 @@ function testNestedCancel(): void {
   check(host.registrySize() === 0, "REGISTRY OK: empty after completion");
 }
 
-function testTrapTypes(): void {
+async function testTrapTypes(): Promise<void> {
   console.log("\n=== trap dispatch by type string (all six types) ===");
   const runId = "run-trap-types";
   const host = new Host({ stateDir: WORKDIR });
-  let rc = host.startRun(path.join(TESTS, "workflow-trap-types.ts"), runId);
+  let rc = await host.startRun(path.join(TESTS, "workflow-trap-types.ts"), runId);
   if (rc !== 2) {
     fail(`trap-types: run exited ${rc}, expected 2 (suspended at the first trap)`);
     return;
@@ -715,9 +715,14 @@ function testTrapTypes(): void {
   host.restoreBlob(runId);
   const restoredHash = crypto.createHash("sha256").update(fs.readFileSync(host.snapPath(runId)!)).digest("hex");
   check(restoredHash === storedHash, `BLOB ROUND-TRIP OK: disk store holds the blob (${storedHash.slice(0, 16)}…), run resumes from it`);
-  rc = host.drive(runId);
-  if (rc !== 0) {
-    fail(`trap-types: run exited ${rc}`);
+  // Drive to completion via the queue: the run was started stepwise
+  // (for the blob round-trip while suspended), so enqueue it for the
+  // queue to resume and drive.
+  host.enqueue(path.join(TESTS, "workflow-trap-types.ts"), runId);
+  await host.runQueue();
+  const res = host.result(runId);
+  if (res.status !== "done") {
+    fail(`trap-types: run ${res.status} (${res.error ?? ""})`);
     return;
   }
   const out = host.output(runId);
@@ -753,19 +758,28 @@ async function testAgenttsBundle(): Promise<void> {
   console.log("\n=== agentts module via Bun.build (TS host bundles, C host evals) ===");
   const runId = "run-agentts";
   const host = new Host({ stateDir: WORKDIR });
-  const { entryPath } = host.prepareRun(path.join(TESTS, "workflow-agentts.ts"), runId);
+  host.prepareRun(path.join(TESTS, "workflow-agentts.ts"), runId);
+  const driverPath = host.driverFor(runId);
   let bundleOut: string;
   try {
-    bundleOut = await host.bundle(entryPath, "bundle-agentts.js");
+    bundleOut = await host.bundle(driverPath, "bundle-agentts.js");
   } catch (e) {
     fail(`agentts-bundle: ${(e as Error).message}`);
     return;
   }
   console.log(`BUNDLED OK: workflow + agentts module -> one self-contained script (${fs.statSync(bundleOut).size} bytes)`);
-  let rc = host.startRunFrom(bundleOut, runId);
-  rc = host.drive(runId);
-  if (rc !== 0) {
-    fail(`agentts-bundle: run exited ${rc}`);
+  const rc0 = host.startRunFrom(bundleOut, runId);
+  if (rc0 !== 2) {
+    fail(`agentts-bundle: run exited ${rc0}, expected 2 (suspended at the first trap)`);
+    return;
+  }
+  // Drive to completion via the queue (the run was started from an
+  // explicit bundle, so enqueue it for the queue to resume and drive).
+  host.enqueue(path.join(TESTS, "workflow-agentts.ts"), runId);
+  await host.runQueue();
+  const res = host.result(runId);
+  if (res.status !== "done") {
+    fail(`agentts-bundle: run ${res.status} (${res.error ?? ""})`);
     return;
   }
   const out = host.output(runId);
@@ -817,7 +831,6 @@ async function testAgenttsCombinators(): Promise<void> {
       direct,
       runId,
       branches,
-      `bundle-${name}-module.js`,
     );
     if (r) {
       const traps = r.host.journal(runId).filter((e) => e.event === "trap");
@@ -833,18 +846,27 @@ async function testJsonBoundary(): Promise<void> {
   console.log("\n=== trap-boundary JSON rule (BRA-46): dirty args throw at the call site ===");
   const runId = "run-json-boundary";
   const host = new Host({ stateDir: WORKDIR });
-  const { entryPath } = host.prepareRun(path.join(TESTS, "workflow-json-boundary.ts"), runId);
+  host.prepareRun(path.join(TESTS, "workflow-json-boundary.ts"), runId);
+  const driverPath = host.driverFor(runId);
   let bundleOut: string;
   try {
-    bundleOut = await host.bundle(entryPath, "bundle-json-boundary.js");
+    bundleOut = await host.bundle(driverPath, "bundle-json-boundary.js");
   } catch (e) {
     fail(`json-boundary: ${(e as Error).message}`);
     return;
   }
-  let rc = host.startRunFrom(bundleOut, runId);
-  rc = host.drive(runId);
-  if (rc !== 0) {
-    fail(`json-boundary: run exited ${rc}`);
+  const rc0 = host.startRunFrom(bundleOut, runId);
+  if (rc0 !== 2) {
+    fail(`json-boundary: run exited ${rc0}, expected 2 (suspended at the first trap)`);
+    return;
+  }
+  // Drive to completion via the queue (the run was started from an
+  // explicit bundle, so enqueue it for the queue to resume and drive).
+  host.enqueue(path.join(TESTS, "workflow-json-boundary.ts"), runId);
+  await host.runQueue();
+  const res = host.result(runId);
+  if (res.status !== "done") {
+    fail(`json-boundary: run ${res.status} (${res.error ?? ""})`);
     return;
   }
   const out = host.output(runId);
@@ -896,28 +918,31 @@ async function testJsonBoundary(): Promise<void> {
   check(host.registrySize() === 0, "REGISTRY OK: empty after completion");
 }
 
-function testErrorRehydration(): void {
+async function testErrorRehydration(): Promise<void> {
   console.log("\n=== error rehydration (BRA-41): throwing traps arrive as real Errors ===");
   const runId = "run-error-rehydration";
   const d = prefixFor(runId + "-direct");
   const directHost = new Host({ stateDir: WORKDIR });
-  let rc = directHost.startRun(path.join(TESTS, "workflow-error-rehydration-direct.ts"), runId + "-direct");
-  rc = directHost.drive(runId + "-direct");
-  if (rc !== 0) {
-    fail(`rehydration: direct reference exited ${rc}`);
+  const res = await runToCompletion(directHost, path.join(TESTS, "workflow-error-rehydration-direct.ts"), runId + "-direct");
+  if (res.status !== "done") {
+    fail(`rehydration: direct reference ${res.status} (${res.error ?? ""})`);
     return;
   }
   const host = new Host({ stateDir: WORKDIR });
   host.queueAnswer("job", { throw: { name: "Error", message: "boom" } });
   host.queueAnswer("job", { throw: "plain failure" });
-  rc = host.startRun(path.join(TESTS, "workflow-error-rehydration.ts"), runId);
+  let rc = await host.startRun(path.join(TESTS, "workflow-error-rehydration.ts"), runId);
   if (rc !== 2) {
     fail(`rehydration: run exited ${rc}, expected 2 (suspended at the trap)`);
     return;
   }
-  rc = host.drive(runId);
-  if (rc !== 0) {
-    fail(`rehydration: run exited ${rc}`);
+  // Drive to completion via the queue (the run was started stepwise
+  // so the two queued job answers could be delivered in order).
+  host.enqueue(path.join(TESTS, "workflow-error-rehydration.ts"), runId);
+  await host.runQueue();
+  const res2 = host.result(runId);
+  if (res2.status !== "done") {
+    fail(`rehydration: run ${res2.status} (${res2.error ?? ""})`);
     return;
   }
   const parentOut = fs.readFileSync(outPathFor(runId));
@@ -1046,20 +1071,24 @@ function testJsonBoundaryUnit(): void {
   check(journalThrew, "JOURNAL OK: an event with undefined fails loudly instead of writing a corrupt line");
 }
 
-function testVirtualClock(): void {
+async function testVirtualClock(): Promise<void> {
   console.log("\n=== virtual clock (sleep advances, cron fires at absolute datetimes) ===");
   const runId = "run-clock";
   const host = new Host({ stateDir: WORKDIR });
   const wallStart = Date.now();
-  let rc = host.startRun(path.join(TESTS, "workflow-clock.ts"), runId);
+  let rc = await host.startRun(path.join(TESTS, "workflow-clock.ts"), runId);
   if (rc !== 2) {
     fail(`clock: run exited ${rc}, expected 2 (suspended at the first trap)`);
     return;
   }
-  rc = host.drive(runId);
+  // Drive to completion via the queue (the run was started
+  // stepwise, so enqueue it for the queue to resume and drive).
+  host.enqueue(path.join(TESTS, "workflow-clock.ts"), runId);
+  await host.runQueue();
   const wallMs = Date.now() - wallStart;
-  if (rc !== 0) {
-    fail(`clock: run exited ${rc}`);
+  const res = host.result(runId);
+  if (res.status !== "done") {
+    fail(`clock: run exited ${rc}` + ` (status ${res.status}: ${res.error ?? ""})`);
     return;
   }
   check(wallMs < 10000, `VIRTUAL TIME OK: 2h of sleeps + months of cron jumps completed in ${wallMs}ms wall time (no real waiting)`);
@@ -1080,39 +1109,38 @@ function testVirtualClock(): void {
   check(host.registrySize() === 0, "REGISTRY OK: empty after completion");
 }
 
-function testGateHold(): void {
+async function testGateHold(): Promise<void> {
   console.log("\n=== held gate (the week-long gate in miniature) ===");
   const runId = "run-gate-hold";
   const host = new Host({ stateDir: WORKDIR, adapter: new MockAdapter({ gates: "hold" }) });
-  let rc = host.startRun(path.join(TESTS, "workflow-gate-hold.ts"), runId);
-  if (rc !== 2) {
-    fail(`gate-hold: run exited ${rc}, expected 2 (suspended at the gate)`);
-    return;
-  }
-  rc = host.drive(runId);
-  check(rc === 2, "HOLD OK: drive stopped at the gate (rc 2, not completed)");
+  // Submit + queue: the run drives to the gate and holds there.
+  host.submit(path.join(TESTS, "workflow-gate-hold.ts"), { runId });
+  await host.runQueue();
+  const heldRes = host.result(runId);
+  check(heldRes.status === "held", `HOLD OK: the run is held at the gate (got ${heldRes.status})`);
   check(host.isGatePending(runId), "HOLD OK: the gate is pending");
-  check(host.registryHas(runId), "HOLD OK: the run stays suspended in the registry");
   const held = host.journal(runId).filter((e) => e.event === "gate-held");
   check(held.length === 1 && held[0].question === "approve?", "JOURNAL OK: gate-held event recorded with the question");
   check(host.output(runId) === "", "HOLD OK: no output yet — the gate never resolved until the test delivered an answer");
-  rc = host.deliverGate(runId, { answer: "no" });
-  check(rc === 0, "DELIVER OK: after the answer the run completed");
+  // Deliver the answer (persisted to disk, run re-queued), then drive.
+  host.deliverGate(runId, { answer: "no" });
+  await host.runQueue();
+  const res = host.result(runId);
+  check(res.status === "done", `DELIVER OK: after the answer the run completed (got ${res.status})`);
   const out = host.output(runId);
   check(out.includes('answer: {"answer":"no"}'), "DELIVER OK: the workflow received the delivered answer");
   check(out.includes("done"), "DELIVER OK: workflow completed");
   check(host.registrySize() === 0, "REGISTRY OK: empty after completion");
 }
 
-function testTypedValid(): void {
+async function testTypedValid(): Promise<void> {
   console.log("\n=== typed trap, valid path (configurable canned decide) ===");
   const runId = "run-typed-valid";
   const host = new Host({ stateDir: WORKDIR });
   host.queueAnswer("decide", { choice: "b", confidence: 0.6 });
-  let rc = host.startRun(path.join(TESTS, "workflow-typed-valid.ts"), runId);
-  rc = host.drive(runId);
-  if (rc !== 0) {
-    fail(`typed-valid: run exited ${rc}`);
+  const res = await runToCompletion(host, path.join(TESTS, "workflow-typed-valid.ts"), runId);
+  if (res.status !== "done") {
+    fail(`typed-valid: run ${res.status} (${res.error ?? ""})`);
     return;
   }
   const out = host.output(runId);
@@ -1123,15 +1151,14 @@ function testTypedValid(): void {
   check(host.registrySize() === 0, "REGISTRY OK: empty after completion");
 }
 
-function testTypedBadOutput(): void {
+async function testTypedBadOutput(): Promise<void> {
   console.log("\n=== typed trap, bad output (schema failure throws at the call site) ===");
   const runId = "run-typed-bad-output";
   const host = new Host({ stateDir: WORKDIR });
   host.queueAnswer("job", { score: "high", label: "approved" });
-  let rc = host.startRun(path.join(TESTS, "workflow-typed-bad-output.ts"), runId);
-  rc = host.drive(runId);
-  if (rc !== 0) {
-    fail(`typed-bad-output: run exited ${rc}`);
+  const res = await runToCompletion(host, path.join(TESTS, "workflow-typed-bad-output.ts"), runId);
+  if (res.status !== "done") {
+    fail(`typed-bad-output: run ${res.status} (${res.error ?? ""})`);
     return;
   }
   const out = host.output(runId);
@@ -1150,7 +1177,7 @@ function testTypedBadOutput(): void {
   check(host.registrySize() === 0, "REGISTRY OK: empty after completion");
 }
 
-function testTypedRepair(): void {
+async function testTypedRepair(): Promise<void> {
   console.log("\n=== typed trap, repair loop (same trapId, error attached) ===");
   const runId = "run-typed-repair";
   const host = new Host({ stateDir: WORKDIR });
@@ -1160,10 +1187,9 @@ function testTypedRepair(): void {
     seen.push(ctx);
     return { value: { score: 0.92, label: "approved" } };
   });
-  let rc = host.startRun(path.join(TESTS, "workflow-typed-repair.ts"), runId);
-  rc = host.drive(runId);
-  if (rc !== 0) {
-    fail(`typed-repair: run exited ${rc}`);
+  const res = await runToCompletion(host, path.join(TESTS, "workflow-typed-repair.ts"), runId);
+  if (res.status !== "done") {
+    fail(`typed-repair: run ${res.status} (${res.error ?? ""})`);
     return;
   }
   const out = host.output(runId);
@@ -1187,7 +1213,7 @@ function testTypedRepair(): void {
   check(host.registrySize() === 0, "REGISTRY OK: empty after completion");
 }
 
-function testTypedRepairExhausted(): void {
+async function testTypedRepairExhausted(): Promise<void> {
   console.log("\n=== typed trap, repair exhausted (throws after max attempts) ===");
   const runId = "run-typed-repair-exhausted";
   const host = new Host({ stateDir: WORKDIR, maxRepairAttempts: 2 });
@@ -1197,10 +1223,9 @@ function testTypedRepairExhausted(): void {
     calls++;
     return { value: { score: "high", label: "approved" } };
   });
-  let rc = host.startRun(path.join(TESTS, "workflow-typed-repair-exhausted.ts"), runId);
-  rc = host.drive(runId);
-  if (rc !== 0) {
-    fail(`typed-repair-exhausted: run exited ${rc}`);
+  const res = await runToCompletion(host, path.join(TESTS, "workflow-typed-repair-exhausted.ts"), runId);
+  if (res.status !== "done") {
+    fail(`typed-repair-exhausted: run ${res.status} (${res.error ?? ""})`);
     return;
   }
   const out = host.output(runId);
@@ -1214,7 +1239,7 @@ function testTypedRepairExhausted(): void {
   check(host.registrySize() === 0, "REGISTRY OK: empty after completion");
 }
 
-function testJsonCleanDate(): void {
+async function testJsonCleanDate(): Promise<void> {
   console.log("\n=== JSON-clean ordering (Date converts first, then schema validates) ===");
   const runId = "run-json-clean-date";
   const host = new Host({ stateDir: WORKDIR });
@@ -1222,10 +1247,9 @@ function testJsonCleanDate(): void {
   host.setRepairHandler("job", () => ({
     value: { score: 0.92, label: "approved", at: new Date("2027-04-09T12:00:00.000Z") },
   }));
-  let rc = host.startRun(path.join(TESTS, "workflow-json-clean-date.ts"), runId);
-  rc = host.drive(runId);
-  if (rc !== 0) {
-    fail(`json-clean-date: run exited ${rc}`);
+  const res = await runToCompletion(host, path.join(TESTS, "workflow-json-clean-date.ts"), runId);
+  if (res.status !== "done") {
+    fail(`json-clean-date: run ${res.status} (${res.error ?? ""})`);
     return;
   }
   const out = host.output(runId);
@@ -1238,7 +1262,7 @@ function testJsonCleanDate(): void {
   check(host.registrySize() === 0, "REGISTRY OK: empty after completion");
 }
 
-function testJsonCleanReject(): void {
+async function testJsonCleanReject(): Promise<void> {
   console.log("\n=== JSON-clean rejections (precise errors, phase json-clean) ===");
   const runId = "run-json-clean-reject";
   const host = new Host({ stateDir: WORKDIR });
@@ -1253,10 +1277,9 @@ function testJsonCleanReject(): void {
     label = "approved";
   }
   host.queueAnswer("job", new Foo());
-  let rc = host.startRun(path.join(TESTS, "workflow-json-clean-reject.ts"), runId);
-  rc = host.drive(runId);
-  if (rc !== 0) {
-    fail(`json-clean-reject: run exited ${rc}`);
+  const res = await runToCompletion(host, path.join(TESTS, "workflow-json-clean-reject.ts"), runId);
+  if (res.status !== "done") {
+    fail(`json-clean-reject: run ${res.status} (${res.error ?? ""})`);
     return;
   }
   const out = host.output(runId);
@@ -1277,7 +1300,7 @@ function testJsonCleanReject(): void {
   check(host.registrySize() === 0, "REGISTRY OK: empty after completion");
 }
 
-function testLoudFailures(): void {
+async function testLoudFailures(): Promise<void> {
   console.log("\n=== loud failures at first run (no extractable type) ===");
   const cases: [string, string][] = [
     ["workflow-no-type.ts", "exactly two"],
@@ -1288,7 +1311,7 @@ function testLoudFailures(): void {
     const host = new Host({ stateDir: WORKDIR });
     let threw: any = null;
     try {
-      host.startRun(path.join(TESTS, file), "run-loud-" + file.replace(".ts", ""));
+      await host.startRun(path.join(TESTS, file), "run-loud-" + file.replace(".ts", ""));
     } catch (e) {
       threw = e;
     }
@@ -1301,7 +1324,7 @@ function testLoudFailures(): void {
   }
 }
 
-function testExtractionCache(): void {
+async function testExtractionCache(): Promise<void> {
   console.log("\n=== extraction cache (keyed by content hash, pinned with the frozen copy) ===");
   const cacheDir = path.join(WORKDIR, "cache");
   const before = fs.existsSync(cacheDir) ? fs.readdirSync(cacheDir).filter((f) => f.endsWith(".json")).length : 0;
@@ -1311,26 +1334,35 @@ function testExtractionCache(): void {
     .replace("after sleep 1:", "after sleep 1 (copy):");
   fs.writeFileSync(copyPath, copySrc);
   const p1 = new Host({ stateDir: WORKDIR });
-  let rc = p1.startRun(copyPath, "run-cache-a");
-  rc = p1.drive("run-cache-a");
-  check(rc === 0, "CACHE OK: first run of the copy completed");
+  let rc = await p1.startRun(copyPath, "run-cache-a");
+  // Drive to completion via the queue (the run was started
+  // stepwise, so enqueue it for the queue to resume and drive).
+  p1.enqueue(copyPath, "run-cache-a");
+  await p1.runQueue();
+  check(p1.result("run-cache-a").status === "done", "CACHE OK: first run of the copy completed");
   const afterFirst = fs.readdirSync(cacheDir).filter((f) => f.endsWith(".json")).length;
   check(afterFirst === before + 1, `CACHE OK: one cache entry appeared (was ${before}, now ${afterFirst})`);
   const entries = fs.readdirSync(cacheDir).filter((f) => f.endsWith(".json"));
   const newest = entries.map((f) => path.join(cacheDir, f)).sort((a, b) => fs.statSync(b).mtimeMs - fs.statSync(a).mtimeMs)[0];
   const mtime1 = fs.statSync(newest).mtimeMs;
   const p2 = new Host({ stateDir: WORKDIR });
-  rc = p2.startRun(copyPath, "run-cache-b");
-  rc = p2.drive("run-cache-b");
-  check(rc === 0, "CACHE OK: second run completed");
+  rc = await p2.startRun(copyPath, "run-cache-b");
+  // Drive to completion via the queue (the run was started
+  // stepwise, so enqueue it for the queue to resume and drive).
+  p2.enqueue(copyPath, "run-cache-b");
+  await p2.runQueue();
+  check(p2.result("run-cache-b").status === "done", "CACHE OK: second run completed");
   check(fs.readdirSync(cacheDir).filter((f) => f.endsWith(".json")).length === afterFirst, "CACHE OK: second run added no entry — cache hit");
   check(fs.statSync(newest).mtimeMs === mtime1, "CACHE OK: the entry file was not rewritten — cache hit");
   check(p1.output("run-cache-a") === p2.output("run-cache-b"), "CACHE OK: both runs produced identical output");
   fs.appendFileSync(copyPath, "\n// comment change: content hash must change\n");
   const p3 = new Host({ stateDir: WORKDIR });
-  rc = p3.startRun(copyPath, "run-cache-c");
-  rc = p3.drive("run-cache-c");
-  check(rc === 0, "CACHE OK: mutated copy completed");
+  rc = await p3.startRun(copyPath, "run-cache-c");
+  // Drive to completion via the queue (the run was started
+  // stepwise, so enqueue it for the queue to resume and drive).
+  p3.enqueue(copyPath, "run-cache-c");
+  await p3.runQueue();
+  check(p3.result("run-cache-c").status === "done", "CACHE OK: mutated copy completed");
   check(fs.readdirSync(cacheDir).filter((f) => f.endsWith(".json")).length === afterFirst + 1, "CACHE OK: changed source produced a new cache entry (re-extraction)");
   check(p3.output("run-cache-c") === p1.output("run-cache-a"), "CACHE OK: mutated copy (comment only) produced identical output");
 }
@@ -1344,9 +1376,13 @@ async function testGateAgentLoop(): Promise<void> {
     `declare function print(...args: unknown[]): void;`,
     `interface ScoreInput { value: number; }`,
     `interface ScoreResult { score: number; label: string; }`,
-    `const j = job<ScoreInput, ScoreResult>({ spec: "score", input: { value: "seven" } });`,
-    `print("job:", JSON.stringify(j));`,
-    `print("done");`,
+    `interface GateAgentResult { done: boolean; }`,
+    `export default function run(): GateAgentResult {`,
+    `  const j = job<ScoreInput, ScoreResult>({ spec: "score", input: { value: "seven" } });`,
+    `  print("job:", JSON.stringify(j));`,
+    `  print("done");`,
+    `  return { done: true };`,
+    `}`,
     "",
   ].join("\n");
   fs.writeFileSync(agentPath, brokenSrc);
@@ -1385,17 +1421,21 @@ async function testGateAgentLoop(): Promise<void> {
   check(!fs.existsSync(path.join(SLICES, prefixFor("run-gate-agent") + ".out")), "GATE OK: no output was written");
   check(host.gateRuns === 1, `GATE OK: the gate ran once for the broken version (gateRuns ${host.gateRuns})`);
   fs.writeFileSync(agentPath, brokenSrc.replace('"seven"', "7"));
-  const { entryPath } = host.prepareRun(agentPath, "run-gate-agent");
+  host.prepareRun(agentPath, "run-gate-agent");
+  const driverPath = host.driverFor("run-gate-agent");
   let bundleOut: string;
   try {
-    bundleOut = await host.bundle(entryPath, "bundle-gate-agent.js");
+    bundleOut = await host.bundle(driverPath, "bundle-gate-agent.js");
   } catch (e) {
     fail(`gate-agent: bundle failed: ${(e as Error).message}`);
     return;
   }
-  let rc = host.startRunFrom(bundleOut, "run-gate-agent");
-  rc = host.drive("run-gate-agent");
-  check(rc === 0, "GATE OK: the fixed workflow passes the gate and runs");
+  const rc0 = host.startRunFrom(bundleOut, "run-gate-agent");
+  // (startRunFrom suspends at the first trap; drive it via
+  // the queue, enqueuing the same workflow path.)
+  host.enqueue(agentPath, "run-gate-agent");
+  await host.runQueue();
+  check(host.result("run-gate-agent").status === "done", "GATE OK: the fixed workflow passes the gate and runs");
   check(
     host.output("run-gate-agent").includes('job: {"score":0.92,"label":"approved"}'),
     "GATE OK: the fixed workflow completed with the canned result",
@@ -1404,7 +1444,7 @@ async function testGateAgentLoop(): Promise<void> {
   check(host.registrySize() === 0, "REGISTRY OK: empty after completion");
 }
 
-function testGateCache(): void {
+async function testGateCache(): Promise<void> {
   console.log("\n=== first-run gate: second run of the same version skips the gate from cache ===");
   const copyPath = path.join(WORKDIR, "workflow-gate-cache.ts");
   fs.writeFileSync(
@@ -1412,19 +1452,25 @@ function testGateCache(): void {
     fs.readFileSync(path.join(TESTS, "workflow-clock.ts"), "utf8").replace("after sleep 1:", "after sleep 1 (gate):"),
   );
   const p1 = new Host({ stateDir: WORKDIR });
-  let rc = p1.startRun(copyPath, "run-gate-cache-a");
-  rc = p1.drive("run-gate-cache-a");
-  check(rc === 0, "GATE OK: first run completed");
+  let rc = await p1.startRun(copyPath, "run-gate-cache-a");
+  // Drive to completion via the queue (the run was started
+  // stepwise, so enqueue it for the queue to resume and drive).
+  p1.enqueue(copyPath, "run-gate-cache-a");
+  await p1.runQueue();
+  check(p1.result("run-gate-cache-a").status === "done", "GATE OK: first run completed");
   check(p1.gateRuns === 1, `GATE OK: the gate ran once for the first run (gateRuns ${p1.gateRuns})`);
   const p2 = new Host({ stateDir: WORKDIR });
-  rc = p2.startRun(copyPath, "run-gate-cache-b");
-  rc = p2.drive("run-gate-cache-b");
-  check(rc === 0, "GATE OK: second run completed");
+  rc = await p2.startRun(copyPath, "run-gate-cache-b");
+  // Drive to completion via the queue (the run was started
+  // stepwise, so enqueue it for the queue to resume and drive).
+  p2.enqueue(copyPath, "run-gate-cache-b");
+  await p2.runQueue();
+  check(p2.result("run-gate-cache-b").status === "done", "GATE OK: second run completed");
   check(p2.gateRuns === 0, `GATE OK: the second run skipped the gate from cache (gateRuns ${p2.gateRuns})`);
   check(p1.output("run-gate-cache-a") === p2.output("run-gate-cache-b"), "GATE OK: both runs produced identical output");
 }
 
-function testGateRegate(): void {
+async function testGateRegate(): Promise<void> {
   console.log("\n=== first-run gate: a source-hash change re-gates ===");
   const copyPath = path.join(WORKDIR, "workflow-gate-regate.ts");
   const base = fs
@@ -1432,23 +1478,32 @@ function testGateRegate(): void {
     .replace("after sleep 1:", "after sleep 1 (regate):");
   fs.writeFileSync(copyPath, base);
   const host = new Host({ stateDir: WORKDIR });
-  let rc = host.startRun(copyPath, "run-gate-regate-a");
-  rc = host.drive("run-gate-regate-a");
-  check(rc === 0, "GATE OK: first version completed");
+  let rc = await host.startRun(copyPath, "run-gate-regate-a");
+  // Drive to completion via the queue (the run was started
+  // stepwise, so enqueue it for the queue to resume and drive).
+  host.enqueue(copyPath, "run-gate-regate-a");
+  await host.runQueue();
+  check(host.result("run-gate-regate-a").status === "done", "GATE OK: first version completed");
   check(host.gateRuns === 1, `GATE OK: gate ran for the first version (gateRuns ${host.gateRuns})`);
   fs.appendFileSync(copyPath, "\n// comment change: content hash must change\n");
-  rc = host.startRun(copyPath, "run-gate-regate-b");
-  rc = host.drive("run-gate-regate-b");
-  check(rc === 0, "GATE OK: comment-only version completed");
+  rc = await host.startRun(copyPath, "run-gate-regate-b");
+  // Drive to completion via the queue (the run was started
+  // stepwise, so enqueue it for the queue to resume and drive).
+  host.enqueue(copyPath, "run-gate-regate-b");
+  await host.runQueue();
+  check(host.result("run-gate-regate-b").status === "done", "GATE OK: comment-only version completed");
   check(host.gateRuns === 2, `GATE OK: the changed version was re-gated (gateRuns ${host.gateRuns})`);
   check(
     host.output("run-gate-regate-b") === host.output("run-gate-regate-a"),
     "GATE OK: comment-only change produced identical output",
   );
-  fs.writeFileSync(copyPath, base + "\nconst wrongType: number = s1.sleptMs.toString();\n");
+  // (The entry function scopes the workflow's locals, so the
+  // mistyped line must not reference them — a plain top-level
+  // TS2322 is the same gate refusal the test counts.)
+  fs.writeFileSync(copyPath, base + "\nconst wrongType: number = \"not a number\";\n");
   let threw: any = null;
   try {
-    host.startRun(copyPath, "run-gate-regate-c");
+    await host.startRun(copyPath, "run-gate-regate-c");
   } catch (e) {
     threw = e;
   }
@@ -1481,13 +1536,17 @@ async function testCheckerGateLoop(): Promise<void> {
     `declare function print(...args: unknown[]): void;`,
     `interface ScoreInput { value: number; }`,
     `class ScoreResult { score = 0; label = ""; }`,
+    `interface CheckerAgentResult { done: boolean; }`,
     // Spec "checker-score", not "score": the cache is
     // content-addressed, and the gate agent loop's fixed workflow
     // (spec "score", same shape) already wrote an entry for its
     // hash — reusing it would skip the re-check this test counts.
-    `const j = job<ScoreInput, ScoreResult>({ spec: "checker-score", input: { value: 7 } });`,
-    `print("job:", JSON.stringify(j));`,
-    `print("done");`,
+    `export default function run(): CheckerAgentResult {`,
+    `  const j = job<ScoreInput, ScoreResult>({ spec: "checker-score", input: { value: 7 } });`,
+    `  print("job:", JSON.stringify(j));`,
+    `  print("done");`,
+    `  return { done: true };`,
+    `}`,
     "",
   ].join("\n");
   fs.writeFileSync(agentPath, brokenSrc);
@@ -1519,10 +1578,11 @@ async function testCheckerGateLoop(): Promise<void> {
     agentPath,
     brokenSrc.replace("class ScoreResult { score = 0; label = \"\"; }", "interface ScoreResult { score: number; label: string; }"),
   );
-  const { entryPath } = host.prepareRun(agentPath, "run-checker-agent");
+  host.prepareRun(agentPath, "run-checker-agent");
+  const driverPath = host.driverFor("run-checker-agent");
   let bundleOut: string;
   try {
-    bundleOut = await host.bundle(entryPath, "bundle-checker-agent.js");
+    bundleOut = await host.bundle(driverPath, "bundle-checker-agent.js");
   } catch (e) {
     fail(`checker-agent: bundle failed: ${(e as Error).message}`);
     return;
@@ -1531,9 +1591,12 @@ async function testCheckerGateLoop(): Promise<void> {
   // table (keyed `spec:value`), so queue the expected answer for
   // the run's one job trap.
   host.queueAnswer("job", { score: 0.92, label: "approved" });
-  let rc = host.startRunFrom(bundleOut, "run-checker-agent");
-  rc = host.drive("run-checker-agent");
-  check(rc === 0, "CHECKER OK: the fixed workflow passes the gate + checker and runs");
+  const rc0 = host.startRunFrom(bundleOut, "run-checker-agent");
+  // (startRunFrom suspends at the first trap; drive it via
+  // the queue, enqueuing the same workflow path.)
+  host.enqueue(agentPath, "run-checker-agent");
+  await host.runQueue();
+  check(host.result("run-checker-agent").status === "done", "CHECKER OK: the fixed workflow passes the gate + checker and runs");
   check(
     host.output("run-checker-agent").includes('job: {"score":0.92,"label":"approved"}'),
     "CHECKER OK: the fixed workflow completed with the canned result",
@@ -1577,17 +1640,20 @@ function testCheckerCli(): void {
   check(r4.stdout.includes("LAYERING OK"), `CLI CHECK OK: --layering prints LAYERING OK`);
 }
 
-function testResumeNoReextract(): void {
+async function testResumeNoReextract(): Promise<void> {
   console.log("\n=== first-run pipeline: a resumed run never re-extracts ===");
   const runId = "run-resume-no-reextract";
   const host = new Host({ stateDir: WORKDIR });
   const cacheDir = path.join(WORKDIR, "cache");
-  let rc = host.startRun(path.join(TESTS, "workflow-clock.ts"), runId);
+  let rc = await host.startRun(path.join(TESTS, "workflow-clock.ts"), runId);
   check(rc === 2, `RESUME OK: run suspended at the first trap (rc ${rc})`);
   const gatesAfterStart = host.gateRuns;
   const entriesAfterStart = fs.readdirSync(cacheDir).filter((f) => f.endsWith(".json")).length;
-  rc = host.drive(runId);
-  check(rc === 0, "RESUME OK: drive completed the run");
+  // Drive to completion via the queue (the run was started
+  // stepwise, so enqueue it for the queue to resume and drive).
+  host.enqueue(path.join(TESTS, "workflow-clock.ts"), runId);
+  await host.runQueue();
+  check(host.result(runId).status === "done", "RESUME OK: drive completed the run");
   check(host.gateRuns === gatesAfterStart, `RESUME OK: the resume ran no gate (gateRuns ${host.gateRuns})`);
   check(
     fs.readdirSync(cacheDir).filter((f) => f.endsWith(".json")).length === entriesAfterStart,
@@ -1648,7 +1714,7 @@ function testDiskJournal(): void {
   );
 }
 
-function testCompilerRefusal(): void {
+async function testCompilerRefusal(): Promise<void> {
   console.log("\n=== host refuses to start a workflow when the compiler is unavailable ===");
   process.env.AGENTTS_NO_COMPILER = "1";
   const host = new Host({ stateDir: WORKDIR });
@@ -1671,12 +1737,16 @@ function testCompilerRefusal(): void {
   check(!fs.existsSync(path.join(SLICES, "run-no-compiler.snap")), "REFUSAL OK: no snapshot was written");
   // And the host works again once the compiler is back.
   const host2 = new Host({ stateDir: WORKDIR });
-  const rc = host2.startRun(path.join(TESTS, "workflow-clock.ts"), "run-compiler-back");
+  const rc = await host2.startRun(path.join(TESTS, "workflow-clock.ts"), "run-compiler-back");
   check(rc === 2, "REFUSAL OK: with the compiler available the same workflow starts (rc 2, suspended at first trap)");
-  check(host2.drive("run-compiler-back") === 0, "REFUSAL OK: it completes");
+  // Drive to completion via the queue (the run was started stepwise,
+  // so enqueue it for the queue to resume and drive).
+  host2.enqueue(path.join(TESTS, "workflow-clock.ts"), "run-compiler-back");
+  await host2.runQueue();
+  check(host2.result("run-compiler-back").status === "done", "REFUSAL OK: it completes");
 }
 
-function testQueue(): void {
+async function testQueue(): Promise<void> {
   console.log("\n=== run queue (plugin-internal dispatch queue) ===");
   const qState = path.join(WORKDIR, "queue-state");
   const host = new Host({ stateDir: qState });
@@ -1684,7 +1754,7 @@ function testQueue(): void {
   const b = host.enqueue(path.join(TESTS, "workflow-clock.ts"), "run-queue-b");
   check(a.status === "queued" && b.status === "queued", "QUEUE OK: two runs enqueued");
   check(fs.existsSync(path.join(qState, "queue.json")), "QUEUE OK: queue.json persisted");
-  const done = host.runQueue();
+  const done = await host.runQueue();
   check(done.length === 2, `QUEUE OK: runQueue drove both entries (got ${done.length})`);
   check(done[0].status === "done" && done[1].status === "done", `QUEUE OK: both done (got ${done.map((e) => e.status).join(",")})`);
   check(done[0].runId === "run-queue-a" && done[1].runId === "run-queue-b", "QUEUE OK: FIFO order kept");
@@ -1692,7 +1762,7 @@ function testQueue(): void {
   let threw: any = null;
   try {
     host.enqueue(path.join(TESTS, "workflow-clock.ts"), "run-queue-a");
-    host.runQueue();
+    await host.runQueue();
   } catch (e) {
     threw = e;
   }
@@ -1721,32 +1791,63 @@ async function testTaskBackendLocal(): Promise<void> {
 }
 
 function testCrossProcessGate(): void {
-  console.log("\n=== cross-process gate (CLI twice: run holds, deliver-gate resumes) ===");
+  console.log("\n=== cross-process gate (CLI: run submits, queue drives, deliver-gate resumes) ===");
   const cliState = path.join(WORKDIR, "cli-state");
   const cli = path.join(ROOT, "src", "cli.ts");
   const wf = path.join(TESTS, "workflow-gate-hold.ts");
-  // First process: direct adapter holds every gate.
+  // First process: submit (runId returned immediately — the run has
+  // not been driven yet). The direct adapter holds every gate.
   const r1 = spawnSync(BUN, ["run", cli, "run", wf, "--adapter", "direct", "--state-dir", cliState, "--run-id", "run-cli-gate"], {
     encoding: "utf8",
     timeout: 120_000,
     env: { ...process.env },
   });
-  check(r1.status === 2, `CLI RUN OK: first process exited 2 (gate pending, got ${r1.status}): ${(r1.stdout + r1.stderr).slice(0, 300)}`);
-  check((r1.stdout + r1.stderr).includes("GATE PENDING run-cli-gate"), "CLI RUN OK: it printed GATE PENDING");
-  // The held run survives on disk: blob + journal + run entry.
-  check(fs.existsSync(path.join(cliState, "blobs", "run-cli-gate.snap")), "CLI RUN OK: blob persisted to disk");
-  check(fs.existsSync(path.join(cliState, "journals", "run-cli-gate.journal")), "CLI RUN OK: journal persisted to disk");
-  check(fs.existsSync(path.join(cliState, "runs", "run-cli-gate.json")), "CLI RUN OK: run entry persisted to disk");
-  // Second process: deliver the answer; the run must resume from the
-  // stored blob + the cached extraction (no re-gate).
-  const r2 = spawnSync(BUN, ["run", cli, "deliver-gate", "run-cli-gate", '{"answer":"no"}', "--state-dir", cliState], {
+  check(r1.status === 0, `CLI RUN OK: first process exited 0 (submit, got ${r1.status}): ${(r1.stdout + r1.stderr).slice(0, 300)}`);
+  check((r1.stdout + r1.stderr).includes("RUN run-cli-gate"), "CLI RUN OK: it printed the runId immediately");
+  // Second process: queue run drives the submitted run to the gate.
+  const r2 = spawnSync(BUN, ["run", cli, "queue", "run", "--state-dir", cliState], {
     encoding: "utf8",
     timeout: 120_000,
     env: { ...process.env },
   });
-  check(r2.status === 0, `CLI DELIVER OK: second process exited 0 (got ${r2.status}): ${(r2.stdout + r2.stderr).slice(0, 300)}`);
-  check((r2.stdout + r2.stderr).includes('answer: {"answer":"no"}'), "CLI DELIVER OK: the workflow received the delivered answer");
-  check((r2.stdout + r2.stderr).includes("DONE run-cli-gate"), "CLI DELIVER OK: the run completed");
+  check(r2.status === 0, `CLI QUEUE OK: queue run exited 0 (got ${r2.status}): ${(r2.stdout + r2.stderr).slice(0, 300)}`);
+  check((r2.stdout + r2.stderr).includes("held run-cli-gate"), "CLI QUEUE OK: the run is held at the gate");
+  // The held run survives on disk: blob + journal + run entry.
+  check(fs.existsSync(path.join(cliState, "blobs", "run-cli-gate.snap")), "CLI RUN OK: blob persisted to disk");
+  check(fs.existsSync(path.join(cliState, "journals", "run-cli-gate.journal")), "CLI RUN OK: journal persisted to disk");
+  check(fs.existsSync(path.join(cliState, "runs", "run-cli-gate.json")), "CLI RUN OK: run entry persisted to disk");
+  // Third process: result reports the held status (exit 2, GATE PENDING).
+  const r3 = spawnSync(BUN, ["run", cli, "result", "run-cli-gate", "--state-dir", cliState], {
+    encoding: "utf8",
+    timeout: 60_000,
+    env: { ...process.env },
+  });
+  check(r3.status === 2, `CLI RESULT OK: result on a held run exited 2 (got ${r3.status}): ${(r3.stdout + r3.stderr).slice(0, 300)}`);
+  check((r3.stdout + r3.stderr).includes("GATE PENDING"), "CLI RESULT OK: it printed GATE PENDING");
+  // Fourth process: deliver the answer (persisted, run re-queued);
+  // the run must resume from the stored blob + the cached extraction
+  // (no re-gate). deliver-gate does NOT drive — a queue run does.
+  const r4 = spawnSync(BUN, ["run", cli, "deliver-gate", "run-cli-gate", '{"answer":"no"}', "--state-dir", cliState], {
+    encoding: "utf8",
+    timeout: 120_000,
+    env: { ...process.env },
+  });
+  check(r4.status === 0, `CLI DELIVER OK: deliver-gate exited 0 (got ${r4.status}): ${(r4.stdout + r4.stderr).slice(0, 300)}`);
+  const r5 = spawnSync(BUN, ["run", cli, "queue", "run", "--state-dir", cliState], {
+    encoding: "utf8",
+    timeout: 120_000,
+    env: { ...process.env },
+  });
+  check(r5.status === 0, `CLI QUEUE2 OK: second queue run exited 0 (got ${r5.status}): ${(r5.stdout + r5.stderr).slice(0, 300)}`);
+  check((r5.stdout + r5.stderr).includes("done run-cli-gate"), "CLI QUEUE2 OK: the run completed after delivery");
+  // Fifth process: result prints the output JSON.
+  const r6 = spawnSync(BUN, ["run", cli, "result", "run-cli-gate", "--state-dir", cliState], {
+    encoding: "utf8",
+    timeout: 60_000,
+    env: { ...process.env },
+  });
+  check(r6.status === 0, `CLI RESULT2 OK: result on a done run exited 0 (got ${r6.status}): ${(r6.stdout + r6.stderr).slice(0, 300)}`);
+  check((r6.stdout + r6.stderr).includes('"done": true'), "CLI RESULT2 OK: the output JSON carries the workflow result");
   // The journal on disk now shows the whole story: gate-held, then
   // trap-result, then completed.
   const events = fs
@@ -1758,12 +1859,40 @@ function testCrossProcessGate(): void {
   check(events.some((e) => e.event === "trap-result"), "CLI JOURNAL OK: trap-result recorded after delivery");
   check(events.some((e) => e.event === "lifecycle" && e.lifecycle === "completed"), "CLI JOURNAL OK: completed recorded");
   // status subcommand reads the same journal.
-  const r3 = spawnSync(BUN, ["run", cli, "status", "run-cli-gate", "--state-dir", cliState], {
+  const r7 = spawnSync(BUN, ["run", cli, "status", "run-cli-gate", "--state-dir", cliState], {
     encoding: "utf8",
     timeout: 60_000,
     env: { ...process.env },
   });
-  check(r3.status === 0 && r3.stdout.includes("status: done"), `CLI STATUS OK: status reads done from the journal (got: ${r3.stdout.slice(0, 200)})`);
+  check(r7.status === 0 && r7.stdout.includes("status: done"), `CLI STATUS OK: status reads done from the journal (got: ${r7.stdout.slice(0, 200)})`);
+  // BRA-80: a completed run's queue entry is the only record of its
+  // workflow path a fresh process has (no registry entry, no
+  // in-memory workflowPaths). Strip the frozen copy fields — the
+  // shape of a legacy pre-BRA-71 entry — and result in a fresh
+  // process must still restore the extraction from cache via the
+  // queue entry's workflowPath, not throw "no workflow path
+  // recorded". (Without the fallback this exits 1 with that error;
+  // with only the frozen path it would pass vacuously, so the
+  // strip + the guard below are the test.)
+  const queuePath = path.join(cliState, "queue.json");
+  const q = JSON.parse(fs.readFileSync(queuePath, "utf8"));
+  const gateEntry = q.find((e: any) => e.runId === "run-cli-gate");
+  delete gateEntry.frozenHash;
+  delete gateEntry.frozenPath;
+  fs.writeFileSync(queuePath, JSON.stringify(q, null, 2));
+  const q2 = JSON.parse(fs.readFileSync(queuePath, "utf8"));
+  const stripped = q2.find((e: any) => e.runId === "run-cli-gate");
+  check(
+    !!stripped.workflowPath && !stripped.frozenHash && !stripped.frozenPath,
+    "CLI RESULT3 OK: queue entry stripped to legacy shape (workflowPath kept, no frozen fields)",
+  );
+  const r8 = spawnSync(BUN, ["run", cli, "result", "run-cli-gate", "--state-dir", cliState], {
+    encoding: "utf8",
+    timeout: 60_000,
+    env: { ...process.env },
+  });
+  check(r8.status === 0, `CLI RESULT3 OK: result on a done run with no frozen copy exited 0 (got ${r8.status}): ${(r8.stdout + r8.stderr).slice(0, 300)}`);
+  check((r8.stdout + r8.stderr).includes('"done": true'), "CLI RESULT3 OK: the output JSON carries the workflow result (restored via queue-entry workflowPath)");
 }
 
 async function testRealClock(): Promise<void> {
@@ -1771,17 +1900,22 @@ async function testRealClock(): Promise<void> {
   const runId = "run-host-real-clock";
   const host = new Host({ stateDir: WORKDIR, adapter: new DirectAdapter(), clock: "real" });
   const wallStart = Date.now();
-  const { entryPath } = host.prepareRun(path.join(TESTS, "workflow-host-real-clock.ts"), runId);
-  const bundle = await host.bundle(entryPath, "bundle-host-real-clock.js");
+  host.prepareRun(path.join(TESTS, "workflow-host-real-clock.ts"), runId);
+  const driverPath = host.driverFor(runId);
+  const bundle = await host.bundle(driverPath, "bundle-host-real-clock.js");
   let rc = host.startRunFrom(bundle, runId);
   if (rc !== 2) {
     fail(`real-clock: run exited ${rc}, expected 2 (suspended at the first trap)`);
     return;
   }
-  rc = host.drive(runId);
+  // Drive to completion via the queue (the run was started
+  // stepwise, so enqueue it for the queue to resume and drive).
+  host.enqueue(path.join(TESTS, "workflow-host-real-clock.ts"), runId);
+  await host.runQueue();
   const wallMs = Date.now() - wallStart;
-  if (rc !== 0) {
-    fail(`real-clock: run exited ${rc}`);
+  const res = host.result(runId);
+  if (res.status !== "done") {
+    fail(`real-clock: run exited ${rc}` + ` (status ${res.status}: ${res.error ?? ""})`);
     return;
   }
   check(wallMs >= 2000, `REAL TIME OK: the run actually waited ${wallMs}ms wall time (>= 2000ms for the 100ms sleep + 2s cron)`);
@@ -1801,12 +1935,17 @@ async function testRealExec(): Promise<void> {
   console.log("\n=== real exec + local decide (direct adapter) ===");
   const runId = "run-host-real-exec";
   const host = new Host({ stateDir: WORKDIR, adapter: new DirectAdapter() });
-  const { entryPath } = host.prepareRun(path.join(TESTS, "workflow-host-real-exec.ts"), runId);
-  const bundle = await host.bundle(entryPath, "bundle-host-real-exec.js");
+  host.prepareRun(path.join(TESTS, "workflow-host-real-exec.ts"), runId);
+  const driverPath = host.driverFor(runId);
+  const bundle = await host.bundle(driverPath, "bundle-host-real-exec.js");
   let rc = host.startRunFrom(bundle, runId);
-  rc = host.drive(runId);
-  if (rc !== 0) {
-    fail(`real-exec: run exited ${rc}`);
+  // Drive to completion via the queue (the run was started
+  // stepwise, so enqueue it for the queue to resume and drive).
+  host.enqueue(path.join(TESTS, "workflow-host-real-exec.ts"), runId);
+  await host.runQueue();
+  const res = host.result(runId);
+  if (res.status !== "done") {
+    fail(`real-exec: run exited ${rc}` + ` (status ${res.status}: ${res.error ?? ""})`);
     return;
   }
   const out = host.output(runId);
@@ -1824,12 +1963,12 @@ async function testJudgeFixLoopMock(): Promise<void> {
   // (the mock adapter's canned decide {choice:"a"} cannot answer
   // revise/keep/converged questions — see README).
   host.setCanned("decide", (_type, arg) => ({ value: decideLocal(arg.question, arg.options) }));
-  const { entryPath } = host.prepareRun(path.join(TESTS, "workflow-judge-fix-loop.ts"), runId);
-  const bundle = await host.bundle(entryPath, "bundle-jfl-mock.js");
-  let rc = host.startRunFrom(bundle, runId);
-  rc = host.drive(runId);
-  if (rc !== 0) {
-    fail(`jfl-mock: run exited ${rc}`);
+  const input = JSON.parse(fs.readFileSync(path.join(ROOT, "tests", "fixtures", "judge-fix-loop-input.json"), "utf8"));
+  host.submit(path.join(TESTS, "workflow-judge-fix-loop.ts"), { runId, input });
+  await host.runQueue();
+  const res = host.result(runId);
+  if (res.status !== "done") {
+    fail(`jfl-mock: run ${res.status} (${res.error ?? ""})`);
     return;
   }
   const out = host.output(runId);
@@ -1863,11 +2002,10 @@ async function testJudgeFixLoopMock(): Promise<void> {
   // library file is part of the cache key via depHash).
   const host2 = new Host({ stateDir: WORKDIR });
   host2.setCanned("decide", (_type, arg) => ({ value: decideLocal(arg.question, arg.options) }));
-  const prep2 = host2.prepareRun(path.join(TESTS, "workflow-judge-fix-loop.ts"), "run-jfl-mock-2");
-  const bundle2 = await host2.bundle(prep2.entryPath, "bundle-jfl-mock-2.js");
-  let rc2 = host2.startRunFrom(bundle2, "run-jfl-mock-2");
-  rc2 = host2.drive("run-jfl-mock-2");
-  check(rc2 === 0, "JFL GATE OK: second run completed");
+  host2.submit(path.join(TESTS, "workflow-judge-fix-loop.ts"), { runId: "run-jfl-mock-2", input });
+  await host2.runQueue();
+  const res2 = host2.result("run-jfl-mock-2");
+  check(res2.status === "done", "JFL GATE OK: second run completed");
   check(host2.gateRuns === 0, `JFL GATE OK: the second run skipped the gate from cache (gateRuns ${host2.gateRuns})`);
   check(host2.output("run-jfl-mock-2") === out, "JFL GATE OK: second run produced identical output");
   check(host.registrySize() === 0, "REGISTRY OK: empty after completion");
@@ -1877,12 +2015,12 @@ async function testJudgeFixLoopReal(): Promise<void> {
   console.log("\n=== JudgeFixLoop end to end (REAL worker processes + local decide model) ===");
   const runId = "run-jfl-real";
   const host = new Host({ stateDir: WORKDIR, adapter: new DirectAdapter() });
-  const { entryPath } = host.prepareRun(path.join(TESTS, "workflow-judge-fix-loop.ts"), runId);
-  const bundle = await host.bundle(entryPath, "bundle-jfl-real.js");
-  let rc = host.startRunFrom(bundle, runId);
-  rc = host.drive(runId);
-  if (rc !== 0) {
-    fail(`jfl-real: run exited ${rc}`);
+  const input = JSON.parse(fs.readFileSync(path.join(ROOT, "tests", "fixtures", "judge-fix-loop-input.json"), "utf8"));
+  host.submit(path.join(TESTS, "workflow-judge-fix-loop.ts"), { runId, input });
+  await host.runQueue();
+  const res = host.result(runId);
+  if (res.status !== "done") {
+    fail(`jfl-real: run ${res.status} (${res.error ?? ""})`);
     return;
   }
   const out = host.output(runId);
@@ -1921,7 +2059,7 @@ async function testJudgeFixLoopReal(): Promise<void> {
   check(host.registrySize() === 0, "REGISTRY OK: empty after completion");
 }
 
-function testBunTypeOnly(): void {
+async function testBunTypeOnly(): Promise<void> {
   console.log("\n=== Bun: type-only workflow runs, value workflow refused (BRA-58) ===");
   // The value fixture is refused at prepareRun with CheckerError
   // M2-BUN (the gate's tsc half passes — the refusal is the
@@ -1944,9 +2082,16 @@ function testBunTypeOnly(): void {
   // type positions, types erase, no Bun global is touched at
   // runtime — the run completes and prints the label.
   const runId = "run-bun-type";
-  let rc = host.startRun(path.join(TESTS, "workflow-bun-type.ts"), runId);
-  if (rc === 2) rc = host.drive(runId);
-  check(rc === 0, `BUN OK: type-only workflow completes (rc ${rc})`);
+  let rc = await host.startRun(path.join(TESTS, "workflow-bun-type.ts"), runId);
+  if (rc !== 2) {
+    fail(`BUN OK: type-only workflow exited ${rc}, expected 2 (suspended at the first trap)`);
+    return;
+  }
+  // Drive to completion via the queue (the run was started stepwise,
+  // so enqueue it for the queue to resume and drive).
+  host.enqueue(path.join(TESTS, "workflow-bun-type.ts"), runId);
+  await host.runQueue();
+  check(host.result(runId).status === "done", "BUN OK: type-only workflow completes");
   const out = host.output(runId);
   check(out.includes("label: notes.txt"), `BUN OK: type-only workflow printed the Bun-typed label (got ${JSON.stringify(out.slice(0, 200))})`);
   check(out.includes("done"), "BUN OK: type-only workflow reached done");
@@ -1958,7 +2103,7 @@ async function testLoadPlugin(): Promise<void> {
   check(typeof Cls === "function", `LOAD OK: Host.loadPlugin("mock") returned a class (got ${typeof Cls})`);
   const plugin = new Cls({ workdir: WORKDIR });
   const runId = "run-judges";
-  const rc0 = plugin.startRun(path.join(TESTS, "workflow-judges.ts"), runId);
+  const rc0 = await plugin.startRun(path.join(TESTS, "workflow-judges.ts"), runId);
   check(rc0 === 3, `LOAD OK: the loaded mock plugin suspended at the combinator (rc ${rc0})`);
   const rc = plugin.drive(runId);
   check(rc === 0, `LOAD OK: the loaded mock plugin drove the run to completion (rc ${rc})`);
@@ -2025,6 +2170,16 @@ async function testLoadPlugin(): Promise<void> {
   } else {
     check(false, "LOAD OK: plugin mock adapter exposes queueAnswer (canned adapter)");
   }
+  // BRA-68: "direct" loads from the plugin dir too
+  // (plugins/direct/src/adapter.ts) — the last loadAdapter
+  // short-circuit is gone, so every adapter name goes through the
+  // same plugin seam. The loaded adapter must be the direct one.
+  const directAdapter = await Host.loadAdapter("direct");
+  check(directAdapter.name === "direct", `LOAD OK: loadAdapter("direct") returns the direct adapter (got ${directAdapter.name})`);
+  check(
+    directAdapter !== (await Host.loadAdapter("direct")),
+    "LOAD OK: two loadAdapter(\"direct\") calls return independent instances",
+  );
 }
 
 // ----------------------------------------------------------------------- main
@@ -2038,40 +2193,40 @@ async function main(): Promise<number> {
   await testFailfast();
   await testAny();
   await testRace();
-  testRaceEmpty();
-  testCancelStep();
-  testCancelCombinator();
-  testSticky();
-  testRaceOrder();
-  testNestedCancel();
-  testTrapTypes();
+  await testRaceEmpty();
+  await testCancelStep();
+  await testCancelCombinator();
+  await testSticky();
+  await testRaceOrder();
+  await testNestedCancel();
+  await testTrapTypes();
   await testAgenttsBundle();
   await testAgenttsCombinators();
   await testJsonBoundary();
-  testErrorRehydration();
+  await testErrorRehydration();
   testJsonBoundaryUnit();
-  testVirtualClock();
-  testGateHold();
-  testTypedValid();
-  testTypedBadOutput();
-  testTypedRepair();
-  testTypedRepairExhausted();
-  testJsonCleanDate();
-  testJsonCleanReject();
-  testLoudFailures();
-  testExtractionCache();
+  await testVirtualClock();
+  await testGateHold();
+  await testTypedValid();
+  await testTypedBadOutput();
+  await testTypedRepair();
+  await testTypedRepairExhausted();
+  await testJsonCleanDate();
+  await testJsonCleanReject();
+  await testLoudFailures();
+  await testExtractionCache();
   await testGateAgentLoop();
-  testGateCache();
-  testGateRegate();
+  await testGateCache();
+  await testGateRegate();
   await testCheckerGateLoop();
-  testBunTypeOnly();
+  await testBunTypeOnly();
   testCheckerCli();
-  testResumeNoReextract();
+  await testResumeNoReextract();
   testDiskJournal();
-  testCompilerRefusal();
-  testQueue();
+  await testCompilerRefusal();
+  await testQueue();
   await testTaskBackendLocal();
-  testCrossProcessGate();
+  await testCrossProcessGate();
   await testRealClock();
   await testRealExec();
   await testJudgeFixLoopMock();

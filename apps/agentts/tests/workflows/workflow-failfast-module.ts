@@ -24,41 +24,48 @@ interface StepResult {
 import { job, all, type Outcome } from "../../src/agentts";
 declare function print(...args: unknown[]): void;
 
-function judgePath(x: number): string {
-  const a = job<JobInput, StepResult>({ spec: "score", input: { value: x } });
-  if (x === 5) throw new Error("judge crashed");
-  if (x === 9) throw new Error("judge timed out");
-  const b = job<JobInput, StepResult>({ spec: "verify", input: { value: x } });
-  return a.label + "/" + b.label;
+export interface RunResult {
+  done: boolean;
 }
 
-// Success: bare values, in order.
-const values = all([() => judgePath(7), () => judgePath(3)], true);
-print("values:", JSON.stringify(values));
+export default function run(): RunResult {
+  function judgePath(x: number): string {
+    const a = job<JobInput, StepResult>({ spec: "score", input: { value: x } });
+    if (x === 5) throw new Error("judge crashed");
+    if (x === 9) throw new Error("judge timed out");
+    const b = job<JobInput, StepResult>({ spec: "verify", input: { value: x } });
+    return a.label + "/" + b.label;
+  }
 
-// Collect-all with explicit false: outcome objects, as all([...]).
-const collected = all([() => judgePath(7), () => judgePath(5)], false);
-print("collected false:", JSON.stringify(collected));
+  // Success: bare values, in order.
+  const values = all([() => judgePath(7), () => judgePath(3)], true);
+  print("values:", JSON.stringify(values));
 
-// Throw + catch + finally + continue: branch 1 fails, branch 2 never runs.
-let caught = "";
-try {
-  all([() => judgePath(7), () => judgePath(5), () => judgePath(3)], true);
-} catch (e) {
-  caught = (e as Error).message;
-  print("caught is Error:", e instanceof Error);
-} finally {
-  print("finally ran");
+  // Collect-all with explicit false: outcome objects, as all([...]).
+  const collected = all([() => judgePath(7), () => judgePath(5)], false);
+  print("collected false:", JSON.stringify(collected));
+
+  // Throw + catch + finally + continue: branch 1 fails, branch 2 never runs.
+  let caught = "";
+  try {
+    all([() => judgePath(7), () => judgePath(5), () => judgePath(3)], true);
+  } catch (e) {
+    caught = (e as Error).message;
+    print("caught is Error:", e instanceof Error);
+  } finally {
+    print("finally ran");
+  }
+  print("caught:", caught);
+  const resumed = job<JobInput, StepResult>({ spec: "score", input: { value: 11 } });
+  print("continued:", JSON.stringify(resumed));
+
+  // Firstness: branches 1 and 2 both fail; the first failure's error wins.
+  let first = "";
+  try {
+    all([() => judgePath(7), () => judgePath(9), () => judgePath(5)], true);
+  } catch (e) {
+    first = (e as Error).message;
+  }
+  print("first failure:", first);
+  return { done: true };
 }
-print("caught:", caught);
-const resumed = job<JobInput, StepResult>({ spec: "score", input: { value: 11 } });
-print("continued:", JSON.stringify(resumed));
-
-// Firstness: branches 1 and 2 both fail; the first failure's error wins.
-let first = "";
-try {
-  all([() => judgePath(7), () => judgePath(9), () => judgePath(5)], true);
-} catch (e) {
-  first = (e as Error).message;
-}
-print("first failure:", first);

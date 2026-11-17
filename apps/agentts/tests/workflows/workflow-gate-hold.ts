@@ -14,6 +14,13 @@ interface GateResult {
   answer: string;
 }
 
-const g = trap<GateInput, GateResult>("gate", { question: "approve?" }) as GateResult;
-print("answer:", JSON.stringify(g));
-print("done");
+export interface RunResult {
+  done: boolean;
+}
+
+export default function run(): RunResult {
+  const g = trap<GateInput, GateResult>("gate", { question: "approve?" }) as GateResult;
+  print("answer:", JSON.stringify(g));
+  print("done");
+  return { done: true };
+}

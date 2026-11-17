@@ -17,31 +17,39 @@ interface StepResult {
 }
 
 declare function trap(type: string, arg: unknown): unknown;
-// step() is a thin wrapper over the trap builtin: trap("job", input).
-function step(input: StepInput): StepResult { return trap("job", input) as StepResult; }
 declare function print(...args: unknown[]): void;
 declare function race(thunks: (() => string)[]): string;
 
-function judgePath(x: number): string {
-  const a = step({ op: "score", value: x }) as StepResult;
-  if (x === 5) throw new Error("judge crashed");
-  if (x === 9) throw new Error("judge timed out");
-  const b = step({ op: "verify", value: x }) as StepResult;
-  return a.label + "/" + b.label;
+export interface RunResult {
+  done: boolean;
 }
 
-// Success: branch 0 wins; branches 1 and 2 never run.
-const winner = race([() => judgePath(7), () => judgePath(5), () => judgePath(3)]);
-print("winner:", winner);
+export default function run(): RunResult {
+  // step() is a thin wrapper over the trap builtin: trap("job", input).
+  function step(input: StepInput): StepResult { return trap("job", input) as StepResult; }
 
-// Failure: branch 0 throws; the parent catches it, finally runs.
-let caught = "";
-try {
-  race([() => judgePath(5), () => judgePath(7)]);
-} catch (e) {
-  caught = (e as Error).message;
-  print("caught is Error:", e instanceof Error);
-} finally {
-  print("finally ran");
+  function judgePath(x: number): string {
+    const a = step({ op: "score", value: x }) as StepResult;
+    if (x === 5) throw new Error("judge crashed");
+    if (x === 9) throw new Error("judge timed out");
+    const b = step({ op: "verify", value: x }) as StepResult;
+    return a.label + "/" + b.label;
+  }
+
+  // Success: branch 0 wins; branches 1 and 2 never run.
+  const winner = race([() => judgePath(7), () => judgePath(5), () => judgePath(3)]);
+  print("winner:", winner);
+
+  // Failure: branch 0 throws; the parent catches it, finally runs.
+  let caught = "";
+  try {
+    race([() => judgePath(5), () => judgePath(7)]);
+  } catch (e) {
+    caught = (e as Error).message;
+    print("caught is Error:", e instanceof Error);
+  } finally {
+    print("finally ran");
+  }
+  print("caught:", caught);
+  return { done: true };
 }
-print("caught:", caught);

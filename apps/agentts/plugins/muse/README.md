@@ -11,6 +11,7 @@ today, Muse subagents in the true leg) pull jobs from it.
 ```
 plugins/muse/
   src/adapter.ts      Host.loadAdapter seam: createAdapter() -> MuseAdapter
+  src/muse-adapter.ts MuseAdapter (host Adapter + core async methods)
   worker-loop.ts      Worker-side loop, script mode (Bun proof leg)
   get-job.ts          One-shot get-job (subagent leg)
   complete-job.ts     One-shot complete-job (subagent leg)
@@ -22,12 +23,11 @@ src/
   worker-server.ts    The queue server (Bun.serve, sole writer)
   worker-http.ts      Sync (curl) + async (fetch) queue clients
   scheduler.ts        Scheduler interface + AffinityScheduler (v0)
-  adapters/muse-adapter.ts  MuseAdapter (host Adapter + core async methods)
 ```
 
-The implementation lives in `src/` (host side) because the CLI and
-the test suite import it directly; this directory holds the plugin
-seam and everything a worker runs. `src/adapters/muse-adapter.ts`
+The implementation lives here now (`src/muse-adapter.ts`, BRA-68),
+next to the plugin seam — `src/adapters/muse-adapter.ts` no longer
+exists. `src/muse-adapter.ts`
 imports nothing Muse-specific from the host side — the adapter is
 the only file that knows about the queue, and the queue knows
 nothing about Muse.

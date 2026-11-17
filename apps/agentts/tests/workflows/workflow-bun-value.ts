@@ -15,8 +15,15 @@ interface ScoreResult {
   label: string;
 }
 
-Bun.sleepSync(1);
+export interface RunResult {
+  done: boolean;
+}
 
-const j = trap<ScoreInput, ScoreResult>("job", { spec: "score", input: { value: 7 } }) as ScoreResult;
-print("job:", JSON.stringify(j));
-print("done");
+export default function run(): RunResult {
+  Bun.sleepSync(1);
+
+  const j = trap<ScoreInput, ScoreResult>("job", { spec: "score", input: { value: 7 } }) as ScoreResult;
+  print("job:", JSON.stringify(j));
+  print("done");
+  return { done: true };
+}

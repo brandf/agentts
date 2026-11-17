@@ -17,13 +17,20 @@ interface ScoreResult {
   label: string;
 }
 
-function label(f: Bun.BunFile): string {
-  return f.name ?? "";
+export interface RunResult {
+  done: boolean;
 }
 
-const fileName = label({ name: "notes.txt" } as unknown as Bun.BunFile);
-print("label:", fileName);
+export default function run(): RunResult {
+  function label(f: Bun.BunFile): string {
+    return f.name ?? "";
+  }
 
-const j = trap<ScoreInput, ScoreResult>("job", { spec: "score", input: { value: 7 } }) as ScoreResult;
-print("job:", JSON.stringify(j));
-print("done");
+  const fileName = label({ name: "notes.txt" } as unknown as Bun.BunFile);
+  print("label:", fileName);
+
+  const j = trap<ScoreInput, ScoreResult>("job", { spec: "score", input: { value: 7 } }) as ScoreResult;
+  print("job:", JSON.stringify(j));
+  print("done");
+  return { done: true };
+}

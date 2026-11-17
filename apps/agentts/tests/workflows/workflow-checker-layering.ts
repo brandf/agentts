@@ -19,7 +19,14 @@ interface ScoreResult {
   label: string;
 }
 
-void createAdapter;
-const j = job<ScoreInput, ScoreResult>({ spec: "score", input: { value: 7 } });
-print("job:", JSON.stringify(j));
-print("done");
+export interface RunResult {
+  done: boolean;
+}
+
+export default function run(): RunResult {
+  void createAdapter;
+  const j = job<ScoreInput, ScoreResult>({ spec: "score", input: { value: 7 } });
+  print("job:", JSON.stringify(j));
+  print("done");
+  return { done: true };
+}

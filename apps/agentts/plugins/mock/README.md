@@ -15,12 +15,17 @@ The host executable (BRA-44) later loads plugins from
 src/
   mock-plugin.ts   MockPlugin: dispatch, virtual clock, canned answers,
                    journal, registry, fork/join, repair loop, bundling
+  mock-adapter.ts  THE mock adapter implementation (MockAdapter:
+                   canned answers + JFL judges/fix/aggregate,
+                   bug-fix simulation) — the host and CLI construct
+                   this class directly for their defaults.
   adapter.ts       the mock ADAPTER (BRA-53): the loadable plugin module
-                   for Host.loadAdapter("mock") — returns the host's
-                   MockAdapter (canned answers + JFL judges/fix/
-                   aggregate, bug-fix simulation). The engine above is
-                   a different thing: a full in-memory host with its
-                   own smaller canned set.
+                   for Host.loadAdapter("mock") — returns the
+                   MockAdapter from mock-adapter.ts (same file as
+                   above, not a second copy; see plugins/README.md
+                   for why the mock adapter appears twice). The
+                   engine above is a different thing: a full
+                   in-memory host with its own smaller canned set.
   agentts.ts       the agentts module (BRA-46, landed) — copied verbatim
                    from packages/durablets/src/agentts.ts; the plugin
                    reuses its toJsonValue as the single "clean JSON"

@@ -18,6 +18,13 @@ interface ScoredResult {
   meta: EmptyMeta;
 }
 
-const j = job<ScoreInput, ScoredResult>({ spec: "score", input: { value: 7 } });
-print("job:", JSON.stringify(j));
-print("done");
+export interface RunResult {
+  done: boolean;
+}
+
+export default function run(): RunResult {
+  const j = job<ScoreInput, ScoredResult>({ spec: "score", input: { value: 7 } });
+  print("job:", JSON.stringify(j));
+  print("done");
+  return { done: true };
+}

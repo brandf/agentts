@@ -56,6 +56,15 @@ export interface JournalFile {
   events: JournalEvent[];
 }
 
+/** A trap call site: bundle coordinates (BRA-73). `file` is the
+ * bundle path; the run's pinned bundle + source map (see
+ * Profile.runStart) translate it back to the workflow source. */
+export interface TrapSite {
+  file: string;
+  line: number;
+  column: number;
+}
+
 export interface JournalTree {
   rootRunId: string;
   journals: JournalFile[]; // root first, then branches in fork order
@@ -89,6 +98,25 @@ export interface TrapSpan {
   /** Worker that produced the answer (trap-result's `worker`), or
    * null — pool jobs only; canned/local answers carry none. */
   worker: string | null;
+  /** Call site of this trap occurrence (the trap event's `site`,
+   * BRA-73), or null when the journal does not carry one (direct
+   * trap() callers, or journals written before BRA-73). Bundle
+   * coordinates — translate with the run's pinned bundle + map. */
+  site: TrapSite | null;
+  /** Queue-wait (ms): trap-dispatch.wallTs − trap.wallTs (BRA-73 —
+   * the dispatch event exists since BRA-75). Null when either
+   * event lacks a wallTs, or when no dispatch event is in the
+   * journal (a run written before BRA-75). */
+  queueWaitMs: number | null;
+  /** Execution (ms): trap-result.wallTs − trap-dispatch.wallTs,
+   * using the LAST dispatch when the trap was re-dispatched (the
+   * dispatch that produced the result). Null when either event
+   * lacks a wallTs, or when there is no dispatch / no result. The
+   * result event's `wallMs` (host-measured dispatch time) is the
+   * cross-check for this number — the two measure the same span
+   * from different clocks, so they agree within spawn/ingest
+   * overhead, never exactly. */
+  executionMs: number | null;
 }
 
 export interface ClockAdvance {
@@ -157,6 +185,21 @@ export interface Profile {
   /** Total run wall time (ms): last.wallTs − first.wallTs over the
    * root journal when both carry one; else null (v1 journals). */
   totalWallMs: number | null;
+  /** Run-start record (BRA-73): the fields the lifecycle-started
+   * event carries, or null when the root journal has no
+   * lifecycle-started event (v1 journals, or a journal written
+   * before BRA-73). workflowHash is the extraction sourceHash —
+   * the pointer into the extraction cache for the exact source
+   * that ran. submitToStartMs is started.wallTs − submittedAt
+   * when both are known, else null. */
+  runStart: {
+    workflowHash: string | null;
+    workflowPath: string | null;
+    submittedAt: string | null;
+    bundlePath: string | null;
+    bundleMapPath: string | null;
+    submitToStartMs: number | null;
+  } | null;
   /** The time-model caveat, rendered with every profile. */
   timeNote: string;
 }
@@ -167,7 +210,12 @@ export const TIME_NOTE =
   "a trap's wallMs is its result event's wallMs field, else the wallTs difference trap → result. " +
   "Older (v1) journals carry no wallTs and report wall durations as unknown, never invented — " +
   "the timeline axis is event order. Virtual time comes only from clock-advance events (from/to); " +
-  "a sleep that advances the virtual clock 2h takes ~0ms of wall time and is shown on the virtual track only.";
+  "a sleep that advances the virtual clock 2h takes ~0ms of wall time and is shown on the virtual track only. " +
+  "Since BRA-75 every dispatch carries a trap-dispatch event, so queue-wait is dispatch.wallTs − trap.wallTs " +
+  "and execution is result.wallTs − dispatch.wallTs. Since BRA-73 a trap event may carry site " +
+  "(bundle file:line:column — translate with the run's pinned bundle + source map) and the " +
+  "lifecycle-started event may carry workflowHash (the extraction sourceHash), workflowPath, " +
+  "submittedAt, and the bundle paths; missing fields report as unknown, never invented.";
 
 /** Parse one JSONL journal file. Throws on a corrupt line. */
 export function parseJournalText(text: string, sourceName: string): JournalEvent[] {
@@ -353,6 +401,11 @@ export function profileTree(tree: JournalTree): Profile {
 
   const bump = (type: string) => (byType[type] ??= { traps: 0, results: 0, errors: 0 });
 
+  // BRA-73: the root journal's lifecycle-started event, when the
+  // journal carries one (v2 since BRA-73). Branch journals carry
+  // no started event of their own — the root's record is the run's.
+  let runStart: Profile["runStart"] = null;
+
   for (const jf of tree.journals) {
     totalEvents += jf.events.length;
     let parentForkId: string | null = null;
@@ -361,12 +414,35 @@ export function profileTree(tree: JournalTree): Profile {
     // and gate-held events. A trap's clock-advance and its gate-held
     // event both come AFTER the trap event in the journal, so a
     // single in-order pass would miss them when the trap is processed.
+    // BRA-73: trap-dispatch events likewise — first dispatch per
+    // trapId (queue-wait starts there) and last dispatch (execution
+    // ends at the result from the dispatch that produced it).
     const results = new Map<string, { seq: number; ev: JournalEvent }>();
+    const dispatches = new Map<string, { firstWall: number | null; lastWall: number | null }>();
     const journalAdvances: { seq: number; deltaMs: number }[] = [];
     const journalGates = new Map<string, GateInfo>();
     for (const [seq, ev] of jf.events.entries()) {
       if ((ev.event === "trap-result" || ev.event === "trap-error") && typeof ev.trapId === "string" && !results.has(ev.trapId)) {
         results.set(ev.trapId, { seq, ev });
+      }
+      if (ev.event === "trap-dispatch" && typeof ev.trapId === "string") {
+        const wall = parseWallTs(ev.wallTs);
+        const d = dispatches.get(ev.trapId);
+        if (!d) dispatches.set(ev.trapId, { firstWall: wall, lastWall: wall });
+        else d.lastWall = wall;
+      }
+      if (ev.event === "lifecycle" && ev.lifecycle === "started" && jf.runId === rootRunId && runStart === null) {
+        const startedWall = parseWallTs(ev.wallTs);
+        const submittedWall = parseWallTs(ev.submittedAt);
+        runStart = {
+          workflowHash: typeof ev.workflowHash === "string" ? ev.workflowHash : null,
+          workflowPath: typeof ev.workflowPath === "string" ? ev.workflowPath : null,
+          submittedAt: typeof ev.submittedAt === "string" ? ev.submittedAt : null,
+          bundlePath: typeof ev.bundlePath === "string" ? ev.bundlePath : null,
+          bundleMapPath: typeof ev.bundleMapPath === "string" ? ev.bundleMapPath : null,
+          submitToStartMs:
+            startedWall !== null && submittedWall !== null ? Math.max(0, startedWall - submittedWall) : null,
+        };
       }
       if (ev.event === "clock-advance" && typeof ev.from === "string" && typeof ev.to === "string") {
         const deltaMs = Date.parse(ev.to) - Date.parse(ev.from);
@@ -494,6 +570,38 @@ export function profileTree(tree: JournalTree): Profile {
             if (a.seq > seq && a.seq < endSeq) virtualDeltaMs += a.deltaMs;
           }
         }
+        // BRA-73: the trap event's own site (bundle coordinates),
+        // and the queue-wait / execution split from the dispatch
+        // event(s). A malformed site value is treated as absent —
+        // the profiler never invents a call site.
+        let site: TrapSite | null = null;
+        const rawSite = (ev as JournalEvent).site;
+        if (
+          rawSite !== null &&
+          typeof rawSite === "object" &&
+          typeof rawSite.file === "string" &&
+          typeof rawSite.line === "number" &&
+          Number.isFinite(rawSite.line) &&
+          typeof rawSite.column === "number" &&
+          Number.isFinite(rawSite.column)
+        ) {
+          site = { file: rawSite.file, line: rawSite.line, column: rawSite.column };
+        }
+        let queueWaitMs: number | null = null;
+        let executionMs: number | null = null;
+        const disp = dispatches.get(ev.trapId);
+        if (disp) {
+          const trapWall = parseWallTs(ev.wallTs);
+          if (trapWall !== null && disp.firstWall !== null) {
+            queueWaitMs = Math.max(0, disp.firstWall - trapWall);
+          }
+          if (res) {
+            const resWall = parseWallTs(res.ev.wallTs);
+            if (resWall !== null && disp.lastWall !== null) {
+              executionMs = Math.max(0, resWall - disp.lastWall);
+            }
+          }
+        }
         traps.push({
           journalRunId: jf.runId,
           trapId: ev.trapId,
@@ -509,6 +617,9 @@ export function profileTree(tree: JournalTree): Profile {
           wallMs,
           adapter,
           worker,
+          site,
+          queueWaitMs,
+          executionMs,
         });
       }
     }
@@ -565,6 +676,7 @@ export function profileTree(tree: JournalTree): Profile {
     },
     lifecycle,
     totalWallMs,
+    runStart,
     timeNote: TIME_NOTE,
   };
 }
@@ -601,8 +713,13 @@ function trapLine(p: Profile, t: TrapSpan): string {
   const v = t.virtualDeltaMs ? ` virtual +${formatMs(t.virtualDeltaMs)}` : "";
   const w = t.wallMs !== null ? ` (wall: ${formatMs(t.wallMs)})` : " (wall: unknown)";
   const who = [t.adapter ? `adapter=${t.adapter}` : "", t.worker ? `worker=${t.worker}` : ""].filter(Boolean).join(" ");
+  const site = t.site ? ` site=${t.site.file}:${t.site.line}:${t.site.column}` : "";
+  const split =
+    t.queueWaitMs !== null || t.executionMs !== null
+      ? ` [queue: ${t.queueWaitMs !== null ? formatMs(t.queueWaitMs) : "?"} exec: ${t.executionMs !== null ? formatMs(t.executionMs) : "?"}]`
+      : "";
   const mark = t.resultKind === "error" ? "ERROR " : t.resultKind === "pending" ? "PENDING " : "";
-  return `  [${span}] ${t.type} ${shortId(t.trapId, p.rootRunId)} ${mark}${t.argSummary} => ${t.resultSummary}${v}${w}${who ? ` [${who}]` : ""}`;
+  return `  [${span}] ${t.type} ${shortId(t.trapId, p.rootRunId)} ${mark}${t.argSummary} => ${t.resultSummary}${v}${w}${who ? ` [${who}]` : ""}${site}${split}`;
 }
 
 export function renderText(p: Profile): string {
@@ -611,6 +728,13 @@ export function renderText(p: Profile): string {
   L.push(`status: ${p.status}${p.gatePending ? " (gate pending)" : ""}`);
   L.push(`events: ${p.totalEvents} across ${p.journalCount} journal(s)`);
   L.push(`lifecycle: ${compressLifecycle(p.lifecycle)}`);
+  if (p.runStart) {
+    const r = p.runStart;
+    L.push(
+      `run: workflowHash=${r.workflowHash ?? "unknown"} workflow=${r.workflowPath ?? "unknown"} submittedAt=${r.submittedAt ?? "unknown"}${r.submitToStartMs !== null ? ` submit→start ${formatMs(r.submitToStartMs)}` : ""}`,
+    );
+    if (r.bundlePath) L.push(`bundle: ${r.bundlePath}${r.bundleMapPath ? ` (map: ${r.bundleMapPath})` : " (no source map)"}`);
+  }
   L.push("");
   L.push("counters:");
   L.push(`  traps: ${p.totalTraps}  results: ${p.trapResults}  errors: ${p.errorCount}  unmatched (no result): ${p.unmatchedTraps.length}`);

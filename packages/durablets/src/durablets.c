@@ -7,18 +7,28 @@
  * core builtins (fork/join, Q13 semantics), suspend-a-run-into-a-blob
  * / resume-a-blob-with-a-value-or-throw, the run registry (in-memory,
  * per-slice — the plugin maintains the durable registry from the
- * lifecycle events below), and trapId identity (runId + ordinal).
+ * lifecycle events below), trapId identity (runId + ordinal), the
+ * workflow-entry guard (__agentts_begin + the in-workflow flag), and
+ * run-result capture (<blob>.result.json on top-level completion).
  * The core does NOT journal (the journal is the plugin's), does NOT
  * know what a step, job, gate, judge, or workflow is, and never
  * chooses a blob path: the blob file it reads/writes is the path the
  * plugin passes on the command line. The core's only filesystem
- * writes are that one blob file.
+ * writes are that blob file and the result file derived from it.
  *
  * Trap types are dispatched by type string; the core only routes
  * them — the plugin interprets them: job, exec, gate, sleep, cron,
- * decide. A run is any globally scoped TS code: if it calls trap
- * (directly or via a wrapper) it pauses/resumes; otherwise it just
- * executes and completes. No named entry point, no workflow concept.
+ * decide. A run is a workflow function: the host-generated driver
+ * (global code) calls __agentts_begin() and then the exported entry
+ * function with the input JSON; the entry's return value is the run
+ * result. The core enforces the entry guard at runtime — a trap or
+ * combinator call NOT under the entry function on the stack throws
+ * immediately (TypeError naming the call) — and captures the
+ * completion value as <blob>.result.json when a top-level run
+ * completes (run path and every resume/join path; branch runs report
+ * their outcome instead). The core's filesystem writes are the blob
+ * file and the result file, both paths the plugin passes or derives
+ * from the blob path.
  *
  * Cancellation (Q14): cancel a pending trap, cancel a whole
  * combinator, sticky cancellation, cancel-vs-complete race (journal
@@ -96,6 +106,9 @@
 #include <time.h>
 #include <stdarg.h>
 #include <inttypes.h>
+#include <errno.h>
+#include <fcntl.h>
+#include <unistd.h>
 
 #include "quickjs.h"
 #include "durablets.h"
@@ -126,6 +139,23 @@ static void sb_free(struct strbuf *b) { free(b->s); b->s = NULL; b->len = b->cap
 /* 2 = suspended at trap, 3 = suspended at a combinator. Set by the
  * builtin that suspends; save() returns it. */
 static int g_suspend_kind = 2;
+
+/* The workflow-entry guard (Brandon, 06:03 PST): a trap call (any of
+ * job/exec/gate/sleep/cron/decide) or a combinator call (all/any/race)
+ * that is NOT under a workflow function on the stack must fail the
+ * run. The run's entry-function frame must be on the stack below the
+ * call — in a child run, the entry is the branch thunk. This is a
+ * runtime property (a helper called from the entry is fine; the same
+ * helper called from top-level code is not), so it is enforced here,
+ * not statically: the flag is set by the driver's __agentts_begin()
+ * call (run path — the driver calls it, then calls the entry from
+ * global code) and by the C host before resuming/branching (resume
+ * paths continue inside the entry; a branch thunk IS the entry for
+ * its child run). The run path deliberately does NOT set it — a trap
+ * in the driver's own top-level code, or in a workflow file's
+ * top-level code (which runs before the driver's __agentts_begin),
+ * must fail. */
+static int g_in_workflow = 0;
 
 static JSValue js_print(JSContext *ctx, JSValueConst this_val,
                         int argc, JSValueConst *argv)
@@ -207,6 +237,161 @@ static char *json_stringify(JSContext *ctx, JSValueConst v)
     }
     JS_FreeValue(ctx, js);
     return s;
+}
+
+/* Derive the run-result path from a snapshot path: <base>.snap ->
+ * <base>.result.json (same dir). Returns a malloc'd string. */
+static char *result_path_for(const char *snap)
+{
+    size_t n = strlen(snap);
+    const char *suffix = ".snap";
+    size_t sl = strlen(suffix);
+    char *out;
+    if (n > sl && !strcmp(snap + n - sl, suffix)) {
+        out = malloc(n - sl + strlen(".result.json") + 1);
+        memcpy(out, snap, n - sl);
+        strcpy(out + (n - sl), ".result.json");
+    } else {
+        out = malloc(n + strlen(".result.json") + 1);
+        strcpy(out, snap);
+        strcat(out, ".result.json");
+    }
+    return out;
+}
+
+/* ---- atomic file write (BRA-83, G4) ----
+ *
+ * Both of the core's filesystem writes — the live snapshot
+ * (save_snapshot) and the run result (write_result_json) — go
+ * through this one helper: write to a pid-suffixed tmp file in the
+ * SAME directory as the target (so the rename stays on one
+ * filesystem), fsync the tmp file, rename into place, fsync the
+ * containing directory. A kill at any point leaves the target old
+ * or new, never torn: before the rename the old target is
+ * untouched; after it the new bytes are fully written and
+ * fsynced. A leftover <target>.<pid>.tmp from a killed write is
+ * never read — nothing in the core opens a *.tmp path (the resume
+ * paths open exactly the path passed on the command line) — and
+ * the next write to the same target uses its own pid-suffixed tmp
+ * name (fopen("wb") truncates it), so stale tmps are harmless
+ * litter, at most one per killed write.
+ *
+ * fsync choice: the file fsync before rename is what makes the
+ * new bytes durable — without it a power loss after the rename
+ * could leave the renamed file torn. The directory fsync after
+ * rename makes the rename itself durable. The audit (§4.15 G4)
+ * prescribes "+ fsync" here, and the cost is two syscalls per
+ * suspension / result write — not a hot path (one snapshot per
+ * suspension, one result per completion) — so both are done,
+ * unlike the host side (BRA-76), whose threat model is a process
+ * crash only. A failed file fsync is a hard failure (the tmp is
+ * unlinked, the old target intact, the caller fails loudly); a
+ * failed directory fsync only warns — the rename already
+ * happened and the bytes are fsynced, so only the directory
+ * entry's durability is uncertain, and a power loss in that
+ * window leaves the old (valid) target.
+ *
+ * Returns 0 on success, -1 on failure (with a message on
+ * stderr). The tmp file is unlinked on every failure path. */
+static int write_file_atomic(const char *path, const void *data, size_t len)
+{
+    char *tmp;
+    FILE *f;
+    size_t tmplen = strlen(path) + 32;
+
+    tmp = malloc(tmplen);
+    snprintf(tmp, tmplen, "%s.%ld.tmp", path, (long)getpid());
+    f = fopen(tmp, "wb");
+    if (!f) {
+        fprintf(stderr, "[host] could not write %s: %s\n", tmp, strerror(errno));
+        free(tmp);
+        return -1;
+    }
+    if (len > 0 && fwrite(data, 1, len, f) != len) {
+        fprintf(stderr, "[host] could not write %s: %s\n", tmp, strerror(errno));
+        fclose(f);
+        unlink(tmp);
+        free(tmp);
+        return -1;
+    }
+    if (fflush(f) != 0 || fsync(fileno(f)) != 0) {
+        fprintf(stderr, "[host] could not fsync %s: %s\n", tmp, strerror(errno));
+        fclose(f);
+        unlink(tmp);
+        free(tmp);
+        return -1;
+    }
+    if (fclose(f) != 0) {
+        fprintf(stderr, "[host] could not close %s: %s\n", tmp, strerror(errno));
+        unlink(tmp);
+        free(tmp);
+        return -1;
+    }
+    if (rename(tmp, path) != 0) {
+        fprintf(stderr, "[host] could not rename %s to %s: %s\n", tmp, path, strerror(errno));
+        unlink(tmp);
+        free(tmp);
+        return -1;
+    }
+    free(tmp);
+    /* fsync the directory so the rename itself is durable. Opened
+     * read-only; failure here only warns (see the header comment)
+     * — the new file is already in place and fsynced. */
+    {
+        char *dir = strdup(path);
+        char *slash = strrchr(dir, '/');
+        int dfd;
+        if (slash == NULL) {
+            free(dir);
+            dir = strdup(".");
+        } else if (slash == dir) {
+            dir[1] = '\0'; /* "/file" -> "/" */
+        } else {
+            *slash = '\0';
+        }
+        dfd = open(dir, O_RDONLY);
+        if (dfd >= 0) {
+            if (fsync(dfd) != 0)
+                fprintf(stderr, "[host] warning: could not fsync directory %s: %s\n", dir, strerror(errno));
+            close(dfd);
+        } else {
+            fprintf(stderr, "[host] warning: could not open directory %s: %s\n", dir, strerror(errno));
+        }
+        free(dir);
+    }
+    return 0;
+}
+
+/* Write a pre-stringified JSON result to the run-result file.
+ * Atomic (BRA-83, G4): tmp + fsync + rename, same helper as
+ * save_snapshot — a kill mid-write leaves the previous result
+ * file (or none) intact, never a torn .result.json. Best-effort
+ * as before: a write failure is reported on stderr; the run's
+ * exit code is unchanged (the host surfaces a missing result
+ * file when the result is fetched). */
+static void write_result_json(const char *json, const char *snap)
+{
+    char *path = result_path_for(snap);
+    const char *text = json ? json : "null";
+    if (write_file_atomic(path, text, strlen(text)) != 0)
+        fprintf(stderr, "[host] could not write run result %s\n", path);
+    free(path);
+}
+
+/* Write the run's completion value as <snap>.result.json (the run
+ * result, for `agentts result <runId>`). A completion value that
+ * stringifies to "undefined" (a script that returns nothing) is
+ * recorded as null — the result file always holds JSON. */
+static void write_run_result(JSContext *ctx, JSValueConst val,
+                             const char *snap)
+{
+    char *json = json_stringify(ctx, val);
+    if (!json || !strcmp(json, "undefined")) {
+        free(json);
+        json = strdup("null");
+    }
+    write_result_json(json, snap);
+    free(json);
 }
 
 /* ---- trap arg-in JSON check (BRA-43 follow-up) ----
@@ -983,9 +1168,18 @@ void durablets_emit_event(const char *json)
     fflush(stderr);
 }
 
+/* Last exception's "Name: message", stashed by print_exception so
+ * the "failed" lifecycle event can name WHY the run failed (the
+ * journal — and `agentts result` — must carry the reason, not just
+ * that it failed). One C-host process handles one operation, so the
+ * stash is consumed (cleared) by the single failed event it feeds. */
+static char *g_last_exception = NULL;
+
 /* Lifecycle event helper: {"event":"lifecycle","lifecycle":...,
  * "runId":...} with an optional numeric "kind" (2 = trap, 3 =
- * combinator, for "suspended"). */
+ * combinator, for "suspended"). A "failed" event carries an "error"
+ * field with the last exception's "Name: message" when one was
+ * stashed (the stash is cleared once consumed). */
 static void emit_lifecycle(JSContext *ctx, const char *phase, int kind)
 {
     char *run = current_run_id(ctx);
@@ -994,7 +1188,22 @@ static void emit_lifecycle(JSContext *ctx, const char *phase, int kind)
     if (kind >= 0)
         sb_printf(&b, "{\"event\":\"lifecycle\",\"lifecycle\":\"%s\","
                   "\"runId\":\"%s\",\"kind\":%d}", phase, run, kind);
-    else
+    else if (!strcmp(phase, "failed") && g_last_exception) {
+        /* JSON-escape via the engine (a hand-rolled escaper would
+         * miss a quote or a newline in the message). */
+        JSValue js = JS_NewString(ctx, g_last_exception);
+        JSValue j = JS_JSONStringify(ctx, js, JS_UNDEFINED, JS_UNDEFINED);
+        const char *s = NULL;
+        if (!JS_IsException(j)) s = JS_ToCString(ctx, j);
+        sb_printf(&b, "{\"event\":\"lifecycle\",\"lifecycle\":\"%s\","
+                  "\"runId\":\"%s\",\"error\":%s}",
+                  phase, run, s ? s : "\"?\"");
+        if (s) JS_FreeCString(ctx, s);
+        JS_FreeValue(ctx, j);
+        JS_FreeValue(ctx, js);
+        free(g_last_exception);
+        g_last_exception = NULL;
+    } else
         sb_printf(&b, "{\"event\":\"lifecycle\",\"lifecycle\":\"%s\","
                   "\"runId\":\"%s\"}", phase, run);
     durablets_emit_event(b.s);
@@ -1037,6 +1246,32 @@ static JSValue throw_cancelled(JSContext *ctx)
     return JS_Throw(ctx, err);
 }
 
+/* __agentts_begin(): the driver's marker (see g_in_workflow above).
+ * Called by the host-generated driver before it calls the entry
+ * function, from global code. It only sets the flag — it never calls
+ * into JS, so the entry function's suspension is unaffected (the
+ * entry is still called from plain JS global code, never on behalf
+ * of native code). */
+static JSValue js_agentts_begin(JSContext *ctx, JSValueConst this_val,
+                                int argc, JSValueConst *argv)
+{
+    (void)ctx; (void)this_val; (void)argc; (void)argv;
+    g_in_workflow = 1;
+    return JS_UNDEFINED;
+}
+
+/* Throw the workflow-entry error: a trap/combinator called outside
+ * the entry function. Names the call (trap("job"), all(), ...) so
+ * the author sees exactly which call is misplaced. */
+static JSValue throw_not_in_workflow(JSContext *ctx, const char *what)
+{
+    return JS_ThrowTypeError(
+        ctx,
+        "%s must be called under the workflow function — move the call "
+        "inside the exported entry function (or a helper it calls)",
+        what);
+}
+
 /* trap(type, arg): the core's single dispatch point (plan doc §8).
  * Dispatches by type string — the core only routes; the plugin
  * interprets the type (job, exec, gate, sleep, cron, decide). Emits
@@ -1058,6 +1293,22 @@ static JSValue js_trap(JSContext *ctx, JSValueConst this_val,
     JSValue clean_arg;
     int64_t ordinal;
     struct strbuf b;
+    /* Workflow-entry guard: a trap outside the entry function fails
+     * immediately — no event, no ordinal consumed, no suspension.
+     * Names the trap type when it is a string. */
+    if (!g_in_workflow) {
+        const char *t = NULL;
+        char what[160];
+        if (argc >= 1 && JS_IsString(argv[0]))
+            t = JS_ToCString(ctx, argv[0]);
+        if (t) {
+            snprintf(what, sizeof(what), "trap(\"%s\")", t);
+            JS_FreeCString(ctx, t);
+        } else {
+            snprintf(what, sizeof(what), "trap()");
+        }
+        return throw_not_in_workflow(ctx, what);
+    }
     if (is_cancelled(ctx))
         return throw_cancelled(ctx);
     if (argc < 1 || !JS_IsString(argv[0]))
@@ -1154,6 +1405,13 @@ static JSValue js_combinator_impl(JSContext *ctx, JSValueConst *argv,
     int is_race = !strcmp(kind, "race");
     char *run, *fork_id;
     struct strbuf b;
+    /* Workflow-entry guard: a combinator outside the entry function
+     * fails immediately — no fork event, no stash, no suspension. */
+    if (!g_in_workflow) {
+        char what[160];
+        snprintf(what, sizeof(what), "%s()", kind);
+        return throw_not_in_workflow(ctx, what);
+    }
     /* Sticky cancellation (Q14): a combinator call on a cancelled run
      * throws immediately — no fork event, no stash, no suspension. */
     if (is_cancelled(ctx))
@@ -1241,11 +1499,12 @@ static const void * const durablets_natives[] = {
     (const void *)js_all,
     (const void *)js_any,
     (const void *)js_race,
+    (const void *)js_agentts_begin,
 };
 
 const JSSnapshotHost durablets_host = {
     .natives = durablets_natives,
-    .native_count = 5,
+    .native_count = 6,
 };
 
 static void print_exception(JSContext *ctx)
@@ -1261,6 +1520,17 @@ static void print_exception(JSContext *ctx)
         const char *m = JS_ToCString(ctx, msg);
         fprintf(stderr, "exception: %s: %s\n", n ? n : "?",
                 m ? m : "?");
+        /* Stash "Name: message" for the "failed" lifecycle event
+         * (emit_lifecycle consumes and clears it). */
+        free(g_last_exception);
+        g_last_exception = NULL;
+        if (n || m) {
+            size_t need = strlen(n ? n : "?") + strlen(m ? m : "?") + 4;
+            g_last_exception = malloc(need);
+            if (g_last_exception)
+                snprintf(g_last_exception, need, "%s: %s",
+                         n ? n : "?", m ? m : "?");
+        }
         if (n) JS_FreeCString(ctx, n);
         if (m) JS_FreeCString(ctx, m);
     }
@@ -1306,19 +1576,20 @@ static int save_snapshot(JSContext *ctx, const char *filename)
 {
     size_t size;
     uint8_t *buf = JS_WriteSnapshot(ctx, &size, &durablets_host, NULL, 0, 0);
-    FILE *f;
+    int rc;
     if (!buf) {
         print_exception(ctx);
         return 1;
     }
-    f = fopen(filename, "wb");
-    if (!f || fwrite(buf, 1, size, f) != size || fclose(f)) {
-        perror(filename);
-        js_free(ctx, buf);
-        return 1;
-    }
-    fprintf(stderr, "[host] snapshot saved: %s (%zu bytes)\n", filename, size);
+    /* G4 (BRA-83): atomic — tmp + fsync + rename, so a kill
+     * mid-write leaves the previous live snapshot intact (old or
+     * new, never torn). A failure here returns 1 before the old
+     * snapshot is touched, and save() fails the slice loudly. */
+    rc = write_file_atomic(filename, buf, size);
     js_free(ctx, buf);
+    if (rc != 0)
+        return 1;
+    fprintf(stderr, "[host] snapshot saved: %s (%zu bytes)\n", filename, size);
     return 0;
 }
 
@@ -1549,9 +1820,9 @@ static void delete_stash(JSContext *ctx)
     fprintf(stderr, "[host] stash removed from the global object\n");
 }
 
-/* The native registry: print, trap, all, any, race — in this order.
- * Appended builtins go after race so existing natives keep their
- * snapshot indices. */
+/* The native registry: print, trap, all, any, race, __agentts_begin —
+ * in this order. Appended builtins go after race so existing natives
+ * keep their snapshot indices. */
 void durablets_register(JSContext *ctx)
 {
     JSValue global = JS_GetGlobalObject(ctx);
@@ -1565,6 +1836,9 @@ void durablets_register(JSContext *ctx)
                       JS_NewCFunction(ctx, js_any, "any", 1));
     JS_SetPropertyStr(ctx, global, "race",
                       JS_NewCFunction(ctx, js_race, "race", 1));
+    JS_SetPropertyStr(ctx, global, "__agentts_begin",
+                      JS_NewCFunction(ctx, js_agentts_begin,
+                                      "__agentts_begin", 0));
     JS_FreeValue(ctx, global);
 }
 
@@ -1619,17 +1893,30 @@ int main(int argc, char **argv)
         if (JS_IsException(val)) {
             if (JS_IsSuspended(rt))
                 return save(rt, ctx, argv[3]);
-            emit_lifecycle(ctx, "failed", -1);
+            /* print_exception first: it stashes the "Name: message"
+             * that the failed lifecycle event carries. */
             print_exception(ctx);
+            emit_lifecycle(ctx, "failed", -1);
             return 1;
+        }
+        /* Capture the completion value as the run result (the entry
+         * function's return value) before freeing it: finish_slice
+         * may suspend and free the runtime, so the string must be
+         * taken now. Written only if the run actually completes. */
+        char *result_json = json_stringify(ctx, val);
+        if (!result_json || !strcmp(result_json, "undefined")) {
+            free(result_json);
+            result_json = strdup("null");
         }
         JS_FreeValue(ctx, val);
         {
             int rc = finish_slice(rt, ctx, argv[3]);
-            if (rc == 0)
+            if (rc == 0) {
+                write_result_json(result_json, argv[3]);
                 emit_lifecycle(ctx, "completed", -1);
-            else if (rc == 1)
+            } else if (rc == 1)
                 emit_lifecycle(ctx, "failed", -1);
+            free(result_json);
             return rc;
         }
     }
@@ -1650,6 +1937,12 @@ int main(int argc, char **argv)
         free(buf);
         ctx = res.contexts[0];
         JS_FreeSnapshotResult(rt, &res);
+        /* Resuming inside the workflow entry (the snapshot was taken
+         * under it): arm the entry guard for the resumed execution.
+         * A branch thunk IS the entry for its child run. The run
+         * path does NOT set this — its flag comes from the driver's
+         * __agentts_begin() call. */
+        g_in_workflow = 1;
         branch = is_branch_run(ctx);
 
         if (!strncmp(result_json, "throw:", 6)) {
@@ -1700,8 +1993,12 @@ int main(int argc, char **argv)
             if (JS_IsException(val)) {
                 if (JS_IsSuspended(rt))
                     return save(rt, ctx, argv[2]);
-                /* The resumed execution threw (uncaught). In a branch
-                 * run that is a failed outcome, not a host error. */
+                /* The resumed execution threw (uncaught) and the run
+                 * fails: record the failed lifecycle event (with the
+                 * stashed exception message) — without it the journal
+                 * ends at the trap-result and the failure has no
+                 * recorded reason. In a branch run that is a failed
+                 * outcome, not a host error. */
                 if (branch) {
                     JSValue exc = JS_GetException(ctx);
                     finish_branch_error(ctx, exc);
@@ -1709,6 +2006,7 @@ int main(int argc, char **argv)
                     return 0;
                 }
                 print_exception(ctx);
+                emit_lifecycle(ctx, "failed", -1);
                 return 1;
             }
             rc = finish_slice(rt, ctx, argv[2]);
@@ -1717,9 +2015,13 @@ int main(int argc, char **argv)
                 finish_branch(ctx, outcome);
                 JS_FreeValue(ctx, outcome);
             }
-            if (rc == 0 && !branch)
+            if (rc == 0 && !branch) {
+                /* The run completed: capture the completion value as
+                 * the run result (<snap>.result.json) for
+                 * `agentts result`. */
+                write_run_result(ctx, val, argv[2]);
                 emit_lifecycle(ctx, "completed", -1);
-            else if (rc == 1 && !branch)
+            } else if (rc == 1 && !branch)
                 emit_lifecycle(ctx, "failed", -1);
             if (rc != 2 && rc != 3)
                 JS_FreeValue(ctx, val);
@@ -1749,6 +2051,12 @@ int main(int argc, char **argv)
         free(buf);
         ctx = res.contexts[0];
         JS_FreeSnapshotResult(rt, &res);
+        /* Resuming inside the workflow entry (the snapshot was taken
+         * under it): arm the entry guard for the resumed execution.
+         * A branch thunk IS the entry for its child run. The run
+         * path does NOT set this — its flag comes from the driver's
+         * __agentts_begin() call. */
+        g_in_workflow = 1;
         set_branch_context(ctx);
         emit_lifecycle(ctx, "resumed", -1);
         fprintf(stderr, "[host] restored runtime suspended=%d before "
@@ -1855,6 +2163,12 @@ int main(int argc, char **argv)
         free(buf);
         ctx = res.contexts[0];
         JS_FreeSnapshotResult(rt, &res);
+        /* Resuming inside the workflow entry (the snapshot was taken
+         * under it): arm the entry guard for the resumed execution.
+         * A branch thunk IS the entry for its child run. The run
+         * path does NOT set this — its flag comes from the driver's
+         * __agentts_begin() call. */
+        g_in_workflow = 1;
         branch = is_branch_run(ctx);
         emit_lifecycle(ctx, "resumed", -1);
 
@@ -1918,9 +2232,12 @@ int main(int argc, char **argv)
             finish_branch(ctx, outcome);
             JS_FreeValue(ctx, outcome);
         }
-        if (rc == 0 && !branch)
+        if (rc == 0 && !branch) {
+            /* The run completed: capture the completion value as the
+             * run result (<snap>.result.json) for `agentts result`. */
+            write_run_result(ctx, val, argv[2]);
             emit_lifecycle(ctx, "completed", -1);
-        else if (rc == 1 && !branch)
+        } else if (rc == 1 && !branch)
             emit_lifecycle(ctx, "failed", -1);
         if (rc != 2 && rc != 3)
             JS_FreeValue(ctx, val);
@@ -1949,6 +2266,12 @@ int main(int argc, char **argv)
         free(buf);
         ctx = res.contexts[0];
         JS_FreeSnapshotResult(rt, &res);
+        /* Resuming inside the workflow entry (the snapshot was taken
+         * under it): arm the entry guard for the resumed execution.
+         * A branch thunk IS the entry for its child run. The run
+         * path does NOT set this — its flag comes from the driver's
+         * __agentts_begin() call. */
+        g_in_workflow = 1;
         branch = is_branch_run(ctx);
         emit_lifecycle(ctx, "resumed", -1);
 
@@ -2022,9 +2345,12 @@ int main(int argc, char **argv)
             finish_branch(ctx, outcome);
             JS_FreeValue(ctx, outcome);
         }
-        if (rc == 0 && !branch)
+        if (rc == 0 && !branch) {
+            /* The run completed: capture the completion value as the
+             * run result (<snap>.result.json) for `agentts result`. */
+            write_run_result(ctx, val, argv[2]);
             emit_lifecycle(ctx, "completed", -1);
-        else if (rc == 1 && !branch)
+        } else if (rc == 1 && !branch)
             emit_lifecycle(ctx, "failed", -1);
         if (rc != 2 && rc != 3)
             JS_FreeValue(ctx, val);
@@ -2054,6 +2380,12 @@ int main(int argc, char **argv)
         free(buf);
         ctx = res.contexts[0];
         JS_FreeSnapshotResult(rt, &res);
+        /* Resuming inside the workflow entry (the snapshot was taken
+         * under it): arm the entry guard for the resumed execution.
+         * A branch thunk IS the entry for its child run. The run
+         * path does NOT set this — its flag comes from the driver's
+         * __agentts_begin() call. */
+        g_in_workflow = 1;
         branch = is_branch_run(ctx);
         emit_lifecycle(ctx, "resumed", -1);
 
@@ -2162,9 +2494,12 @@ int main(int argc, char **argv)
             finish_branch(ctx, outcome);
             JS_FreeValue(ctx, outcome);
         }
-        if (rc == 0 && !branch)
+        if (rc == 0 && !branch) {
+            /* The run completed: capture the completion value as the
+             * run result (<snap>.result.json) for `agentts result`. */
+            write_run_result(ctx, val, argv[2]);
             emit_lifecycle(ctx, "completed", -1);
-        else if (rc == 1 && !branch)
+        } else if (rc == 1 && !branch)
             emit_lifecycle(ctx, "failed", -1);
         if (rc != 2 && rc != 3)
             JS_FreeValue(ctx, val);
@@ -2194,6 +2529,12 @@ int main(int argc, char **argv)
         free(buf);
         ctx = res.contexts[0];
         JS_FreeSnapshotResult(rt, &res);
+        /* Resuming inside the workflow entry (the snapshot was taken
+         * under it): arm the entry guard for the resumed execution.
+         * A branch thunk IS the entry for its child run. The run
+         * path does NOT set this — its flag comes from the driver's
+         * __agentts_begin() call. */
+        g_in_workflow = 1;
         branch = is_branch_run(ctx);
         emit_lifecycle(ctx, "resumed", -1);
 
@@ -2272,9 +2613,12 @@ int main(int argc, char **argv)
             finish_branch(ctx, outcome);
             JS_FreeValue(ctx, outcome);
         }
-        if (rc == 0 && !branch)
+        if (rc == 0 && !branch) {
+            /* The run completed: capture the completion value as the
+             * run result (<snap>.result.json) for `agentts result`. */
+            write_run_result(ctx, val, argv[2]);
             emit_lifecycle(ctx, "completed", -1);
-        else if (rc == 1 && !branch)
+        } else if (rc == 1 && !branch)
             emit_lifecycle(ctx, "failed", -1);
         if (rc != 2 && rc != 3)
             JS_FreeValue(ctx, val);
@@ -2308,6 +2652,12 @@ int main(int argc, char **argv)
         free(buf);
         ctx = res.contexts[0];
         JS_FreeSnapshotResult(rt, &res);
+        /* Resuming inside the workflow entry (the snapshot was taken
+         * under it): arm the entry guard for the resumed execution.
+         * A branch thunk IS the entry for its child run. The run
+         * path does NOT set this — its flag comes from the driver's
+         * __agentts_begin() call. */
+        g_in_workflow = 1;
         branch = is_branch_run(ctx);
         emit_lifecycle(ctx, "resumed", -1);
 
@@ -2458,9 +2808,12 @@ int main(int argc, char **argv)
             finish_branch(ctx, outcome);
             JS_FreeValue(ctx, outcome);
         }
-        if (rc == 0 && !branch)
+        if (rc == 0 && !branch) {
+            /* The run completed: capture the completion value as the
+             * run result (<snap>.result.json) for `agentts result`. */
+            write_run_result(ctx, val, argv[2]);
             emit_lifecycle(ctx, "completed", -1);
-        else if (rc == 1 && !branch)
+        } else if (rc == 1 && !branch)
             emit_lifecycle(ctx, "failed", -1);
         if (rc != 2 && rc != 3)
             JS_FreeValue(ctx, val);

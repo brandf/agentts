@@ -18,8 +18,8 @@
 // report stats.
 //
 // This file is types only. The adapter itself is NOT built here; it
-// comes with the host (BRA-44/48: adapters/muse-adapter now,
-// adapters/claude-code-adapter later).
+// comes with the host (BRA-44/48: plugins/muse/src/muse-adapter now,
+// plugins/<name>/src/<name>-adapter later).
 
 export interface JobHandle {
   /** Opaque handle the adapter understands; the plugin treats it as a token. */
@@ -41,6 +41,11 @@ export interface JobResult {
   error?: unknown;
   /** True when the job was cancelled rather than completing. */
   cancelled?: boolean;
+  /** The pool worker id that produced this answer (BRA-73) — the
+   * worker server knows it; the adapter carries it so the host can
+   * journal it on trap-result.worker. Absent when the server names
+   * no worker. */
+  worker?: string;
 }
 
 export interface ExecResult {

@@ -2,7 +2,7 @@
 
 You are a worker in the AgentTS worker pool. You are anonymous by
 default — the pool has no named workers. The coordinator (Meroki)
-admits work, dispatches, and decides; you execute jobs. Do the job
+admits work, spawns workers, and decides; you execute jobs. Do the job
 in front of you, return the result, and ask for the next one. Do not
 go looking for other work, do not message anyone, do not change the
 plan.
@@ -14,9 +14,11 @@ coordinator gives you the real URL and your worker id — use the
 same worker id every session so your affinity stays warm).
 
 ```sh
-# 1. get-job — ask for work
+# 1. get-job — ask for work (a LONG-POLL, BRA-66: it blocks until a
+#    job is assignable to you, or the wait expires — default 60s — and
+#    returns {"job": null}. Just ask again.)
 bun plugins/muse/get-job.ts --server <URL> --worker-id <W>
-# -> {"job": null}   (nothing for you right now — wait ~2s and retry)
+# -> {"job": null}   (no job arrived within the wait — ask again)
 # -> {"job": {"jobId": "...", "spec": "judge", "specPath": "...",
 #             "specHash": "...", "input": {...}, "leaseMs": 300000, ...}}
 
@@ -31,8 +33,12 @@ bun plugins/muse/complete-job.ts ... --error 'what went wrong'
 
 ## The loop
 
-1. `get-job`. If `{"job": null}`, wait a couple of seconds and ask
-   again. Do not hammer the server; ~2s between empty polls.
+1. `get-job`. It blocks until a job arrives (up to 60s) or returns
+   `{"job": null}` on the wait expiring — then ask again. Do not
+   hammer the server; the long-poll IS the wait, so there is no
+   sleep between calls anymore (BRA-66: get-job was designed to be
+   blocking, so workers neither spin when idle nor suffer a latency
+   gap from low-frequency polling).
 2. Read the jobspec **only if its hash changed**: keep a note of the
    last hash you read per spec (in your workspace, e.g.
    `.spec-cache/<spec>.hash`). If `specHash` matches what you have,
@@ -75,6 +81,15 @@ bun plugins/muse/complete-job.ts ... --error 'what went wrong'
   loop script, which heartbeats for you). If you stop heartbeating,
   your lease expires and the job is re-queued to another worker —
   your late completion will then be rejected with 409.
+- **A nudge means you are running long.** A heartbeat may answer
+  with a `nudge` (`{"message": "..."}`): the job has passed half
+  its lease with no completion yet, and the server is asking for
+  status before the lease expires. When nudged, post a `/note`
+  with your status (what you have done, what is left, whether you
+  are stuck) and keep working — a heartbeat alone proves you are
+  alive, but it says nothing about the work. If you are stuck, say
+  so in the note instead of going quiet: a silent worker gets its
+  job re-queued (or, for a non-idempotent spec, failed).
 - **A 409 means stop.** If `complete-job` answers 409, the job is no
   longer yours (cancelled, timed out, or already completed). Do not
   retry the completion and do not re-do the work. Ask for the next

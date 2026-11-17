@@ -16,15 +16,22 @@ interface SlowResult {
   sleptMs: number;
 }
 
-let caught = "";
-try {
-  const r = job<SlowInput, SlowResult>({ spec: "slow-sleeper", input: { sleepMs: 30000 } });
-  print("got:", JSON.stringify(r));
-} catch (e) {
-  caught = (e as Error).name + ": " + (e as Error).message;
-  print("caught:", caught);
-  print("caught is Error:", (e as Error) instanceof Error);
-} finally {
-  print("finally ran");
+export interface RunResult {
+  done: boolean;
 }
-print("done, caught:", caught);
+
+export default function run(): RunResult {
+  let caught = "";
+  try {
+    const r = job<SlowInput, SlowResult>({ spec: "slow-sleeper", input: { sleepMs: 30000 } });
+    print("got:", JSON.stringify(r));
+  } catch (e) {
+    caught = (e as Error).name + ": " + (e as Error).message;
+    print("caught:", caught);
+    print("caught is Error:", (e as Error) instanceof Error);
+  } finally {
+    print("finally ran");
+  }
+  print("done, caught:", caught);
+  return { done: true };
+}

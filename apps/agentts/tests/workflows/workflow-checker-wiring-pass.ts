@@ -24,10 +24,17 @@ interface WorkItem {
   text: string;
 }
 
-const v = job<JudgeInput, JudgeVerdict>({ spec: "judge", input: { item: "x" } });
-const fixed = job<FixInput, WorkItem>({
-  spec: "fix",
-  input: { item: v.label, verdicts: [v] },
-});
-print("fixed:", JSON.stringify(fixed));
-print("done");
+export interface RunResult {
+  done: boolean;
+}
+
+export default function run(): RunResult {
+  const v = job<JudgeInput, JudgeVerdict>({ spec: "judge", input: { item: "x" } });
+  const fixed = job<FixInput, WorkItem>({
+    spec: "fix",
+    input: { item: v.label, verdicts: [v] },
+  });
+  print("fixed:", JSON.stringify(fixed));
+  print("done");
+  return { done: true };
+}

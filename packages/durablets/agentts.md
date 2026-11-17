@@ -60,12 +60,13 @@ carry no type arguments — the host uses the exported result interface.
 
 ### `decide<Output>(spec: DecideSpec): Output`
 
-A decision model instead of a full agent. The result type is generic
-because the Decision shape belongs to BRA-47, not this module: call
-sites supply a concrete, named type for now
-(`decide<DecideResult>({ question, options })`). There is deliberately
-no default result type here — a default would bake in a Decision shape
-BRA-47 owns.
+A decision model instead of a full agent. The result type is generic:
+not every decide call is a cascade tier — call sites supply a
+concrete, named type (`decide<DecideResult>({ question, options })`).
+There is deliberately no default result type here. The cascade's
+decide tier uses `DecideTierResult` (the canonical Decision shape,
+BRA-47, in this module); other decide calls name their own result
+type.
 
 ### Combinators: `all`, `any`, `race`
 
@@ -104,7 +105,8 @@ export interface JsonObject { [key: string]: JsonValue; }
 export type JsonValue = null | boolean | number | string | JsonValue[] | JsonObject;
 ```
 
-`decisionCascade` and the Decision shape are NOT here — BRA-47.
+`decisionCascade` and the Decision shape live here — BRA-47 (see the
+"decision cascade" section at the end of `src/agentts.ts`).
 
 ## Types are the only source of truth
 
@@ -256,8 +258,9 @@ crosses as its ISO string in the journal trap arg).
   — a clean break, recorded here: it had no jobspec identity and no
   contract, and keeping both shapes would fork the trap-arg contract
   the plugin validates. Direct-`trap()` workflows are unaffected.
-- **No default result type on `decide`.** A default would bake in a
-  Decision shape BRA-47 owns.
+- **No default result type on `decide`.** The cascade's decide tier
+  uses `DecideTierResult` (BRA-47); other decide calls name their
+  own result type.
 - **Fixed-result wrappers carry no type arguments** (`exec`, `gate`,
   `sleep`, `cron`): their result type is fixed by the trap type.
 - **`all` overloads on fail-fast** match the core's two return shapes

@@ -19,6 +19,13 @@ interface DatedResult {
   at: string;
 }
 
-const r = trap<JobInput, DatedResult>("job", { op: "score", value: 7 }) as DatedResult;
-print("job:", JSON.stringify(r));
-print("done");
+export interface RunResult {
+  done: boolean;
+}
+
+export default function run(): RunResult {
+  const r = trap<JobInput, DatedResult>("job", { op: "score", value: 7 }) as DatedResult;
+  print("job:", JSON.stringify(r));
+  print("done");
+  return { done: true };
+}

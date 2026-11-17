@@ -24,37 +24,45 @@ interface Outcome {
 }
 
 declare function trap<Input, Output>(type: string, arg: unknown): unknown;
-// step() is a thin wrapper over the trap builtin: trap("job", input).
-function step(input: StepInput): StepResult { return trap<StepInput, StepResult>("job", input) as StepResult; }
 declare function print(...args: unknown[]): void;
 
-let sharedCount = 0;
-
-function readBranch(x: number): string {
-  step({ op: "score", value: x });
-  return "read:" + sharedCount;
+export interface RunResult {
+  done: boolean;
 }
 
-function writeBranch(x: number): string {
-  step({ op: "score", value: x });
-  sharedCount = 99;
-  return "read:" + sharedCount;
-}
+export default function run(): RunResult {
+  // step() is a thin wrapper over the trap builtin: trap("job", input).
+  function step(input: StepInput): StepResult { return trap<StepInput, StepResult>("job", input) as StepResult; }
 
-function runBranch(f: () => string): Outcome {
-  const saved = sharedCount;
-  try {
-    const v = f();
-    sharedCount = saved;
-    return { ok: true, value: v };
-  } catch (e) {
-    sharedCount = saved;
-    const err = e as Error;
-    return { ok: false, error: { name: err.name, message: err.message } };
+  let sharedCount = 0;
+
+  function readBranch(x: number): string {
+    step({ op: "score", value: x });
+    return "read:" + sharedCount;
   }
-}
 
-const verdicts = [runBranch(() => readBranch(21)), runBranch(() => writeBranch(22)), runBranch(() => readBranch(23))];
-print("verdicts:", JSON.stringify(verdicts));
-print("empty all:", JSON.stringify([]));
-print("sharedCount after join:", sharedCount);
+  function writeBranch(x: number): string {
+    step({ op: "score", value: x });
+    sharedCount = 99;
+    return "read:" + sharedCount;
+  }
+
+  function runBranch(f: () => string): Outcome {
+    const saved = sharedCount;
+    try {
+      const v = f();
+      sharedCount = saved;
+      return { ok: true, value: v };
+    } catch (e) {
+      sharedCount = saved;
+      const err = e as Error;
+      return { ok: false, error: { name: err.name, message: err.message } };
+    }
+  }
+
+  const verdicts = [runBranch(() => readBranch(21)), runBranch(() => writeBranch(22)), runBranch(() => readBranch(23))];
+  print("verdicts:", JSON.stringify(verdicts));
+  print("empty all:", JSON.stringify([]));
+  print("sharedCount after join:", sharedCount);
+  return { done: true };
+}

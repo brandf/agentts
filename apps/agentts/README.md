@@ -16,11 +16,6 @@ src/
                      journal event shapes; disk store instead of memory)
   adapter.ts         Layer 3 seam: Adapter interface (answer job/exec/gate/
                      decide; sleep/cron/clock are host-owned)
-  adapters/
-    mock-adapter.ts  canned answers (same table as the mock plugin) +
-                     JudgeFixLoop mock judges/fix/aggregate
-    direct-adapter.ts real worker processes (job), real exec, held gates,
-                     local decision model (decide)
   decision-model.ts  local decision model (deterministic, narrow — parses
                      scores/thresholds/counts out of the question)
   gate.ts            first-run type-check gate (structured diagnostics)
@@ -46,8 +41,13 @@ tests/
   run-host-suite.ts  the host suite (ported core suite + host-only tests)
   swap-test-host.ts  byte-identical comparison: reference vs mock vs host
   workflows/         ported core-suite workflows + host fixtures
+plugins/             Layer 3 (BRA-68): one folder per environment
+                     (mock, direct, muse, briefing); each holds its
+                     adapter implementation next to its loadable seam.
+                     See plugins/README.md.
 run.sh               build the C host -> reference suite -> mock suite ->
-                     host suite -> swap test; scratch deleted on success
+                     host suite -> checker -> layering import lint ->
+                     swap test; scratch deleted on success
 package.json         typescript 5.9.3 (exact pin), ts-json-schema-generator
                      2.9.0, ajv 8.20.0 (same pins as the mock plugin)
 ```
@@ -60,22 +60,38 @@ package.json         typescript 5.9.3 (exact pin), ts-json-schema-generator
 
 `run.sh` builds the core C host into a scratch dir and points all
 suites at it via `$DURABLETS_HOST`. All run outputs live in a mkdtemp
-scratch dir, never in this tree; the scratch dir is deleted on success
-and kept (path printed) on failure.
+scratch dir, never in this tree — except the bench suite, which
+writes `baselines.json` and `ratchet.log` into `bench/` when it
+ratchets (see `bench/README.md`); the scratch dir is deleted on
+success and kept (path printed) on failure.
 
 ## The CLI
 
+`src/cli.ts` is authoritative (`bun src/cli.ts --help`); the full
+map is `docs/ARCHITECTURE.md` §11.
+
 ```sh
-bun src/cli.ts run workflows/... --adapter direct --state-dir ./.agentts-state
+bun src/cli.ts run workflows/... [--input-file FILE | --input JSON] [--wait] --adapter direct --state-dir ./.agentts-state
 bun src/cli.ts run workflows/... --adapter muse --state-dir ./.agentts-state
+bun src/cli.ts result <runId> --state-dir ./.agentts-state
+bun src/cli.ts check <workflow> [--json] --state-dir ./.agentts-state
 bun src/cli.ts deliver-gate <runId> '{"answer":"yes"}' --state-dir ./.agentts-state
+bun src/cli.ts deliver-result <runId> --state-dir ./.agentts-state
+bun src/cli.ts deliveries [--json] --state-dir ./.agentts-state
+bun src/cli.ts escalate '<json>' --state-dir ./.agentts-state
+bun src/cli.ts watchdog [--stale-minutes N] [--json] --state-dir ./.agentts-state
 bun src/cli.ts status <runId> --state-dir ./.agentts-state
 bun src/cli.ts queue list --state-dir ./.agentts-state
+bun src/cli.ts queue run --state-dir ./.agentts-state
+bun src/cli.ts queue repair [--force] --state-dir ./.agentts-state
 bun src/cli.ts sync-task BRA-44 <runId> --state-dir ./.agentts-state --backend linear
 bun src/cli.ts admit --state-dir ./.agentts-state --backend linear --wip 3 [--map map.json] [--workflow workflows/...] [--dry-run]
 bun src/cli.ts cost-model --state-dir ./.agentts-state
+bun src/cli.ts profile <runId> --state-dir ./.agentts-state
 bun src/cli.ts worker serve --state-dir ./.agentts-state [--port 18741] [--max-pool-size N] [--max-cpu-slots N] [--max-decisions-per-sec N] [--max-tokens-per-hour N]
 bun src/cli.ts worker status [--server http://127.0.0.1:18741]
+bun src/cli.ts worker get-job --worker-id W [--server URL]
+bun src/cli.ts worker complete-job --job-id J --worker-id W (--result JSON | --result-file F | --error MSG) [--server URL]
 ```
 
 ## Worker pool (BRA-48) + the Muse adapter
@@ -251,12 +267,14 @@ renders from a `file://` open. See `src/profiler.ts` and
   the same pattern the mock plugin uses. Moving it would break the
   core package for no v0 benefit.
 - **Adapters load from `apps/agentts/plugins/<name>/src/adapter.ts`,
-  with built-in fallback for `direct` only.** `mock` loads from
-  `plugins/mock/src/adapter.ts` (BRA-53): the plugin seam returns
-  the same `MockAdapter` the Host constructor uses as its default
-  (one implementation in `src/adapters/mock-adapter.ts`, shared —
-  the plugin file is the loadable module, not a second copy).
-  The loader also loads full plugin ENGINE classes
+  every name through the same plugin seam (BRA-68 removed the last
+  built-in fallback, `direct`; BRA-53 had removed `mock`).**
+  `mock` loads from `plugins/mock/src/adapter.ts`: the plugin seam
+  returns the same `MockAdapter` the Host constructor uses as its
+  default (one implementation in `plugins/mock/src/mock-adapter.ts`,
+  shared — the plugin file is the loadable module, not a second
+  copy; see `plugins/README.md` for why the mock adapter appears
+  twice). The loader also loads full plugin ENGINE classes
   (`<name>-plugin.ts`, mock first) for in-process use; see
   `Host.loadPlugin`.
 - **sleep/cron/clock are host-owned, not adapter calls.** The clock is
@@ -267,20 +285,24 @@ renders from a `file://` open. See `src/profiler.ts` and
   never be delivered; the host's per-run gate queue is consulted
   before the adapter.
 - **JudgeFixLoop is generic over the loop, concrete at the traps.**
-  The extractor needs a concrete, named type at every trap call site,
-  and a generic function's type parameters are unresolved there (the
-  pre-check rejects them loudly). So the library owns the loop logic
-  (fan-out via `all`, reduce, decide cadence, convergence rule) and
-  the concrete workflow supplies the trap-calling steps, where the
-  types are concrete. The extractor walks transitive relative imports
-  (new in the host's `extract.ts`; `depHash` in the cache key), so the
-  library file's types resolve.
+  The library owns the loop logic (fan-out via `all`, reduce,
+  decide cadence, convergence rule) and calls the traps itself
+  with contracts parameterized by the item and rubric types
+  (`JudgeInput<X, R>`, `FixInput<X, R>`, …). The caller supplies
+  explicit type arguments (`judgeFixLoop<WorkItem, Rubric>(...)`);
+  the extractor specializes the loop's inner trap sites per call
+  site (BRA-106) — a generic function's type parameters are
+  unresolved only where no concrete instantiation exists, and
+  the pre-check rejects those loudly. The extractor walks
+  transitive relative imports (new in the host's `extract.ts`;
+  `depHash` in the cache key), so the library file's types
+  resolve.
 - **The local decision model is narrow by design.** It parses
   machine-readable signals out of the decide question (mean score vs
   threshold, misses vs threshold) and falls back to first-option at
   confidence 0.5 when there is no signal. It computes from the
-  question content; it is not a general reasoner. BRA-47 owns the
-  canonical Decision shape.
+  question content; it is not a general reasoner. The canonical
+  Decision shape is `Decision` in the `agentts` module (BRA-47).
 - **Real subagent judges are NOT in this build.** The direct adapter's
   job path spawns real worker PROCESSES (genuine computation over the
   real input — see `workflows/worker.ts`), not canned answers. True

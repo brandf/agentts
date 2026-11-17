@@ -222,6 +222,20 @@ function mockJob(arg: any): any {
   // New agentts-module shape (BRA-46): { spec, input }. The jobspec name
   // selects the canned result; the input carries the parameters.
   if (arg && typeof arg.spec === "string") {
+    // BRA-47: the cascade's job tier ("decision" jobspec). No canned
+    // decision exists — the mock answers the first option at 0.5, a
+    // deliberate guess: a cascade tier at/above its threshold would
+    // need a queued answer, and an unconfigured mock run escalates
+    // instead of deciding on a made-up confidence. (Same answer as
+    // the host mock adapter and the mock plugin.)
+    if (arg.spec === "decision") {
+      const options: string[] = Array.isArray(arg.input?.options) ? arg.input.options : [];
+      return {
+        choice: options[0] ?? "yes",
+        confidence: 0.5,
+        reason: "mock default: no canned decision answer; first option at 0.5",
+      };
+    }
     if (arg.spec === "aggregate") {
       const verdicts = arg.input?.verdicts || [];
       const ok = verdicts.filter((v: any) => v.ok).length;
@@ -346,12 +360,54 @@ function clean(prefix: string): void {
   }
 }
 
-function startRun(workflow: string, runId: string): number {
+/** Generate the driver for a workflow and bundle it (sync — the
+ * driver's startRun is sync, so the build goes through `bun build`
+ * as a subprocess, not the async Bun.build API). The driver is
+ * global code that arms the entry guard (__agentts_begin) and calls
+ * the workflow's exported entry function with no arguments (core
+ * workflows are 0-arg; they take no input). Refuses loudly when the
+ * bundle still contains export/import syntax after the build — a
+ * bundle the C host would eval as a module (which cannot suspend)
+ * is a broken run, not a run to ship. Returns the bundle path. */
+function bundleWorkflow(workflow: string, runId: string): string {
   const p = prefixFor(runId);
-  clean(p);
+  const abs = path.resolve(workflow);
+  const driverPath = path.join(WORKDIR, `${p}.driver.ts`);
+  const bundlePath = path.join(WORKDIR, `${p}.bundle.js`);
+  const driver =
+    `// Core-driver-generated driver for ${runId} (not author code): arm the\n` +
+    `// entry guard, then call the workflow's exported entry function\n` +
+    `// from global code.\n` +
+    `import entry from ${JSON.stringify(abs)};\n` +
+    `declare function __agentts_begin(): void;\n` +
+    `__agentts_begin();\n` +
+    `entry();\n`;
+  fs.writeFileSync(driverPath, driver);
+  const r = spawnSync(process.execPath, [
+    "build",
+    driverPath,
+    "--outfile",
+    bundlePath,
+    "--target",
+    "bun",
+  ], { encoding: "utf8" });
+  if (r.status !== 0 || !fs.existsSync(bundlePath)) {
+    fail(`bundleWorkflow: bun build failed for ${runId}: ${r.stderr ?? r.error ?? ""}`);
+    throw new Error(`bun build failed for ${runId}`);
+  }
+  const text = fs.readFileSync(bundlePath, "utf8");
+  if (/^\s*export\s/m.test(text) || /^\s*import\s/m.test(text)) {
+    fail(`bundleWorkflow: bundle ${bundlePath} still contains export/import syntax — refusing to run it`);
+    throw new Error(`bundle ${bundlePath} still contains export/import syntax`);
+  }
+  return bundlePath;
+}
+
+function startRunFrom(bundle: string, runId: string): number {
+  const p = prefixFor(runId);
   const env = { AGENTTS_RUN_ID: runId };
   const rc = runHost(
-    ["run", workflow, path.join(WORKDIR, p + ".snap")],
+    ["run", bundle, path.join(WORKDIR, p + ".snap")],
     path.join(WORKDIR, p + ".out"),
     path.join(WORKDIR, p + ".log"),
     env,
@@ -375,6 +431,15 @@ function startRun(workflow: string, runId: string): number {
   if (rc === 2 || rc === 3) storeBlob(runId, entry.snap);
   else REGISTRY.delete(runId); // completed in one slice: closed already
   return rc;
+}
+
+function startRun(workflow: string, runId: string): number {
+  // Clean BEFORE bundling: clean() deletes <prefix>.* in WORKDIR,
+  // which now includes the driver + bundle (same prefix, same dir)
+  // — bundling first would delete the bundle before the C host runs.
+  clean(prefixFor(runId));
+  const bundle = bundleWorkflow(workflow, runId);
+  return startRunFrom(bundle, runId);
 }
 
 function deliverResult(runId: string, result: any): number {
@@ -785,7 +850,6 @@ function runTest(
   direct: string,
   runId: string,
   branches: number,
-  workflowAbs?: string,
 ): { parentOut: string; parentJournal: string; runId: string; branches: number } | null {
   console.log(`\n=== ${name} ===`);
   const p = prefixFor(runId);
@@ -807,13 +871,14 @@ function runTest(
   console.log(fs.readFileSync(path.join(WORKDIR, d + ".out"), "utf8"));
 
   // Fork version: the parent suspends at a combinator (exit 3).
-  // workflowAbs is a pre-bundled script (module variants); otherwise the
-  // workflow is a tests/ file run as-is.
+  // Every workflow goes through the driver + bundle now (a function
+  // workflow is not runnable as a bare script) — startRun bundles
+  // the driver for it.
   if (REGISTRY.size !== 0) {
     fail(`${name}: registry not empty before fork run (leftover runs)`);
     return null;
   }
-  rc = startRun(workflowAbs ?? path.join(TESTS, workflow), runId);
+  rc = startRun(path.join(TESTS, workflow), runId);
   if (rc !== 3) {
     fail(`${name}: parent run exited ${rc}, expected 3 (suspended at a combinator)`);
     return null;
@@ -1652,24 +1717,17 @@ async function testAgenttsBundle(): Promise<void> {
   console.log("\n=== agentts module via Bun.build (TS host bundles, C host evals) ===");
   const runId = "run-agentts";
   const p = prefixFor(runId);
-  const bundleOut = path.join(WORKDIR, "bundle-agentts.js");
-  const result = await Bun.build({
-    entrypoints: [path.join(TESTS, "workflow-agentts.ts")],
-    outdir: WORKDIR,
-    target: "bun",
-    naming: "bundle-agentts.js",
-  });
-  if (!result.success) {
-    for (const log of result.logs) console.log(String(log));
-    fail("agentts-bundle: Bun.build failed");
-    return;
-  }
+  // startRun bundles the driver for the workflow (the workflow is a
+  // function; the driver calls its entry) — the bundle is the thing
+  // the C host evals. The bundle file lands in WORKDIR as
+  // <prefix>.bundle.js.
+  let rc = startRun(path.join(TESTS, "workflow-agentts.ts"), runId);
+  const bundleOut = path.join(WORKDIR, `${p}.bundle.js`);
   if (!fs.existsSync(bundleOut)) {
     fail("agentts-bundle: no bundle output");
     return;
   }
   console.log(`BUNDLED OK: workflow + agentts module -> one self-contained script (${fs.statSync(bundleOut).size} bytes)`);
-  let rc = startRun(bundleOut, runId);
   rc = drive(
     path.join(WORKDIR, p + ".snap"),
     path.join(WORKDIR, p + ".out"),
@@ -1687,8 +1745,17 @@ async function testAgenttsBundle(): Promise<void> {
   else console.log("BUNDLE OUTPUT OK: byte-identical to the direct trap() version — the C host never resolved imports");
   // Every wrapper emits exactly trap(type, arg) with the right arg shape:
   // the journal's trap events carry the spec verbatim — job's new
-  // { spec, input } shape, the others their fixed spec shapes.
+  // { spec, input } shape, the others their fixed spec shapes — plus,
+  // since BRA-88 landed the BRA-73 call-site capture in the canonical
+  // module, the transport key `__agenttsSite` the wrappers attach.
+  // This is the RAW C-host journal (no host ingest here to promote the
+  // site to a top-level `site` field), so the site is asserted where
+  // it rides — inside the arg under `__agenttsSite` — and the arg
+  // comparison strips that one key first. The site check proves the
+  // capture works in the C-host-bundled (QuickJS) context, not just
+  // under Bun.
   const trapEvents = readJournal(journalPath(runId)).filter((e) => e.event === "trap");
+  const bundleLines = fs.readFileSync(bundleOut, "utf8").split("\n");
   const expectedArgs: Record<string, any> = {
     job: { spec: "score", input: { value: 7 } },
     exec: { cmd: "echo hi" },
@@ -1706,11 +1773,38 @@ async function testAgenttsBundle(): Promise<void> {
       const ev = trapEvents[i];
       if (ev.type !== types[i] || ev.trapId !== `${runId}/trap-${i}`) {
         fail(`agentts-bundle: trap ${i} type/id wrong: ${JSON.stringify(ev)}`);
-      } else if (JSON.stringify(ev.arg) !== JSON.stringify(expectedArgs[types[i]])) {
+        continue;
+      }
+      // BRA-73 site: present, well-formed, in this bundle, on the
+      // line of the wrapper call itself. It rides inside the arg in
+      // the raw journal (promotion to a top-level `site` is the
+      // host/mock ingest's job, not the core's).
+      const site = ev.arg?.__agenttsSite;
+      const siteOk =
+        site &&
+        typeof site.file === "string" &&
+        site.file.endsWith(`${p}.bundle.js`) &&
+        Number.isFinite(site.line) &&
+        site.line >= 1 &&
+        site.line <= bundleLines.length &&
+        Number.isFinite(site.column) &&
+        site.column >= 1;
+      if (!siteOk) {
+        fail(`agentts-bundle: ${types[i]} has no well-formed trap site: ${JSON.stringify(site)}`);
+      } else if (!bundleLines[site.line - 1].includes(`${types[i]}(`)) {
+        fail(
+          `agentts-bundle: ${types[i]} site line ${site.line} is not its wrapper call: ${(bundleLines[site.line - 1] ?? "").trim().slice(0, 80)}`,
+        );
+      }
+      // The spec verbatim, minus the one transport key.
+      const arg = { ...(ev.arg ?? {}) };
+      delete (arg as Record<string, unknown>).__agenttsSite;
+      if (JSON.stringify(arg) !== JSON.stringify(expectedArgs[types[i]])) {
         fail(`agentts-bundle: ${types[i]} arg != expected: ${JSON.stringify(ev.arg)} vs ${JSON.stringify(expectedArgs[types[i]])}`);
       }
     }
-    if (FAILURES.length === failuresBeforeArgs) console.log("TRAP ARGS OK: every wrapper emitted exactly trap(type, arg) with the right arg shape");
+    if (FAILURES.length === failuresBeforeArgs)
+      console.log("TRAP ARGS OK: every wrapper emitted exactly trap(type, arg) with the right arg shape, and every trap event carries a well-formed site on its wrapper-call line in the bundle");
   }
   if (REGISTRY.size !== 0) fail(`agentts-bundle: registry not empty after completion: ${[...REGISTRY.keys()].join(", ")}`);
 }
@@ -1732,26 +1826,15 @@ async function testAgenttsCombinators(): Promise<void> {
     ["race", "workflow-race-direct.ts", "run-race-module", 3],
   ];
   for (const [name, direct, runId, branches] of cases) {
-    const bundleOut = path.join(WORKDIR, `bundle-${name}-module.js`);
-    const result = await Bun.build({
-      entrypoints: [path.join(TESTS, `workflow-${name}-module.ts`)],
-      outdir: WORKDIR,
-      target: "bun",
-      naming: `bundle-${name}-module.js`,
-    });
-    if (!result.success) {
-      for (const log of result.logs) console.log(String(log));
-      fail(`agentts-${name}-module: Bun.build failed`);
-      continue;
-    }
-    console.log(`--- ${name} via module (${fs.statSync(bundleOut).size} bytes bundled) ---`);
+    // The module variant is a normal workflow (it imports the
+    // combinators from the agentts module); startRun bundles the
+    // driver for it — no pre-bundling here anymore.
     const r = runTest(
       `${name} via agentts module`,
       `workflow-${name}-module.ts`,
       direct,
       runId,
       branches,
-      bundleOut,
     );
     if (r) {
       // The module variant's journal must show the new job arg shape
@@ -1770,19 +1853,8 @@ async function testJsonBoundary(): Promise<void> {
   console.log("\n=== trap-boundary JSON rule (BRA-46): dirty args throw at the call site ===");
   const runId = "run-json-boundary";
   const p = prefixFor(runId);
-  const bundleOut = path.join(WORKDIR, "bundle-json-boundary.js");
-  const result = await Bun.build({
-    entrypoints: [path.join(TESTS, "workflow-json-boundary.ts")],
-    outdir: WORKDIR,
-    target: "bun",
-    naming: "bundle-json-boundary.js",
-  });
-  if (!result.success) {
-    for (const log of result.logs) console.log(String(log));
-    fail("json-boundary: Bun.build failed");
-    return;
-  }
-  let rc = startRun(bundleOut, runId);
+  // startRun bundles the driver for the workflow — no pre-bundling.
+  let rc = startRun(path.join(TESTS, "workflow-json-boundary.ts"), runId);
   rc = drive(
     path.join(WORKDIR, p + ".snap"),
     path.join(WORKDIR, p + ".out"),
@@ -1916,14 +1988,17 @@ async function testTrapArgBoundary(): Promise<void> {
 
   // A dirty arg that is never caught: the run fails synchronously at
   // the call site — no trap event, no blob, exit 1 (never suspends).
+  // The workflow is a function (the trap is under the entry, so the
+  // entry guard passes and the JSON boundary check is what throws).
   const dir = path.join(WORKDIR, "dirty-only");
   fs.mkdirSync(dir, { recursive: true });
   const wf = path.join(dir, "w.ts");
   fs.writeFileSync(
     wf,
-    `declare function trap(type: string, arg: unknown): unknown;\ndeclare function print(...args: unknown[]): void;\ntrap("job", { op: "score", value: undefined });\nprint("unreachable");\n`,
+    `declare function trap(type: string, arg: unknown): unknown;\ndeclare function print(...args: unknown[]): void;\nexport default function run(): { done: boolean } {\n  trap("job", { op: "score", value: undefined });\n  print("unreachable");\n  return { done: true };\n}\n`,
   );
-  const r = spawnSync(HOST, ["run", wf, path.join(dir, "w.blob")], {
+  const bundle = bundleWorkflow(wf, "dirty-only");
+  const r = spawnSync(HOST, ["run", bundle, path.join(dir, "w.blob")], {
     env: { ...process.env, AGENTTS_RUN_ID: "dirty-only" },
     encoding: "utf8",
   });
@@ -2000,12 +2075,16 @@ function testNoJournalByCore(): void {
   const dir = path.join(WORKDIR, "core-only");
   fs.mkdirSync(dir, { recursive: true });
   const wf = path.join(dir, "w.ts");
+  // A function workflow (the trap is under the entry, so the entry
+  // guard passes) — run through the driver, as every workflow is now.
   fs.writeFileSync(
     wf,
-    `declare function trap(type: string, arg: unknown): unknown;\ndeclare function print(...args: unknown[]): void;\nconst r = trap("job", { op: "score", value: 7 });\nprint("got:", JSON.stringify(r));\n`,
+    `declare function trap(type: string, arg: unknown): unknown;\ndeclare function print(...args: unknown[]): void;\nexport default function run(): { done: boolean } {\n  const r = trap("job", { op: "score", value: 7 });\n  print("got:", JSON.stringify(r));\n  return { done: true };\n}\n`,
   );
-  // Spawn the C host directly — no plugin, no journal writer anywhere.
-  const r = spawnSync(HOST, ["run", wf, path.join(dir, "w.blob")], {
+  const bundle = bundleWorkflow(wf, "core-only");
+  // Spawn the C host directly on the bundle — no plugin, no journal
+  // writer anywhere.
+  const r = spawnSync(HOST, ["run", bundle, path.join(dir, "w.blob")], {
     env: { ...process.env, AGENTTS_RUN_ID: "core-only" },
     encoding: "utf8",
   });

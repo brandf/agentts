@@ -385,7 +385,9 @@ try {
       `CPU OK: scheduler.log records quota-blocked for ${cpuB.body?.jobId}`,
     );
     // Pool size: 2 running (cpu-a, plain) — next worker gets none-quota.
-    const gotNone = await http("GET", `/get-job?workerId=w3`);
+    // waitMs=0 (the old immediate return): a bare get-job is a 60s
+    // long-poll (BRA-66) and would park until a lease expires.
+    const gotNone = await http("GET", `/get-job?workerId=w3&waitMs=0`);
     check(gotNone.body?.job === null, "POOL OK: third worker gets no job at max pool size 2");
     check(
       schedLog.some((e) => e.decision === "none-quota") || readJsonl(path.join(SERVER_STATE, "worker-jobs", "scheduler.log")).some((e) => e.decision === "none-quota"),
@@ -406,7 +408,7 @@ try {
     const dec2 = await http("POST", "/enqueue", { spec: "decide-b", runId: "r-d2", trapId: "t-d2", isDecision: true });
     const gotDecA = await http("GET", `/get-job?workerId=w1`);
     check(gotDecA.body?.job?.jobId === dec1.body?.jobId, `DECIDE OK: first decision job dispatched (got ${gotDecA.body?.job?.jobId})`);
-    const gotDecBlocked = await http("GET", `/get-job?workerId=w2`);
+    const gotDecBlocked = await http("GET", `/get-job?workerId=w2&waitMs=0`);
     check(gotDecBlocked.body?.job === null, "DECIDE OK: second decision job blocked inside the same second");
     await sleep(1100);
     const gotDecB = await http("GET", `/get-job?workerId=w2`);
@@ -419,7 +421,7 @@ try {
     const tok2 = await http("POST", "/enqueue", { spec: "tok-b", runId: "r-t2", trapId: "t-t2", tokensEst: 60 });
     const gotTok1 = await http("GET", `/get-job?workerId=w1`);
     check(gotTok1.body?.job?.jobId === tok1.body?.jobId, `TOKENS OK: first 60-token job dispatched (got ${gotTok1.body?.job?.jobId})`);
-    const gotTokBlocked = await http("GET", `/get-job?workerId=w2`);
+    const gotTokBlocked = await http("GET", `/get-job?workerId=w2&waitMs=0`);
     check(gotTokBlocked.body?.job === null, "TOKENS OK: second 60-token job blocked (60 used + 60 est > 100)");
     const h2 = await http("GET", "/health");
     check(h2.body?.quotas?.tokensUsedThisHour === 60, `TOKENS OK: health reports 60 tokens used this hour (got ${h2.body?.quotas?.tokensUsedThisHour})`);
@@ -491,9 +493,12 @@ console.log("\n=== G+H. host cost actuals + queue priority order ===");
     const host = new Host({ stateDir: hostDir });
     const wf = path.join(ROOT, "tests", "workflows", "workflow-trap-types.ts");
     const runId = "run-cost-actuals";
-    let rc = host.startRun(wf, runId);
-    rc = host.drive(runId);
-    check(rc === 0, `HOST-RUN OK: trap-types workflow completes (rc=${rc})`);
+    // The trap-types workflow is a 0-arg function, so it submits
+    // with no input; the run path drives it to completion.
+    host.submit(wf, { runId });
+    await host.runQueue();
+    const res = host.result(runId);
+    check(res.status === "done", `HOST-RUN OK: trap-types workflow completes (status=${res.status})`);
     const actualsFile = path.join(hostDir, "cost-actuals.jsonl");
     const actuals = readJsonl(actualsFile);
     check(actuals.length >= 6, `COST-ACTUALS OK: ${actuals.length} trap actuals recorded (expected >= 6)`);
@@ -510,7 +515,7 @@ console.log("\n=== G+H. host cost actuals + queue priority order ===");
     const host2 = new Host({ stateDir: host2Dir });
     host2.enqueue(wf, "run-q-low", { priority: 4 });
     host2.enqueue(wf, "run-q-urgent", { priority: 1 });
-    const qres = host2.runQueue();
+    const qres = await host2.runQueue();
     check(qres.every((e) => e.status === "done"), `QUEUE-RUN OK: both queued runs done (got ${qres.map((e) => `${e.runId}:${e.status}`).join(",")})`);
     const lines = readJsonl(path.join(host2Dir, "cost-actuals.jsonl"));
     const firstUrgent = lines.findIndex((a) => a.runId === "run-q-urgent");

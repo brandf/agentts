@@ -22,26 +22,33 @@ interface StepResult {
 import { job, race, type Outcome } from "../../src/agentts";
 declare function print(...args: unknown[]): void;
 
-function judgePath(x: number): string {
-  const a = job<JobInput, StepResult>({ spec: "score", input: { value: x } });
-  if (x === 5) throw new Error("judge crashed");
-  if (x === 9) throw new Error("judge timed out");
-  const b = job<JobInput, StepResult>({ spec: "verify", input: { value: x } });
-  return a.label + "/" + b.label;
+export interface RunResult {
+  done: boolean;
 }
 
-// Success: branch 0 wins; branches 1 and 2 never run.
-const winner = race([() => judgePath(7), () => judgePath(5), () => judgePath(3)]);
-print("winner:", winner);
+export default function run(): RunResult {
+  function judgePath(x: number): string {
+    const a = job<JobInput, StepResult>({ spec: "score", input: { value: x } });
+    if (x === 5) throw new Error("judge crashed");
+    if (x === 9) throw new Error("judge timed out");
+    const b = job<JobInput, StepResult>({ spec: "verify", input: { value: x } });
+    return a.label + "/" + b.label;
+  }
 
-// Failure: branch 0 throws; the parent catches it, finally runs.
-let caught = "";
-try {
-  race([() => judgePath(5), () => judgePath(7)]);
-} catch (e) {
-  caught = (e as Error).message;
-  print("caught is Error:", e instanceof Error);
-} finally {
-  print("finally ran");
+  // Success: branch 0 wins; branches 1 and 2 never run.
+  const winner = race([() => judgePath(7), () => judgePath(5), () => judgePath(3)]);
+  print("winner:", winner);
+
+  // Failure: branch 0 throws; the parent catches it, finally runs.
+  let caught = "";
+  try {
+    race([() => judgePath(5), () => judgePath(7)]);
+  } catch (e) {
+    caught = (e as Error).message;
+    print("caught is Error:", e instanceof Error);
+  } finally {
+    print("finally ran");
+  }
+  print("caught:", caught);
+  return { done: true };
 }
-print("caught:", caught);

@@ -7,24 +7,23 @@
 // needs updating; if R improves, do at least 2 more loops before
 // declaring convergence.
 //
-// Why the trap calls are NOT in this file: the host extractor needs a
-// concrete, named type at every trap call site, and a generic function
-// cannot supply one (its type parameters are unresolved at the call
-// site — the pre-check rejects them loudly). So the loop is generic
-// over X and R, but the trap-calling steps are supplied by the caller
-// (the concrete workflow), where the types ARE concrete. The steps
-// are plain callbacks; the loop calls them — including inside `all()`
-// branch thunks, where a trap suspends the branch exactly as a direct
-// trap call would. The library owns the loop logic (fan-out, reduce,
-// decide cadence, convergence rule); the workflow owns the contracts.
-// See README.md ("Why JudgeFixLoop is shaped this way").
+// The loop owns its trap calls like any concrete workflow: it calls
+// `job`/`decide` directly, with contract types parameterized by X and
+// R (JudgeInput<X, R>, FixInput<X, R>, RubricUpdateInput<R>). The
+// extractor specializes those types per instantiation (BRA-106): at
+// each `judgeFixLoop<FixItem, FixRubric>(...)` call site it reads the
+// concrete type arguments and re-resolves the inner trap sites under
+// them, so the loop needs no injected callbacks. The caller supplies
+// only (initial, rubric, maxLoops); the threshold the loop's questions
+// and aggregate input carry comes from the rubric itself, which is why
+// R is constrained to `{ threshold: number }`.
 //
 // Convergence rule (settled): a `decide` each loop asks whether the
 // run has converged; the answer only counts once at least 2 loops have
 // passed since the last rubric improvement (loopsSinceRubricChange >=
 // 2). A rubric update resets the counter to 0.
 
-import { all, type Outcome } from "../src/agentts";
+import { job, decide, all, type Outcome } from "../src/agentts";
 
 declare function print(...args: unknown[]): void;
 
@@ -53,21 +52,31 @@ export interface LoopDecision {
   confidence: number;
 }
 
-export interface JudgeFixLoopSteps<X, R> {
-  /** One judge agent (a job trap in the caller's workflow). */
-  judge(item: X, rubric: R, judge: number): JudgeVerdict;
-  /** Reduce/dedupe/aggregate the verdicts (a job trap). */
-  aggregate(verdicts: JudgeVerdict[], failed: number): AggregateScore;
-  /** Revise the item from the verdicts (a job trap). */
-  fix(item: X, rubric: R, verdicts: JudgeVerdict[]): X;
-  /** Revise the rubric from the verdicts (a job trap). */
-  updateRubric(rubric: R, verdicts: JudgeVerdict[]): R;
-  /** Decide: revise the item or keep it (a decide trap). */
-  decideRevise(agg: AggregateScore, loop: number): LoopDecision;
-  /** Decide: update the rubric or keep it (a decide trap). */
-  decideRubric(loop: number, misses: number): LoopDecision;
-  /** Decide: converged or continue (a decide trap). */
-  decideConverged(agg: AggregateScore, loop: number, loopsSinceRubricChange: number): LoopDecision;
+/** Trap contracts, parameterized by the item/rubric types: the
+ * extractor specializes these per instantiation (BRA-106), so each
+ * `judgeFixLoop<X, R>` call site gets the concrete contracts for its
+ * own X and R. */
+export interface JudgeInput<X, R> {
+  item: X;
+  rubric: R;
+  judge: number;
+}
+
+export interface AggregateInput {
+  verdicts: JudgeVerdict[];
+  failed: number;
+  threshold: number;
+}
+
+export interface FixInput<X, R> {
+  item: X;
+  rubric: R;
+  verdicts: JudgeVerdict[];
+}
+
+export interface RubricUpdateInput<R> {
+  rubric: R;
+  verdicts: JudgeVerdict[];
 }
 
 export interface JudgeFixLoopResult<X, R> {
@@ -78,11 +87,10 @@ export interface JudgeFixLoopResult<X, R> {
   lastAggregate: AggregateScore | null;
 }
 
-export function judgeFixLoop<X, R>(
+export function judgeFixLoop<X, R extends { threshold: number }>(
   initial: X,
   rubric: R,
   maxLoops: number,
-  steps: JudgeFixLoopSteps<X, R>,
 ): JudgeFixLoopResult<X, R> {
   let item = initial;
   let rub = rubric;
@@ -92,11 +100,13 @@ export function judgeFixLoop<X, R>(
 
   for (let loop = 1; loop <= maxLoops; loop++) {
     // 3 independent judges in parallel (collect-all: a failed judge
-    // is an outcome, not a loop failure).
+    // is an outcome, not a loop failure). A trap inside an `all()`
+    // branch thunk suspends the branch exactly as a direct trap call
+    // would.
     const outcomes: Outcome<JudgeVerdict>[] = all([
-      () => steps.judge(item, rub, 0),
-      () => steps.judge(item, rub, 1),
-      () => steps.judge(item, rub, 2),
+      () => job<JudgeInput<X, R>, JudgeVerdict>({ spec: "judge", input: { item, rubric: rub, judge: 0 } }),
+      () => job<JudgeInput<X, R>, JudgeVerdict>({ spec: "judge", input: { item, rubric: rub, judge: 1 } }),
+      () => job<JudgeInput<X, R>, JudgeVerdict>({ spec: "judge", input: { item, rubric: rub, judge: 2 } }),
     ]);
     const verdicts: JudgeVerdict[] = [];
     let failed = 0;
@@ -104,13 +114,19 @@ export function judgeFixLoop<X, R>(
       if (o.ok) verdicts.push(o.value);
       else failed++;
     }
-    const agg = steps.aggregate(verdicts, failed);
+    const agg = job<AggregateInput, AggregateScore>({
+      spec: "aggregate",
+      input: { verdicts, failed, threshold: rub.threshold },
+    });
     lastAggregate = agg;
     print(`loop ${loop}: ${agg.summary}`);
 
-    const rev = steps.decideRevise(agg, loop);
+    const rev = decide<LoopDecision>({
+      question: `loop ${loop}: mean score ${agg.meanScore} threshold ${rub.threshold}; ${agg.approved} of 3 approved. Should the work item be revised or kept?`,
+      options: ["revise", "keep"],
+    });
     if (rev.choice === "revise") {
-      item = steps.fix(item, rub, verdicts);
+      item = job<FixInput<X, R>, X>({ spec: "fix", input: { item, rubric: rub, verdicts } });
       print(`loop ${loop}: revised`);
     }
 
@@ -120,15 +136,21 @@ export function judgeFixLoop<X, R>(
         (n, v) => n + (v.notes.includes("missing") ? 1 : 0),
         0,
       );
-      const rd = steps.decideRubric(loop, misses);
+      const rd = decide<LoopDecision>({
+        question: `loop ${loop}: misses: ${misses} missed criteria across judges; update the rubric if misses >= 2. Should the rubric be updated or kept?`,
+        options: ["update", "keep"],
+      });
       if (rd.choice === "update") {
-        rub = steps.updateRubric(rub, verdicts);
+        rub = job<RubricUpdateInput<R>, R>({ spec: "rubric-update", input: { rubric: rub, verdicts } });
         loopsSinceRubricChange = 0;
         print(`loop ${loop}: rubric updated`);
       }
     }
 
-    const conv = steps.decideConverged(agg, loop, loopsSinceRubricChange);
+    const conv = decide<LoopDecision>({
+      question: `loop ${loop}: mean score ${agg.meanScore} threshold ${rub.threshold}, loops since rubric change ${loopsSinceRubricChange}. Converged?`,
+      options: ["converged", "continue"],
+    });
     if (conv.choice === "converged" && loopsSinceRubricChange >= 2) {
       print(`loop ${loop}: converged`);
       return { item, rubric: rub, loops: loop, converged: true, lastAggregate };

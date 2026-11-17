@@ -15,12 +15,13 @@
 // human answers" — the host suspends the run and waits for
 // deliverGate; the adapter never blocks on a human.
 //
-// Adapters are loaded from apps/agentts/plugins/<name>/src/adapter.ts
-// (see host.loadAdapter) or from the host's built-ins in
-// src/adapters/ (mock, direct). "mock" loads from the plugin dir
-// (plugins/mock/src/adapter.ts, BRA-53); the Host constructor's
-// default adapter is the same MockAdapter class, kept as the
-// fallback when no adapter is configured at all.
+// Adapters live in apps/agentts/plugins/<name>/ (Layer 3's home,
+// BRA-68): one folder per environment, holding the adapter
+// implementation (plugins/<name>/src/<name>-adapter.ts) next to the
+// loadable seam (plugins/<name>/src/adapter.ts, see
+// host.loadAdapter). The Host constructor's default adapter is the
+// same MockAdapter class, kept as the fallback when no adapter is
+// configured at all.
 
 export const HOLD = Symbol("adapter-hold");
 

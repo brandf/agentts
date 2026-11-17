@@ -31,8 +31,15 @@ interface WorkItem {
   text: string;
 }
 
-const s = job<ScoreInput, ScoreResult>({ spec: "score", input: { value: 7 } });
-const sAny: any = s;
-const fixed = job<FixInput, WorkItem>({ spec: "fix", input: { item: "x", verdicts: [sAny] } });
-print("fixed:", JSON.stringify(fixed));
-print("done");
+export interface RunResult {
+  done: boolean;
+}
+
+export default function run(): RunResult {
+  const s = job<ScoreInput, ScoreResult>({ spec: "score", input: { value: 7 } });
+  const sAny: any = s;
+  const fixed = job<FixInput, WorkItem>({ spec: "fix", input: { item: "x", verdicts: [sAny] } });
+  print("fixed:", JSON.stringify(fixed));
+  print("done");
+  return { done: true };
+}
