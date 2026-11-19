@@ -1,6 +1,6 @@
 // JudgeFixLoop end-to-end (BRA-44): the concrete workflow that runs
 // the generic library loop. The trap calls live in the loop itself
-// (workflows/judge-fix-loop.ts), specialized per instantiation by the
+// (workflows/library/judge-fix-loop.ts), specialized per instantiation by the
 // extractor (BRA-106); this workflow supplies only (item, rubric,
 // maxLoops).
 //
@@ -14,7 +14,8 @@
 import {
   judgeFixLoop,
   type AggregateScore,
-} from "../../workflows/judge-fix-loop";
+  type JudgeVerdict,
+} from "../../workflows/library/judge-fix-loop";
 
 declare function print(...args: unknown[]): void;
 
@@ -40,6 +41,12 @@ export interface JudgeFixLoopWorkflowResult {
   loops: number;
   converged: boolean;
   lastAggregate: AggregateScore | null;
+  // Carries the shared JudgeFixLoopResult shape (added with rubricReview):
+  // the final round's verdicts, including per-criterion scores and the
+  // open-ended feedback, must be part of the declared output or the host's
+  // strict result validation rejects the run's output as having additional
+  // properties (BRA-112 regression, Nov 18).
+  lastVerdicts: JudgeVerdict[];
 }
 
 export default function run(input: JudgeFixLoopInput): JudgeFixLoopWorkflowResult {

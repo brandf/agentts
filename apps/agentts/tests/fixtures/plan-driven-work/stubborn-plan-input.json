@@ -1,0 +1,31 @@
+{
+  "executeThrough": "survey-outbox",
+  "phaseOutlines": [
+    {
+      "acceptance": "delivery records listed",
+      "args": [
+        "-1",
+        "__OUTDIR__/outbox"
+      ],
+      "command": "ls",
+      "description": "List the delivery outbox in this run's outDir",
+      "kind": "command",
+      "name": "survey-outbox"
+    }
+  ],
+  "planRubric": {
+    "criteria": [
+      "covers-request",
+      "sequenced",
+      "jobspec",
+      "acceptance",
+      "review-points",
+      "gate-placement",
+      "quantum-safe",
+      "zero-trust",
+      "air-gapped"
+    ],
+    "threshold": 0.8
+  },
+  "request": "Draft and execute a small plan with an unfixable rubric criterion (stubborn check)"
+}

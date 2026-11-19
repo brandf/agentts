@@ -16,7 +16,7 @@
  * This test pins the wiring by replaying the scratch layout in
  * miniature: it copies src/ + plugins/ + workflows/ (the dirs the
  * copied host imports from — the mock adapter imports
- * workflows/bugfix-worker) to a temp dir with no packages/ sibling, then
+ * workflows/dogfood/bugfix-worker) to a temp dir with no packages/ sibling, then
  * spawns a child bun process that imports the copied host and prints
  * engineVersion():
  *   A. With $AGENTTS_DURABLETS_DIR unset in the child, the version

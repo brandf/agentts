@@ -169,7 +169,7 @@ export interface CheckerExtraction {
   >;
 }
 
-const WRAPPER_NAMES = new Set(["job", "decide", "exec", "gate", "sleep", "cron"]);
+const WRAPPER_NAMES = new Set(["job", "decide", "exec", "gate", "sleep", "cron", "run"]);
 const FIXED_WRAPPER_TYPES: Record<string, [string, string]> = {
   exec: ["ExecSpec", "ExecResult"],
   gate: ["GateSpec", "GateResult"],
@@ -331,11 +331,19 @@ function collectTrapSites(program: ts.Program, files: string[]): TrapSiteRecord[
     const sf = program.getSourceFile(fileAbs);
     if (!sf) continue;
     const importedWrappers = new Set<string>();
+    // Local name -> imported (canonical) wrapper name (BRA-105): an
+    // import alias (`import { run as runChild }`) binds the wrapper
+    // under its LOCAL name; the call-site walk resolves through this
+    // map so an aliased call checks exactly like the canonical name.
+    const wrapperAliases = new Map<string, string>();
     for (const st of sf.statements) {
       if (ts.isImportDeclaration(st) && ts.isStringLiteral(st.moduleSpecifier) && st.moduleSpecifier.text.includes("agentts")) {
         const clause = st.importClause;
         if (clause?.namedBindings && ts.isNamedImports(clause.namedBindings)) {
-          for (const el of clause.namedBindings.elements) importedWrappers.add(el.name.text);
+          for (const el of clause.namedBindings.elements) {
+            importedWrappers.add(el.name.text);
+            wrapperAliases.set(el.name.text, el.propertyName?.text ?? el.name.text);
+          }
         }
       }
     }
@@ -349,7 +357,11 @@ function collectTrapSites(program: ts.Program, files: string[]): TrapSiteRecord[
     const visit = (node: ts.Node): void => {
       if (ts.isCallExpression(node)) {
         const name = calleeName(node.expression);
-        if (name !== null && (name === "trap" || WRAPPER_NAMES.has(name))) {
+        // BRA-105: resolve an import alias to the wrapper's canonical
+        // name before matching — `run as runChild` is still a run
+        // call. `trap` is a global, never an import alias.
+        const resolved = wrapperAliases.get(name ?? "") ?? name ?? "";
+        if (name !== null && (name === "trap" || WRAPPER_NAMES.has(resolved))) {
           const { line, column } = loc(sf, node);
           const args = node.typeArguments ?? [];
           const push = (
@@ -382,6 +394,12 @@ function collectTrapSites(program: ts.Program, files: string[]): TrapSiteRecord[
                 const spec = literalProp(node.arguments[1], "spec") ?? literalProp(node.arguments[1], "op");
                 key = spec !== null ? `job:${spec}` : trapType;
               }
+              // BRA-105: a direct trap("run", ...) keys on the child
+              // workflow literal, like a job keys on its spec.
+              if (trapType === "run") {
+                const workflow = literalProp(node.arguments[1], "workflow");
+                key = workflow !== null ? `run:${workflow}` : trapType;
+              }
               if (args.length === 2) {
                 push(key, "trap", node.arguments[1], args[0], args[1]);
               } else if (args.length === 0) {
@@ -399,15 +417,23 @@ function collectTrapSites(program: ts.Program, files: string[]): TrapSiteRecord[
               // Wrong arity: the extractor fails loudly; skip.
             }
           } else if (importedWrappers.has(name)) {
-            if (name === "job") {
+            if (resolved === "job") {
               if (args.length === 2) {
                 const spec = literalProp(node.arguments[0], "spec");
                 push(spec !== null ? `job:${spec}` : "job", "job", jobInputValue(node.arguments[0]), args[0], args[1]);
               }
-            } else if (name === "decide") {
+            } else if (resolved === "run") {
+              // BRA-105: like job — two type arguments, keyed by the
+              // literal child workflow path; the input value is the
+              // arg's `input` property, same as job.
+              if (args.length === 2) {
+                const workflow = literalProp(node.arguments[0], "workflow");
+                push(workflow !== null ? `run:${workflow}` : "run", "run", jobInputValue(node.arguments[0]), args[0], args[1]);
+              }
+            } else if (resolved === "decide") {
               if (args.length === 1) push("decide", "decide", node.arguments[0], undefined, args[0]);
             } else if (args.length === 0) {
-              push(name, name, node.arguments[0], undefined, undefined);
+              push(resolved, resolved, node.arguments[0], undefined, undefined);
             }
           } else if (!localNames.has(name)) {
             // Not imported and not local: the extractor fails loudly.

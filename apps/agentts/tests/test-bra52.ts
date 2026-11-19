@@ -24,7 +24,7 @@
  *      appear in the §1 table (an entry) or the §5 table (a support
  *      file) — a workflow file with no manifest row fails.
  *   4. Admittance: a task carrying a `workflow:<name>` label resolves
- *      to `workflows/<name>.ts` (src/admittance.ts resolveWorkflow)
+ *      to `workflows/library/<name>.ts` (src/admittance.ts resolveWorkflow)
  *      — the manifest's §6 claim, checked against the real function.
  *
  *   bun tests/test-bra52.ts
@@ -108,7 +108,7 @@ for (const row of entries) {
     continue;
   }
   const abs = path.resolve(WORKFLOWS_DIR, file);
-  entryFiles.add(path.basename(file));
+  entryFiles.add(file);
   check(fs.existsSync(abs), `ENTRY ${name}: file exists (${file})`);
   if (fs.existsSync(abs)) {
     const src = fs.readFileSync(abs, "utf8");
@@ -175,7 +175,19 @@ for (const row of specs) {
 const support = tableRows(manifest, "## 5. Support files");
 const supportFiles = new Set(support.map((r) => firstBackticked(r[0])).filter(Boolean) as string[]);
 const listed = new Set([...entryFiles, ...supportFiles]);
-for (const f of fs.readdirSync(WORKFLOWS_DIR).filter((x) => x.endsWith(".ts")).sort()) {
+// Recursive: library/ and dogfood/ both count — a workflow file
+// with no manifest row fails, wherever under workflows/ it lives.
+const workflowFiles: string[] = [];
+const walkWorkflows = (d: string, rel: string): void => {
+  for (const e of fs.readdirSync(d, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name))) {
+    const p = path.join(d, e.name);
+    const r = rel ? `${rel}/${e.name}` : e.name;
+    if (e.isDirectory()) walkWorkflows(p, r);
+    else if (e.isFile() && e.name.endsWith(".ts")) workflowFiles.push(r);
+  }
+};
+walkWorkflows(WORKFLOWS_DIR, "");
+for (const f of workflowFiles) {
   check(listed.has(f), `COVERAGE: workflows/${f} is listed in §1 or §5 of the manifest`);
 }
 
@@ -185,8 +197,8 @@ const resolved = resolveWorkflow(
   {},
 );
 check(
-  resolved === "workflows/improve-loop.ts",
-  `ADMITTANCE: workflow:improve-loop label resolves to workflows/improve-loop.ts (got ${resolved})`,
+  resolved === "workflows/library/improve-loop.ts",
+  `ADMITTANCE: workflow:improve-loop label resolves to workflows/library/improve-loop.ts (got ${resolved})`,
 );
 const unmapped = resolveWorkflow({ id: "BRA-2", labels: [], status: "open" } as never, {});
 check(unmapped === null, `ADMITTANCE: task with no mapping resolves to null (got ${unmapped})`);

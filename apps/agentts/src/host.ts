@@ -45,6 +45,7 @@ import * as path from "node:path";
 import * as crypto from "node:crypto";
 import * as os from "node:os";
 import {
+  collectClosureFiles,
   collectWorkflowFiles,
   extractWorkflow,
   resolveAgenttsModule,
@@ -64,9 +65,9 @@ import {
   type TrapContext,
 } from "./adapter";
 import { MockAdapter } from "../plugins/mock/src/mock-adapter";
+import { decideLocal } from "./decision-model";
 import { appendTrapActual } from "./cost-model";
 import { QuotaTracker } from "./quotas";
-import { httpPostSync } from "./worker-http";
 import { workerServerUrl, type SystemEvent, type SystemEventType } from "./worker-protocol";
 import { atomicWriteFile, CorruptionLog, type CorruptionRecord } from "./corruption";
 
@@ -181,9 +182,9 @@ export class DriveCapError extends Error {
  *   - One jobspec prose file per extracted job spec
  *     (plugins/muse/jobspecs/<spec>.md, when one exists).
  *   - Any `<name>.ts` under the repo's workflows/ dir that the
- *     run's frozen workflow closure names as `workflows/<name>.ts`
+ *     run's frozen workflow closure names as `workflows/<subdir>/<name>.ts`
  *     (the exec'd-script path, e.g. briefing-prep.ts, which the
- *     workflow runs via `bun workflows/briefing-prep.ts`).
+ *     workflow runs via `bun workflows/dogfood/briefing-prep.ts`).
  * What is NOT pinned, deliberately: the workflow closure itself
  * (already frozen byte-identical by BRA-71 — the frozen copy IS
  * its pin), the C host + dquickts engine (covered by
@@ -302,6 +303,30 @@ export const ENQUEUE_LOCK_STALE_MS = 30_000;
  * holder mid-write — treat as live, not stale (BRA-82). */
 export const ENQUEUE_LOCK_EMPTY_GRACE_MS = 5_000;
 
+/** In-flight notifyEvent POSTs (BRA-96): fire-and-forget fetch
+ * promises, tracked so a process that exits explicitly can flush
+ * them first (see flushNotifications). A process that lets its
+ * event loop drain needs no flush — fetch() keeps the loop alive
+ * until the POST settles. Module-level, not per-Host: a CLI
+ * invocation builds its Hosts sequentially and flushes once, in
+ * main()'s finally, whatever command ran. */
+const pendingNotifications = new Set<Promise<void>>();
+
+/** Await every in-flight notifyEvent POST (BRA-96). The CLI awaits
+ * this before process.exit() — an explicit exit abandons pending
+ * fetches, so without the flush the run-submitted event from a
+ * submit would be lost and the tick agent would never wake to drive
+ * the run (BRA-110 caught exactly that: the standin drives only on
+ * run-submitted). Drains in a loop so a notification posted while
+ * flushing is awaited too. Best-effort throughout: the per-POST
+ * 2s timeout bounds the flush, and a POST that fails still
+ * settles (its rejection is swallowed in notifyEvent). */
+export async function flushNotifications(): Promise<void> {
+  while (pendingNotifications.size > 0) {
+    await Promise.allSettled([...pendingNotifications]);
+  }
+}
+
 /** What `agentts result <runId>` returns: the run's status, and the
  * validated output JSON once it is done. */
 export interface RunResult {
@@ -412,6 +437,18 @@ export interface HostConfig {
   clock?: "virtual" | "real";
   /** The environment adapter. Default: MockAdapter (gates auto). */
   adapter?: Adapter;
+  /** Workers-config (BRA-56 / BRA-111): { spec: absolute worker
+   * script path }. Applied to the Host's own adapter when it
+   * supports registerWorker, and to every fresh DirectAdapter the
+   * Host loads for a queued entry (adapterForEntry) — so a run
+   * submitted with --adapter direct + a workers-config is driven
+   * with those workers no matter which process drives it (CLI
+   * `queue run` or the worker server's driver). Without this, the
+   * server driver built a plain DirectAdapter per request and a
+   * briefing run failed loudly at its first job with "no worker
+   * registered". Paths must already be absolute (loadWorkersConfig
+   * resolves them); scripts must exist. Default: none. */
+  workersConfig?: Record<string, string>;
   /** "auto" answers gates at once; "hold" keeps a gate open until an
    *  answer is delivered. Only used when no adapter is given (builds
    *  the default MockAdapter). Default "auto". */
@@ -426,11 +463,49 @@ export interface HostConfig {
    * here — decideLocal consumes no tokens; they are enforced at
    * pool dispatch from declared tokensEst (see quotas.ts). */
   maxDecisionsPerSec?: number;
+  /** In-process event sink (BRA-116): when set, notifyEvent calls
+   * this instead of POSTing to the worker server over HTTP. The
+   * worker server passes its own emitEvent here for its driver
+   * Hosts — a Host driving inside the server process delivers the
+   * event in-process, with no network round-trip and no dependence
+   * on the listener being up. (Before BRA-96 the HTTP path was a
+   * blocking curl spawn that could deadlock the server's own event
+   * loop; the fetch is async now, but the sink stays as the
+   * zero-cost path.) Hosts outside the server (the CLI) leave this
+   * unset and notify over HTTP as before. Best-effort either way:
+   * a throwing sink is swallowed, like a failed POST. */
+  onEvent?: (
+    type: SystemEventType,
+    detail: { runId?: string; jobId?: string; trapId?: string; detail?: unknown },
+  ) => void;
 }
 
 export const prefixFor = (runId: string): string => runId.replace(/\//g, "_");
 const shaBuf = (b: Buffer): string => crypto.createHash("sha256").update(b).digest("hex");
 const shaFile = (p: string): string => shaBuf(fs.readFileSync(p));
+
+/** Driver-template version (BRA-94): bump when the driver template
+ * in driverFor changes — the bundle cache key includes it, so a
+ * template change misses instead of reusing a bundle built from
+ * the old template. */
+const DRIVER_TEMPLATE_VERSION = 1;
+
+/** BRA-90: checkpoint manifest (bra90-chain-v1) for the hash-linked
+ * snapshot chain. `keyframeHash` names the keyframe file under
+ * blobs/keyframes/; `deltaHash` names the delta bytes (null at a
+ * base/keyframe checkpoint). */
+interface CheckpointManifest {
+  format: "bra90-chain-v1";
+  kind: "base" | "keyframe" | "delta";
+  keyframeHash: string;
+  deltaHash: string | null;
+  prevCheckpointHash: string | null;
+  ordinal: number;
+  sinceKeyframe: number;
+  baseSize: number;
+  lastDelta: number | null;
+  trigger: "initial" | "interval" | "ratio" | "full-only" | null;
+}
 
 /** Candidate DurableTS package dirs (same layouts as
  * resolveHostPath's binary candidates): the staged repo and the
@@ -514,6 +589,13 @@ interface RunEntry {
   fork: any | null;
   parentForkId: string | null;
   branch: number | null;
+  /** Parentage for a run/call child run (BRA-105): the parent run
+   * and the run trap that started this child. Null for top-level
+   * runs and fork branches (which use parentForkId/branch). The
+   * child runId itself is derived from the trap (`<trapId>/child`),
+   * so these fields are the readable record, not the identity. */
+  parentRunId?: string;
+  parentTrapId?: string;
   /** Original workflow path (not the bundle): re-extraction on resume
    * reads the same source, so the cache hits and the gate never
    * re-runs for a resumed run. For runs started after BRA-71 this is
@@ -565,6 +647,113 @@ function resolveHostPath(): string {
   );
 }
 
+/** The adapter a run executes under when neither the submit nor the
+ * driver named one (BRA-116): direct on the production state dir
+ * (~/workspace/agentts-state), mock elsewhere. ONE rule, two callers
+ * — the CLI's makeHost (src/cli.ts) and the worker server's driver
+ * endpoints (src/worker-server.ts) — so the server drive and the
+ * operator drive never disagree about what a run executes under.
+ * enqueue records the submitting Host's adapter on the entry (which
+ * is how the rule reaches the run); the driving Host's own adapter
+ * is the fallback for legacy entries that carry none, so the two
+ * callers must still apply the same rule. */
+export function defaultAdapterName(stateDir: string): "mock" | "direct" {
+  return path.resolve(stateDir) ===
+    path.resolve(path.join(os.homedir(), "workspace", "agentts-state"))
+    ? "direct"
+    : "mock";
+}
+
+/** Build a Host the way the CLI's `queue run` (no flags) does: the
+ * default adapter for the state dir, virtual clock, auto gates, and
+ * the local decision model wired into a mock adapter (BRA-54: the
+ * mock's canned decide cannot answer revise/keep/converged, so a
+ * decide-heavy workflow would loop unconverged without it). The
+ * worker server's driver endpoints build one of these PER REQUEST
+ * (BRA-116 decision, recorded here because the alternative — one
+ * Host held by the server — is tempting and wrong):
+ * - A held Host's in-memory journals + registry go stale the moment
+ *   another process drives the same state dir (a CLI `queue run`
+ *   writes newer journals/snapshots to disk; the held Host would
+ *   then drive from its old snapshot and `result()` would read its
+ *   old journal). A fresh Host loads current disk state, exactly
+ *   like the CLI does today — same semantics as the operator path,
+ *   no new staleness hazard.
+ * - A held Host pins every journal it has touched in memory
+ *   forever (BRA-98 made construction lazy, but a loaded run's
+ *   list still grows unboundedly while it is driven) — unbounded
+ *   growth in a long-lived server. A per-request Host releases
+ *   them when the request ends.
+ * - Cost is small: the Host constructor is 0.4–1.6ms at bench
+ *   journal sizes (host_construct_ms), and makeDriverHost as a
+ *   whole measured ~8ms standalone (adapter load included) —
+ *   negligible next to the drive work itself; the extract cache is
+ *   on disk (stateDir/cache), so a fresh Host does not pay cold tsc.
+ * The caller is responsible for the driver lock (runQueue acquires
+ * it) and for disposing of nothing — the Host holds no long-lived
+ * resources beyond its heartbeat timer, which runQueue's lock
+ * release clears. */
+/** Load a workers-config file (BRA-56 / BRA-111): JSON
+ * { spec: workerScriptPath }. Paths resolve against the cwd;
+ * every script must exist. Loud on a missing file, bad JSON, a
+ * non-plain-object body, a non-string value, or a missing script
+ * — never a silent skip. Shared by the CLI's makeHost and the
+ * worker server's driver host, so the two callers never disagree
+ * about what a config means. Returns spec -> absolute path. */
+export function loadWorkersConfig(file: string): Record<string, string> {
+  let raw: string;
+  try {
+    raw = fs.readFileSync(file, "utf8");
+  } catch {
+    throw new Error(`workers config: cannot read ${file}`);
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (e) {
+    throw new Error(
+      `workers config: ${file} is not valid JSON: ${e instanceof Error ? e.message : String(e)}`,
+    );
+  }
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+    throw new Error(`workers config: ${file} must be a JSON object { spec: scriptPath }`);
+  }
+  const out: Record<string, string> = {};
+  for (const [spec, script] of Object.entries(parsed)) {
+    if (typeof script !== "string") {
+      throw new Error(`workers config: spec "${spec}" has a non-string script path`);
+    }
+    const resolved = path.isAbsolute(script) ? script : path.resolve(script);
+    if (!fs.existsSync(resolved)) {
+      throw new Error(`workers config: script for spec "${spec}" not found: ${resolved}`);
+    }
+    out[spec] = resolved;
+  }
+  return out;
+}
+
+export async function makeDriverHost(
+  stateDir: string,
+  opts: { onEvent?: HostConfig["onEvent"]; workersConfigPath?: string } = {},
+): Promise<Host> {
+  const name = defaultAdapterName(stateDir);
+  const adapter = await Host.loadAdapter(name);
+  // BRA-111: the server driver honors a workers-config (from
+  // `worker serve --workers-config` / AGENTTS_WORKERS_CONFIG),
+  // read fresh on every drive so a config edit takes effect
+  // without a restart. A missing/bad file fails this drive loudly
+  // (the /queue/run handler answers 500) — never a silent
+  // plain-adapter drive.
+  const workersConfig = opts.workersConfigPath
+    ? loadWorkersConfig(opts.workersConfigPath)
+    : undefined;
+  const host = new Host({ stateDir, adapter, clock: "virtual", onEvent: opts.onEvent, workersConfig });
+  if (name === "mock" && adapter instanceof MockAdapter) {
+    adapter.setCanned("decide", (_type, arg) => ({ value: decideLocal(arg.question, arg.options) }));
+  }
+  return host;
+}
+
 export class Host {
   readonly hostPath: string;
   /** State dir (blobs, journals, runs, cache, queue). */
@@ -573,6 +762,8 @@ export class Host {
   readonly workdir: string;
   readonly cacheDir: string;
   readonly clockMode: "virtual" | "real";
+  /** In-process event sink (BRA-116, see HostConfig.onEvent). */
+  private readonly onEvent?: HostConfig["onEvent"];
   /** The environment adapter. Swapped per queue entry by runQueue
    * (an entry is driven with the adapter it was submitted with) —
    * deliberately NOT readonly; the swap is restored in a finally. */
@@ -580,6 +771,12 @@ export class Host {
   readonly maxRepairAttempts: number;
   private initialClockMs: number;
   private clocks = new Map<string, number>();
+  /** In-memory journals, keyed by EXACT run id — populated lazily
+   * by loadJournal on first access (BRA-98), never at construction.
+   * A run present here is loaded (its list mirrors the file, kept
+   * in sync by journalEvent); a run absent here is NOT loaded, and
+   * journalEvent appends to its file only. Never cache a missing
+   * file: a later journalEvent may create it. */
   private journals = new Map<string, any[]>();
   /** Corrupt-state report (BRA-77, BRA-62 G5+G15; BRA-84 run
    * entries): every corrupt journal line this Host quarantined on
@@ -617,7 +814,7 @@ export class Host {
   /** Per-trap dispatch provenance, recorded in driveStepOnce and
    * attached to the trap-result/trap-error event in ingestLog
    * (BRA-57). Keyed by trapId (globally unique: runId/trap-N). */
-  private pendingTrapMeta = new Map<string, { adapter: string; worker?: string; wallMs: number; tokens?: number }>();
+  private pendingTrapMeta = new Map<string, { adapter: string; worker?: string; wallMs: number; tokens?: number; auto?: boolean }>();
   private registry = new Map<string, RunEntry>();
   /** Final exit codes of runs that completed (their registry entries
    * are gone — the registry only holds in-flight runs). Lets driveToCompletion()
@@ -665,6 +862,10 @@ export class Host {
   /** Decide-rate quota for the in-engine decide path (BRA-49).
    * Default unlimited; see HostConfig.maxDecisionsPerSec. */
   private decideQuotas: QuotaTracker;
+  /** Workers-config map (BRA-111): spec -> absolute worker script
+   * path, applied to every DirectAdapter this Host uses (own +
+   * per-entry fresh loads). See HostConfig.workersConfig. */
+  private workersConfig: Record<string, string>;
 
   constructor(config: HostConfig = {}) {
     this.hostPath = config.hostPath ?? resolveHostPath();
@@ -675,7 +876,13 @@ export class Host {
     }
     this.cacheDir = path.join(this.stateDir, "cache");
     this.clockMode = config.clock ?? "virtual";
+    this.onEvent = config.onEvent;
     this.adapter = config.adapter ?? new MockAdapter({ gates: config.gates ?? "auto" });
+    this.workersConfig = config.workersConfig ?? {};
+    // A workers-config registers worker scripts on the adapter
+    // (BRA-111) — own adapter here, per-entry fresh adapters in
+    // adapterForEntry.
+    this.applyWorkersConfig(this.adapter);
     // Wire the journal callback onto the adapter (BRA-61): the muse
     // adapter reports mid-flight pool transitions (nudge, re-queue,
     // retry attempt) as it observes them, and the host journals
@@ -692,10 +899,12 @@ export class Host {
       typeof config.initialTime === "number"
         ? config.initialTime
         : Date.parse(config.initialTime ?? "2027-01-01T00:00:00.000Z");
-    // Cross-process durability: reload journals + run entries from
-    // disk so a new Host over the same stateDir sees prior runs
-    // (held gates resume across CLI invocations).
-    this.loadJournalsFromDisk();
+    // Cross-process durability: reload run entries from disk so a
+    // new Host over the same stateDir sees prior runs (held gates
+    // resume across CLI invocations). Journals are NOT loaded here
+    // (BRA-98): each run's journal loads lazily on first access
+    // (see loadJournal), so construction is O(1) in journal volume
+    // instead of O(all history).
     this.loadRunEntriesFromDisk();
   }
 
@@ -737,7 +946,10 @@ export class Host {
   freezeWorkflow(workflowPath: string): { hash: string; entryPath: string } {
     const abs = path.resolve(workflowPath);
     const source = fs.readFileSync(abs, "utf8");
-    const files = collectWorkflowFiles(abs);
+    // BRA-105: the closure is the imports PLUS the transitive literal
+    // run-call targets — a child workflow is code the parent may
+    // execute, so it is pinned with the parent at submit.
+    const files = collectClosureFiles(abs);
     // The agentts module the closure imports: resolve from every
     // closure file, not just the entry — a workflow that only calls a
     // library (BRA-106: the trap calls live in the lib) never imports
@@ -1106,15 +1318,16 @@ export class Host {
         }
       }
       if (adapter.name === "mock" && spec.startsWith("bugfix-")) {
-        add(path.join(here, "..", "workflows", "bugfix-worker.ts"));
+        add(path.join(here, "..", "workflows", "dogfood", "bugfix-worker.ts"));
       }
       const jobspec = path.join(this.jobspecDir(), `${spec}.md`);
       if (fs.existsSync(jobspec)) add(jobspec);
     }
     // 4. Exec'd scripts the run references: any `workflows/<name>.ts`
+    // or `workflows/<subdir>/<name>.ts` (library/ or dogfood/)
     // named in the frozen workflow closure (entry + transitive
     // relative imports, already frozen by BRA-71) is a script the
-    // workflow runs via an exec trap (`bun workflows/<name>.ts`,
+    // workflow runs via an exec trap (`bun workflows/<subdir>/<name>.ts`,
     // relative to the host cwd — the live file, never the frozen
     // dir). The closure text is the authority: a workflow that
     // never names such a script pins none.
@@ -1128,7 +1341,7 @@ export class Host {
         } catch {
           continue;
         }
-        for (const m of text.matchAll(/workflows\/([A-Za-z0-9_.-]+\.ts)/g)) {
+        for (const m of text.matchAll(/workflows\/((?:[A-Za-z0-9_.-]+\/)?[A-Za-z0-9_.-]+\.ts)/g)) {
           add(path.join(repoRoot, "workflows", m[1]));
         }
       }
@@ -1248,6 +1461,24 @@ export class Host {
     });
   }
 
+  /** Register this Host's workers-config on an adapter that
+   * supports it (BRA-111). Structural, like wireJobEvents: the
+   * host never imports the direct adapter's class (layering), so
+   * it calls registerWorker only when the adapter has one.
+   * Adapters without the seam (mock, muse) are untouched — a
+   * workers-config on a non-direct adapter is the caller's loud
+   * error (the CLI enforces it), never a silent skip here. A
+   * config entry overrides the adapter's default registration
+   * for that spec (the trap pin records the override as
+   * submitted, not as defaulted). */
+  private applyWorkersConfig(adapter: Adapter): void {
+    const register = (adapter as any)?.registerWorker;
+    if (typeof register !== "function") return;
+    for (const [spec, script] of Object.entries(this.workersConfig)) {
+      register.call(adapter, spec, script);
+    }
+  }
+
   /**
    * Load a full plugin ENGINE class from
    * apps/agentts/plugins/<name>/src/<name>-plugin.ts (the mock plugin
@@ -1321,13 +1552,15 @@ export class Host {
   }
   /** Record one corrupt-state finding (BRA-77): in the public
    * `corruption` report and, durably, in stateDir/corruption.log
-   * (append-only JSONL). Deduped in-process (a journal file is
-   * parsed twice on load — once by loadJournalsFromDisk, once by
-   * the registry re-key path) and across processes (a quarantined
-   * line stays in its journal file, so every new Host
-   * re-quarantines it). The in-memory report keeps the record even
-   * when the file already holds it — only the file append dedupes
-   * across processes. Best-effort: a failure to write the log never
+   * (append-only JSONL). Deduped in-process (a journal file can be
+   * parsed more than once in one Host's lifetime — a re-run deletes
+   * the cached list and the run is driven again, and two run ids
+   * can share one file via the prefixFor collision) and across
+   * processes (a quarantined line stays in its journal file, so
+   * every new Host that first accesses the run re-quarantines it).
+   * The in-memory report keeps the record even when the file
+   * already holds it — only the file append dedupes across
+   * processes. Best-effort: a failure to write the log never
    * fails the load. */
   private recordCorruption(rec: CorruptionRecord): void {
     const key = `${rec.kind}|${rec.file}|${rec.lineNo}|${rec.excerpt}`;
@@ -1635,19 +1868,51 @@ export class Host {
    * A dropped event only delays the tick agent's wake (bounded by
    * the tick timeout + the catch-up sweep), never loses work: the
    * event is a notification, the queue/journal/store on disk is
-   * the source of truth. Never throws, never blocks the drive for
-   * more than the 2s POST timeout.
+   * the source of truth. Never throws, and never blocks the drive:
+   * the POST is a fire-and-forget in-process fetch (BRA-96 — the
+   * old blocking curl spawn cost ~8.5ms of the ~10.5ms per event),
+   * so the drive pays only the ~0.3ms initiation. fetch() keeps
+   * the Bun event loop alive until it settles, so the POST still
+   * lands before a process that lets its loop drain exits (proven
+   * by tests/test-bra96.ts). BUT an explicit process.exit() abandons
+   * in-flight fetches — a CLI that notifies and then exits MUST
+   * await flushNotifications() first, or the event is lost (the
+   * submit CLI lost run-submitted exactly this way and the tick
+   * standin never drove the run — BRA-110 caught it). The CLI
+   * flushes in main()'s finally. AbortSignal.timeout(2000) bounds
+   * how long delivery can hold process exit at 2s, as the old curl
+   * --max-time did.
    */
   notifyEvent(
     type: SystemEventType,
     detail: { runId?: string; jobId?: string; trapId?: string; detail?: unknown } = {},
   ): void {
+    if (this.onEvent) {
+      try {
+        this.onEvent(type, detail);
+      } catch {
+        /* event delivery is best-effort */
+      }
+      return;
+    }
     try {
-      httpPostSync(
-        `${workerServerUrl()}/event`,
-        { type, at: new Date().toISOString(), ...detail } satisfies SystemEvent,
-        2000,
+      const posted = fetch(`${workerServerUrl()}/event`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ type, at: new Date().toISOString(), ...detail } satisfies SystemEvent),
+        signal: AbortSignal.timeout(2000),
+      });
+      // BRA-96: track the in-flight POST so an explicit exit can
+      // flush it (see flushNotifications). The settled promise never
+      // rejects — a failed POST is swallowed, exactly as before.
+      const settled = posted.then(
+        () => undefined,
+        () => undefined,
       );
+      pendingNotifications.add(settled);
+      settled.then(() => {
+        pendingNotifications.delete(settled);
+      });
     } catch {
       /* event delivery is best-effort */
     }
@@ -2069,7 +2334,7 @@ export class Host {
             });
             rc = this.driveToCompletion(entry.runId);
           }
-          if (this.pendingGate.has(entry.runId)) {
+          if (this.pendingGate.has(entry.runId) || this.hasHeldChildRun(entry.runId)) {
             entry.status = "held";
           } else if (rc === 0) {
             entry.status = "done";
@@ -2183,6 +2448,14 @@ export class Host {
     const name = entry.adapter ?? this.adapter.name;
     if (name === this.adapter.name) return this.adapter;
     const adapter = await Host.loadAdapter(name);
+    // A fresh adapter gets the Host's workers-config (BRA-111) as
+    // well as the journal wiring — otherwise a run submitted with
+    // --adapter direct + a workers-config would lose its workers
+    // the moment a different-adapter Host drove it (the server
+    // driver's own adapter is mock on scratch dirs, direct on the
+    // production dir; either way the entry's adapter is a fresh
+    // load here).
+    this.applyWorkersConfig(adapter);
     // A fresh adapter gets the same journal wiring as the Host's
     // own (BRA-61) — otherwise a run driven with a fresh muse
     // adapter would lose its mid-flight pool events.
@@ -2253,7 +2526,8 @@ export class Host {
    * first (JSONL has the same requirement as the trap boundary). A
    * non-JSON event is a host bug — fail loudly, never write a corrupt
    * journal line. The event is appended to the run's JSONL journal
-   * FILE (the source of truth) as well as the in-memory list.
+   * FILE (the source of truth) and, when the run's journal is loaded,
+   * to the in-memory list as well (see the BRA-98 note below).
    *
    * Journal format v2 (BRA-57): every event is stamped here with
    * `wallTs`, its wall-clock timestamp (ISO, ms precision). This is
@@ -2262,23 +2536,95 @@ export class Host {
    * carries one (a re-journaled line) keeps it: the stamp is when
    * the event was first written, not when it was re-read. Additive
    * over v1 — old readers ignore the new fields, and the profiler
-   * treats missing fields as unknown, never invented. */
+   * treats missing fields as unknown, never invented.
+   *
+   * The event is appended to the run's JSONL journal FILE (the
+   * source of truth) and, when the run's journal is already loaded
+   * (BRA-98), to the in-memory list as well. When it is not loaded
+   * the file append is the whole write — no load, no partial list
+   * (see below). */
   journalEvent(runId: string, event: any): void {
     const clean = toJsonValue(event, "journal event"); // throws JsonBoundaryError on a bad event
     if (clean !== null && typeof clean === "object" && !("wallTs" in (clean as Record<string, unknown>))) {
       (clean as Record<string, unknown>).wallTs = new Date().toISOString();
     }
-    const list = this.journals.get(runId) ?? [];
-    list.push(clean);
-    this.journals.set(runId, list);
+    // BRA-98: the file is the source of truth; the in-memory list
+    // only mirrors it when the run's journal is already loaded. If
+    // it is not loaded, append to the file only and do NOT load —
+    // pulling the run's whole history into RAM for a write would
+    // defeat lazy loading, and a later journal() reads the file
+    // fresh, so the event is never lost. Never create a partial
+    // list here: a list holding only the new events would shadow
+    // the on-disk history on the next journal() call.
+    const list = this.journals.get(runId);
+    if (list !== undefined) list.push(clean);
     fs.mkdirSync(path.join(this.stateDir, "journals"), { recursive: true });
     fs.appendFileSync(this.journalPath(runId), JSON.stringify(clean) + "\n");
+  }
+  /** BRA-99: fsync the run's journal file so the journaled record
+   * survives host-level loss, not just process death. Threat model
+   * (decided Nov 17, 2026): process-crash + bounded host-loss. A
+   * process crash loses nothing without fsync (the OS page cache
+   * survives it); only host loss loses the unflushed tail, and the
+   * OS flushes dirty pages within ~30 s, so the loss window is the
+   * last ~30 s of journaling. Without this, the fsynced blob can say
+   * a trap completed while the journal has no trap-result, so the
+   * BRA-75 re-dispatch check cannot find the answer and the trap
+   * re-dispatches (duplicate execution for non-idempotent jobs).
+   * Cost (measured on this VM, /home): append+fsync median ~11 ms
+   * vs append-only ~0.01 ms — paid only at suspension boundaries
+   * (storeBlob) and terminal lifecycle events, never per event
+   * (per-event fsync would cost ~13 s on a 200-trap run; ruled out
+   * quantitatively). A missing journal file means nothing was
+   * journaled yet — nothing to make durable, skip silently. */
+  private fsyncJournal(runId: string): void {
+    const p = this.journalPath(runId);
+    if (!fs.existsSync(p)) return;
+    const fd = fs.openSync(p, "r");
+    try {
+      fs.fsyncSync(fd);
+    } finally {
+      fs.closeSync(fd);
+    }
   }
   journalPath(runId: string): string {
     return path.join(this.stateDir, "journals", prefixFor(runId) + ".journal");
   }
+  /** Load one run's journal from disk on first access (BRA-98:
+   * lazy per-run loading — construction loads no journals, so a
+   * Host over a state dir with years of history costs O(1) to
+   * build and O(that run) when the run is first driven). The parsed
+   * list is cached in `journals` under the EXACT run id: the path
+   * comes from journalPath(runId), so the old lossy filename ->
+   * runId derivation (and the double parse it forced in
+   * registerLoadedRunEntry) is gone — a run id containing "_" now
+   * loads correctly, where the eager loader keyed it under "…/…"
+   * and journal() returned [] for it. A file that exists is cached
+   * even when it parses to zero good events; a missing file is
+   * NOT cached, so a journalEvent that creates the file afterwards
+   * is picked up by the next journal() call. Corrupt lines are
+   * quarantined exactly as the eager loader did (BRA-77 G15):
+   * skipped, recorded via recordCorruption (durable corruption.log,
+   * deduped), and warned about here — the discovery just moves
+   * from construction to first access of the run. */
+  private loadJournal(runId: string): any[] {
+    const cached = this.journals.get(runId);
+    if (cached !== undefined) return cached;
+    const jf = this.journalPath(runId);
+    if (!fs.existsSync(jf)) return [];
+    const before = this.corruption.length;
+    const events = this.parseJournalLines(jf, runId);
+    this.journals.set(runId, events);
+    const quarantined = this.corruption.length - before;
+    if (quarantined) {
+      console.warn(
+        `CORRUPT JOURNAL: ${quarantined} corrupt line(s) quarantined in ${path.basename(jf)} (run ${runId}) — good lines kept, see ${this.corruptionLogPath()}`,
+      );
+    }
+    return events;
+  }
   journal(runId: string): any[] {
-    return [...(this.journals.get(runId) ?? [])];
+    return [...this.loadJournal(runId)];
   }
   /** Parse one journal file's lines tolerantly (BRA-77 G15): a line
    * is a journal event only when it parses to a plain object with a
@@ -2332,39 +2678,11 @@ export class Host {
     }
     return events;
   }
-  /** Reload every journal file from disk into the in-memory lists
-   * (constructor: a new Host over the same stateDir sees prior runs).
-   * Corrupt lines are quarantined, never fatal (BRA-77 G15): one bad
-   * line used to throw here and brick the whole Host — which also
-   * made the BRA-72 queue repair un-runnable on that state dir. The
-   * Host now starts with the good lines intact and reports the
-   * corruption (see `corruption`, corruption.log, and the console
-   * warning below). */
-  private loadJournalsFromDisk(): void {
-    const dir = path.join(this.stateDir, "journals");
-    if (!fs.existsSync(dir)) return;
-    for (const f of fs.readdirSync(dir)) {
-      if (!f.endsWith(".journal")) continue;
-      const runId = f.slice(0, -".journal".length).replace(/_/g, "/");
-      // Run ids contain "/" (branches); the file prefix replaced them
-      // with "_", which is lossy for ids that already contain "_".
-      // The registry (runs/*.json, exact runId) is authoritative for
-      // run identity; journals are reloaded by matching the file
-      // against known run ids first, falling back to the lossy name.
-      const before = this.corruption.length;
-      const events = this.parseJournalLines(path.join(dir, f), runId);
-      if (events.length) this.journals.set(runId, events);
-      const quarantined = this.corruption.length - before;
-      if (quarantined) {
-        console.warn(
-          `CORRUPT JOURNAL: ${quarantined} corrupt line(s) quarantined in ${f} (run ${runId}) — good lines kept, see ${this.corruptionLogPath()}`,
-        );
-      }
-    }
-  }
   /** Dump in-memory journals as JSONL files into a dir (for evidence
    * / inspection; the host's own record is already the journal file
-   * under stateDir/journals). */
+   * under stateDir/journals). BRA-98: only journals this Host has
+   * loaded so far are dumped — a run never accessed here is not
+   * loaded, and its file on disk is already the complete record. */
   dumpJournals(dir: string): void {
     fs.mkdirSync(dir, { recursive: true });
     for (const [runId, events] of this.journals) {
@@ -2488,22 +2806,14 @@ export class Host {
     if (e.log && fs.existsSync(e.log)) {
       this.logOffsets.set(e.log, fs.statSync(e.log).size);
     }
-    // The journal reload keyed run ids lossily ("/" -> "_");
-    // re-key this run's journal under its exact id when the
-    // file's first event names it.
-    const evs = this.journal(e.runId);
-    if (!evs.length) {
-      const jf = this.journalPath(e.runId);
-      if (fs.existsSync(jf)) {
-        // Same tolerant parse as loadJournalsFromDisk (BRA-77
-        // G15): the old lines.map(JSON.parse) threw on a bad
-        // line, and the catch below then dropped the whole
-        // registry entry for the run — a corrupt journal line
-        // silently made a suspended run invisible to repair.
-        const good = this.parseJournalLines(jf, e.runId);
-        if (good.length) this.journals.set(e.runId, good);
-      }
-    }
+    // BRA-98: the run's journal is NOT loaded here — it loads
+    // lazily on first journal() access, keyed by the exact run id
+    // via journalPath, so the old lossy re-key (and its second
+    // parse of the file) is gone. A corrupt journal line is
+    // quarantined when the run is first driven, not at load; the
+    // registry entry itself never depends on the journal parsing,
+    // so a bad line can no longer make a suspended run invisible
+    // to repair.
   }
   private loadRunEntriesFromDisk(): void {
     const dir = path.join(this.stateDir, "runs");
@@ -2619,44 +2929,389 @@ export class Host {
    * bytes at a path the host passes; it never chooses blob paths.
    * The live .snap file is a transient slice — stateDir/blobs/ is the
    * store, so a held gate survives the process exiting and a later
-   * process resumes from the stored copy alone. */
+   * process resumes from the stored copy alone.
+   *
+   * BRA-90: the store is a hash-linked snapshot chain (one keyframe
+   * + one delta per checkpoint), not a single full copy:
+   *   blobs/<prefix>.snap            — verbatim copy of the latest
+   *     KEYFRAME bytes (never a bare delta: BRA-76 C1 needs this
+   *     file > 1000 bytes after a 50-sleep run, and a delta of a
+   *     counter-only workflow is ~150-300 B).
+   *   blobs/<prefix>.delta           — the latest delta bytes
+   *     (verbatim copy of the live slice snap at a delta
+   *     suspension; absent until the first delta).
+   *   blobs/keyframes/<sha256>.snap  — immutable keyframe bytes,
+   *     content-addressed, shared across forks (a branch never
+   *     copies its fork-point keyframe).
+   *   blobs/<prefix>.checkpoint.json — the checkpoint manifest,
+   *     written LAST (the commit point) via tmp+fsync+rename.
+   * The 4.71x/10.35x savings are bytes WRITTEN over a run, not
+   * bytes stored: the live set is a keyframe + the latest delta,
+   * marginally MORE stored than one full snapshot, and load is
+   * slightly slower (one keyframe + one delta to read). The wins
+   * are write amplification over long runs and fork storage. */
   blobPath(runId: string): string {
     return path.join(this.stateDir, "blobs", prefixFor(runId) + ".snap");
   }
-  private storeBlob(runId: string, snap: string): void {
-    const dest = this.blobPath(runId);
+
+  // --------------------------------------------- BRA-90 snapshot chain
+  /** Checkpoint manifest (bra90-chain-v1). `keyframeHash` names the
+   * keyframe file under blobs/keyframes/; `deltaHash` names the
+   * delta bytes (null at a base/keyframe checkpoint). A checkpoint
+   * is identified by sha256(keyframeHash + ":" + (deltaHash ?? "")).
+   * `prevCheckpointHash` links to the previous checkpoint in this
+   * chain (the fork-point checkpoint for a branch's first
+   * checkpoint). `sinceKeyframe` counts suspensions since the
+   * keyframe (0 at a keyframe); `lastDelta` is the previous delta's
+   * byte size (null until a delta exists). */
+  private keyframeInterval(): number {
+    const raw = process.env.DURABLETS_KEYFRAME_INTERVAL;
+    if (raw === undefined || raw === "") return 25;
+    const n = Number(raw);
+    if (!Number.isInteger(n) || n < 0) {
+      throw new Error(`DURABLETS_KEYFRAME_INTERVAL must be a non-negative integer, got ${JSON.stringify(raw)}`);
+    }
+    return n;
+  }
+  /** Pure + recomputable: given the previous checkpoint (null = no
+   * chain yet), what does the NEXT suspension write? The slice env
+   * (chainEnvFor, before the slice) and storeBlob (after it) both
+   * call this with the same manifest, so they always agree. The
+   * keyframe rule is the prototype's, measured in the BRA-90 audit:
+   * rebase when suspensions-since-keyframe reaches the interval
+   * (keyframes land at ordinals 0, 25, 50, ... — at most 24
+   * consecutive deltas at interval 25), or when the previous delta
+   * exceeds 75% of the estimated full snapshot
+   * (delta/(base+delta) > 0.75, integer test 4*delta >
+   * 3*(base+delta)), interval evaluated first. Interval 0 means a
+   * full snapshot (keyframe) at every suspension. */
+  private decideSave(prev: CheckpointManifest | null): {
+    mode: "base" | "delta";
+    kind: "base" | "keyframe" | "delta";
+    trigger: "initial" | "interval" | "ratio" | "full-only" | null;
+    ordinal: number;
+    sinceKeyframe: number;
+  } {
+    const interval = this.keyframeInterval();
+    if (!prev) return { mode: "base", kind: "base", trigger: "initial", ordinal: 0, sinceKeyframe: 0 };
+    const ordinal = prev.ordinal + 1;
+    if (interval === 0) return { mode: "base", kind: "keyframe", trigger: "full-only", ordinal, sinceKeyframe: 0 };
+    const since = prev.sinceKeyframe + 1;
+    if (since >= interval) return { mode: "base", kind: "keyframe", trigger: "interval", ordinal, sinceKeyframe: 0 };
+    if (
+      prev.lastDelta !== null && prev.lastDelta > 0 &&
+      4 * prev.lastDelta > 3 * (prev.baseSize + prev.lastDelta)
+    ) {
+      return { mode: "base", kind: "keyframe", trigger: "ratio", ordinal, sinceKeyframe: 0 };
+    }
+    return { mode: "delta", kind: "delta", trigger: null, ordinal, sinceKeyframe: since };
+  }
+  private checkpointId(m: CheckpointManifest): string {
+    return crypto.createHash("sha256").update(`${m.keyframeHash}:${m.deltaHash ?? ""}`).digest("hex");
+  }
+  private checkpointPath(runId: string): string {
+    return path.join(this.stateDir, "blobs", prefixFor(runId) + ".checkpoint.json");
+  }
+  private deltaPath(runId: string): string {
+    return path.join(this.stateDir, "blobs", prefixFor(runId) + ".delta");
+  }
+  private keyframePath(hash: string): string {
+    return path.join(this.stateDir, "blobs", "keyframes", hash + ".snap");
+  }
+  /** Read a run's checkpoint manifest, or null when it has no
+   * checkpoint (legacy run, or none stored yet). A manifest that
+   * exists but does not parse or is not a bra90-chain-v1 record is
+   * a loud failure, never a guess: the checkpoint is unusable and
+   * the run cannot be resumed from it. */
+  private readManifest(runId: string): CheckpointManifest | null {
+    const p = this.checkpointPath(runId);
+    if (!fs.existsSync(p)) return null;
+    let m: any;
+    try {
+      m = JSON.parse(fs.readFileSync(p, "utf8"));
+    } catch {
+      throw new Error(
+        `corrupt checkpoint manifest for ${runId} at ${p} — the checkpoint is unusable; the run cannot be resumed from it (a previous checkpoint, if any, is intact)`,
+      );
+    }
+    if (
+      !m || m.format !== "bra90-chain-v1" || !["base", "keyframe", "delta"].includes(m.kind) ||
+      typeof m.keyframeHash !== "string" || (m.deltaHash !== null && typeof m.deltaHash !== "string") ||
+      (m.prevCheckpointHash !== null && typeof m.prevCheckpointHash !== "string") ||
+      !Number.isInteger(m.ordinal) || !Number.isInteger(m.sinceKeyframe) ||
+      !Number.isInteger(m.baseSize) || (m.lastDelta !== null && !Number.isInteger(m.lastDelta)) ||
+      ![null, "initial", "interval", "ratio", "full-only"].includes(m.trigger)
+    ) {
+      throw new Error(
+        `corrupt checkpoint manifest for ${runId} at ${p} — the manifest is not a bra90-chain-v1 record; the checkpoint is unusable and the run cannot be resumed from it`,
+      );
+    }
+    return m as CheckpointManifest;
+  }
+  /** The chain instructions for the NEXT slice of a run, computed
+   * fresh from the checkpoint manifest on disk (never cached, never
+   * stored in the run entry): which snapshot the C host should
+   * write (DURABLETS_SAVE_MODE), and which keyframe a delta
+   * checkpoint resumes against (DURABLETS_BASE_PATH). A run with no
+   * manifest writes a base with no base path — the legacy/full
+   * behaviour. Callers merge this into the env they pass to
+   * runHost, for the run whose checkpoint the slice resumes from
+   * (the parent's manifest for a branch's first slice). */
+  private chainEnvFor(runId: string): Record<string, string> {
+    const prev = this.readManifest(runId);
+    const d = this.decideSave(prev);
+    const env: Record<string, string> = { DURABLETS_SAVE_MODE: d.mode };
+    // The READ needs the base whenever the checkpoint being resumed
+    // from is a delta — regardless of what this slice will write (a
+    // keyframe-triggered slice still reads the old delta first, then
+    // writes a base that replaces it). A base/keyframe checkpoint
+    // reads as a full snapshot and attaches its own base on read.
+    if (prev && prev.kind === "delta") env.DURABLETS_BASE_PATH = this.keyframePath(prev.keyframeHash);
+    return env;
+  }
+  /** tmp + fsync + rename + sha-verify both sides (the G4 pattern
+   * storeBlob used for the single .snap copy, factored out so the
+   * keyframe, delta and .snap copies share it). */
+  private atomicCopyVerified(src: string, dest: string): void {
     fs.mkdirSync(path.dirname(dest), { recursive: true });
-    // G4 (BRA-76): atomic store — copy to a pid-suffixed tmp file in
-    // the same directory, sha-verify it against the source, then
-    // rename into place (the same tmp+rename pattern as
-    // atomicWriteFile). A crash mid-copy leaves the previous blob
-    // intact — old or new, never torn — and a stray tmp file is
-    // never read. The pre-rename check catches a bad copy before it
-    // becomes the live blob; the post-rename check is the existing
-    // store guarantee. The C host's own live-snap write
-    // (save_snapshot in durablets.c) is atomic the same way since
-    // BRA-83 (tmp + fsync + rename in write_file_atomic), so the
-    // live snap this copies is never torn either; the live snap is
-    // transient and re-created from this blob on resume, so a torn
-    // live snap fails the slice loudly and the BRA-74 path resumes
-    // from the intact blob.
     const tmp = `${dest}.${process.pid}.tmp`;
-    fs.copyFileSync(snap, tmp);
-    if (shaFile(tmp) !== shaFile(snap)) throw new Error(`blob store mismatch for ${runId}`);
+    fs.copyFileSync(src, tmp);
+    // BRA-95: the source hash is computed ONCE and reused for both
+    // verifications. The old code hashed src twice (once per check)
+    // — the same file, the same bytes — so the second computation
+    // was pure waste: ~0.85 ms per copy at 500KB, ~0.05 ms at 10KB
+    // (measured median of 21, ~/workspace/bra95-measure.ts), two
+    // copies per base-mode suspension. Caching is also more correct:
+    // the copy was taken from src as it was when check A ran, so
+    // check B must compare the dest against that same src — a fresh
+    // hash would fail spuriously if src changed mid-call. Neither
+    // CHECK is dropped: check A gates the copy before rename (a
+    // torn copy never reaches its final path, so it cannot poison a
+    // hash-named keyframe), and check B is the only verification of
+    // the artifact at its final path after rename. The tmp hash and
+    // the dst hash are each load-bearing for a different half of
+    // the G4 "sha-verify both sides" guarantee; only the duplicate
+    // src computation was redundant.
+    const srcHash = shaFile(src);
+    if (shaFile(tmp) !== srcHash) throw new Error(`blob store mismatch: ${src} -> ${dest}`);
+    const tmpFd = fs.openSync(tmp, "r");
+    try {
+      fs.fsyncSync(tmpFd);
+    } finally {
+      fs.closeSync(tmpFd);
+    }
     fs.renameSync(tmp, dest);
-    if (shaFile(dest) !== shaFile(snap)) throw new Error(`blob store mismatch for ${runId}`);
+    if (shaFile(dest) !== srcHash) throw new Error(`blob store mismatch: ${src} -> ${dest}`);
+  }
+  /** Write the checkpoint manifest LAST — it is the commit point:
+   * a crash before this rename leaves the previous checkpoint
+   * intact. tmp + fsync + rename, then read back and verify the
+   * committed record is the one written. */
+  private writeManifest(runId: string, manifest: CheckpointManifest): void {
+    const dest = this.checkpointPath(runId);
+    fs.mkdirSync(path.dirname(dest), { recursive: true });
+    const tmp = `${dest}.${process.pid}.tmp`;
+    fs.writeFileSync(tmp, JSON.stringify(manifest));
+    const tmpFd = fs.openSync(tmp, "r");
+    try {
+      fs.fsyncSync(tmpFd);
+    } finally {
+      fs.closeSync(tmpFd);
+    }
+    fs.renameSync(tmp, dest);
+    const back = JSON.parse(fs.readFileSync(dest, "utf8")) as CheckpointManifest;
+    if (this.checkpointId(back) !== this.checkpointId(manifest)) {
+      throw new Error(`checkpoint manifest mismatch for ${runId}`);
+    }
+  }
+  /** Mark-and-sweep over the blob store: delete keyframe files no
+   * live checkpoint references. A run's manifest pins its keyframe
+   * while it lives (a branch's manifest pins the shared fork-point
+   * keyframe too); a completed run's manifest is discarded, so its
+   * keyframe becomes collectable. If any manifest fails to parse,
+   * the sweep is skipped entirely — never delete while the store
+   * is in a state this host cannot fully read. */
+  private pruneKeyframes(): void {
+    const blobsDir = path.join(this.stateDir, "blobs");
+    const kfDir = path.join(blobsDir, "keyframes");
+    if (!fs.existsSync(kfDir)) return;
+    const referenced = new Set<string>();
+    for (const f of fs.readdirSync(blobsDir)) {
+      if (!f.endsWith(".checkpoint.json")) continue;
+      let m: any;
+      try {
+        m = JSON.parse(fs.readFileSync(path.join(blobsDir, f), "utf8"));
+      } catch {
+        return; // unreadable store: delete nothing
+      }
+      if (m && typeof m.keyframeHash === "string") referenced.add(m.keyframeHash);
+    }
+    for (const f of fs.readdirSync(kfDir)) {
+      if (!f.endsWith(".snap")) continue;
+      if (!referenced.has(f.slice(0, -".snap".length))) fs.rmSync(path.join(kfDir, f));
+    }
+  }
+  /** Drop a run's checkpoint (manifest + delta) when the run
+   * completes or is re-started, so a finished run's keyframe is no
+   * longer pinned and a re-run with the same runId starts a fresh
+   * chain. The .snap file is left alone (test-facing; the next
+   * suspension's store overwrites it). Only terminal completion
+   * discards — a run that fails with a throw (drive cap, plugin
+   * error) keeps its checkpoint intact for forensics/resume, as
+   * the DriveCapError message promises. */
+  private discardCheckpoint(runId: string): void {
+    const m = this.checkpointPath(runId);
+    if (fs.existsSync(m)) fs.rmSync(m);
+    const d = this.deltaPath(runId);
+    if (fs.existsSync(d)) fs.rmSync(d);
+  }
+  private storeBlob(runId: string, snap: string, prev?: CheckpointManifest | null): void {
+    // BRA-99: the suspension boundary — make BOTH halves of the
+    // resume record durable here, in this order. The journal is
+    // fsynced FIRST: if the process dies mid-store, the ahead half
+    // is the journal (recoverable — the BRA-75 check finds the
+    // recorded trap answers), never the blob (a durable blob with a
+    // stale journal re-dispatches an already-executed trap). The
+    // journal already holds the suspended lifecycle event by the
+    // time storeBlob runs (ingestLog journals it before the caller
+    // sees rc 2/3), so this fsync covers it. Then the blob copies
+    // are fsynced before rename: the stored blob had the same class
+    // of gap vs the C host's fsynced live snap. Cost: ~11 ms
+    // journal + ~8-10 ms per fsynced copy per suspension on this VM
+    // (~19 ms for the single-copy shape; the chain adds one more
+    // fsynced copy at a base/keyframe suspension) — the decided
+    // price of the process-crash + bounded-host-loss threat model.
+    // BRA-90: the chain commit. `prev` is the checkpoint the slice
+    // resumed from — the run's own manifest by default; startBranch
+    // passes the parent's manifest, so the child's first checkpoint
+    // extends the parent's chain at the fork point. The decision
+    // (decideSave) is recomputed here from the same manifest the
+    // slice env was computed from, so the two always agree. Commit
+    // order: (1) journal fsync; (2) keyframe file (hash-named,
+    // skipped when already present — a fork shares it); (3) the
+    // .snap copy for a base/keyframe, or the .delta copy for a
+    // delta (plus the .snap keyframe copy when it is missing or
+    // holds other bytes, which covers a branch's first delta);
+    // (4) the manifest LAST — the commit point; a crash before it
+    // leaves the previous checkpoint intact. Then prune
+    // unreferenced keyframes. The live snap this copies is never
+    // torn (the C host's save_snapshot is atomic since BRA-83).
+    this.fsyncJournal(runId);
+    const prevManifest = prev !== undefined ? prev : this.readManifest(runId);
+    const d = this.decideSave(prevManifest);
+    const snapSize = fs.statSync(snap).size;
+    const snapHash = shaFile(snap);
+    let keyframeHash: string;
+    let deltaHash: string | null;
+    let baseSize: number;
+    let lastDelta: number | null;
+    if (d.mode === "base") {
+      keyframeHash = snapHash;
+      deltaHash = null;
+      baseSize = snapSize;
+      lastDelta = null;
+      const kf = this.keyframePath(keyframeHash);
+      if (!fs.existsSync(kf)) {
+        this.atomicCopyVerified(snap, kf);
+      } else if (shaFile(kf) !== snapHash) {
+        throw new Error(`keyframe hash collision for ${runId}: ${kf} exists with different bytes`);
+      }
+      this.atomicCopyVerified(snap, this.blobPath(runId));
+    } else {
+      // A delta is meaningless without its base: the keyframe must
+      // be on disk (it is named by the previous manifest). Refuse
+      // to commit a delta whose base is gone, rather than leaving
+      // a checkpoint that can never resume.
+      keyframeHash = prevManifest!.keyframeHash;
+      deltaHash = snapHash;
+      baseSize = prevManifest!.baseSize;
+      lastDelta = snapSize;
+      const kf = this.keyframePath(keyframeHash);
+      if (!fs.existsSync(kf)) {
+        throw new Error(
+          `BRA-90: keyframe ${keyframeHash} missing for ${runId} — the delta cannot be stored without its base; the checkpoint is not committed`,
+        );
+      }
+      this.atomicCopyVerified(snap, this.deltaPath(runId));
+      const snapDest = this.blobPath(runId);
+      if (!fs.existsSync(snapDest) || shaFile(snapDest) !== keyframeHash) {
+        this.atomicCopyVerified(kf, snapDest);
+      }
+    }
+    const manifest: CheckpointManifest = {
+      format: "bra90-chain-v1",
+      kind: d.kind,
+      keyframeHash,
+      deltaHash,
+      prevCheckpointHash: prevManifest ? this.checkpointId(prevManifest) : null,
+      ordinal: d.ordinal,
+      sinceKeyframe: d.sinceKeyframe,
+      baseSize,
+      lastDelta,
+      trigger: d.trigger,
+    };
+    this.writeManifest(runId, manifest);
+    this.pruneKeyframes();
   }
   private loadBlob(runId: string, snap: string): void {
-    const stored = this.blobPath(runId);
-    if (!fs.existsSync(stored)) throw new Error(`no stored blob for ${runId}`);
-    fs.copyFileSync(stored, snap);
-    if (shaFile(snap) !== shaFile(stored)) throw new Error(`blob restore mismatch for ${runId}`);
+    const manifest = this.readManifest(runId);
+    if (!manifest) {
+      // Legacy checkpoint (no manifest): the single .snap file, as
+      // before — a blob written before the chain still resumes.
+      const stored = this.blobPath(runId);
+      if (!fs.existsSync(stored)) throw new Error(`no stored blob for ${runId}`);
+      fs.copyFileSync(stored, snap);
+      if (shaFile(snap) !== shaFile(stored)) throw new Error(`blob restore mismatch for ${runId}`);
+      return;
+    }
+    // Chain checkpoint: the live slice snap gets the checkpoint
+    // bytes — the delta for a delta checkpoint, the keyframe copy
+    // (.snap) for a base/keyframe checkpoint. The C host reads the
+    // base from the keyframe file (DURABLETS_BASE_PATH, set per
+    // slice by chainEnvFor). No hash is checked here: the engine
+    // rejects a truncated or mismatched pair loudly on read, and
+    // that rejection IS the load-time verification — a host-side
+    // check would change the crash-recovery error path BRA-76/83
+    // pin (a truncated .snap must surface as "C host crashed
+    // resuming", naming the blob path). What IS checked here is
+    // presence: a checkpoint naming a file that is not on disk
+    // throws a named error, never a bare-base resume — resuming
+    // the base alone would silently rewind the run.
+    const src = manifest.kind === "delta" ? this.deltaPath(runId) : this.blobPath(runId);
+    if (!fs.existsSync(src)) {
+      throw new Error(
+        `BRA-90: missing ${manifest.kind === "delta" ? "delta" : "keyframe"} file for ${runId} (${src}) — the checkpoint names it but it is not on disk; refusing to resume from the bare base (that would silently rewind the run)`,
+      );
+    }
+    if (manifest.kind === "delta") {
+      const kf = this.keyframePath(manifest.keyframeHash);
+      if (!fs.existsSync(kf)) {
+        throw new Error(
+          `BRA-90: missing keyframe file for ${runId} (${kf}) — the delta checkpoint names it but it is not on disk; refusing to resume from the bare base (that would silently rewind the run)`,
+        );
+      }
+    }
+    fs.copyFileSync(src, snap);
+    if (shaFile(snap) !== shaFile(src)) throw new Error(`blob restore mismatch for ${runId}`);
   }
   blobStored(runId: string): boolean {
-    return fs.existsSync(this.blobPath(runId));
+    // A chain checkpoint is a manifest (+ delta/keyframe files); a
+    // legacy checkpoint is the single .snap file.
+    return fs.existsSync(this.checkpointPath(runId)) || fs.existsSync(this.blobPath(runId));
   }
   storedBlobHash(runId: string): string | null {
-    const p = this.blobPath(runId);
+    // The hash of the checkpoint bytes loadBlob would copy to the
+    // live snap: the delta for a delta checkpoint, the keyframe
+    // copy (.snap) for a base/keyframe checkpoint, the .snap for a
+    // legacy checkpoint. (At the first suspension the checkpoint is
+    // always a base, so the round-trip test's hash still compares
+    // against the .snap bytes.)
+    const manifest = this.readManifest(runId);
+    const p = manifest
+      ? manifest.kind === "delta"
+        ? this.deltaPath(runId)
+        : this.blobPath(runId)
+      : this.blobPath(runId);
     return fs.existsSync(p) ? shaFile(p) : null;
   }
   /** Test hook: delete the live blob file. The run must still resume
@@ -2739,6 +3394,10 @@ export class Host {
           if (meta.worker !== undefined) ev.worker = meta.worker;
           ev.wallMs = meta.wallMs;
           if (meta.tokens !== undefined) ev.tokens = meta.tokens;
+          // BRA-119: the trap-result event carries the auto marking
+          // too, so a journal reader sees the gate was auto-answered
+          // from the result event alone.
+          if (meta.auto === true) ev.auto = true;
         }
       }
       // BRA-73: promote the wrapper-captured call site to the trap
@@ -2782,6 +3441,13 @@ export class Host {
         if (ev.lifecycle === "completed" || ev.lifecycle === "failed") {
           this.registry.delete(runId);
           this.saveRunEntry(runId);
+          // BRA-99: the run's final record must be durable, not just
+          // written — fsync the journal so a host loss after this
+          // point cannot lose the terminal lifecycle event (a run
+          // whose completion is only in the page cache looks
+          // unfinished to the next process). The lifecycle event was
+          // journaled just above, so this fsync covers it.
+          this.fsyncJournal(runId);
         }
       }
     }
@@ -3095,16 +3761,34 @@ export class Host {
     // entry + finished map + journal.
     const finishedRc = this.finished.get(runId);
     if (finishedRc === 0) return this.readResultFile(runId, "done");
-    if (finishedRc !== undefined) return { runId, status: "failed", error: `run ${runId} exited ${finishedRc}` };
+    // BRA-131: prefer the journal's real error (childFailureMessage
+    // already does this for child runs) over the bare exit code.
+    if (finishedRc !== undefined)
+      return { runId, status: "failed", error: this.childFailureMessage(runId, `run ${runId} exited ${finishedRc}`) };
     const entry = this.registry.get(runId);
     if (entry) {
       if (entry.rc === 2 && this.isGateSuspended(runId)) return { runId, status: "held" };
+      // BRA-131: a registry entry with a terminal rc is a settled
+      // run, not a running one — cancelRun (and the crash path) leave
+      // the entry in place with rc 1, and a fresh process over the
+      // same stateDir loads it with an empty finished map. Derive
+      // from the entry's rc, with the journal's error for a failure.
+      if (entry.rc === 0) return this.readResultFile(runId, "done");
+      if (entry.rc === 1)
+        return { runId, status: "failed", error: this.childFailureMessage(runId, `run ${runId} exited 1`) };
       return { runId, status: "running" };
     }
     const events = this.journal(runId);
     if (!events.length) return { runId, status: "pending", error: `no run ${runId}` };
     const done = events.some((e) => e.event === "lifecycle" && e.lifecycle === "completed");
     if (done) return this.readResultFile(runId, "done");
+    // BRA-131: same journal fallback as childOutcome — a run that
+    // failed on its first slice has no registry entry (the slice
+    // path deletes it) and an empty finished map in a fresh process,
+    // but its journal carries the lifecycle "failed" event.
+    const failed = [...events].reverse().find((e) => e.event === "lifecycle" && e.lifecycle === "failed");
+    if (failed)
+      return { runId, status: "failed", error: this.childFailureMessage(runId, `run ${runId} failed`) };
     return { runId, status: "running" };
   }
 
@@ -3266,6 +3950,113 @@ export class Host {
     return p;
   }
 
+  /** Cache key for a built driver bundle (BRA-94). A bundle is a
+   * deterministic function of the frozen workflow closure + the
+   * input baked into the driver + the engine + the bundler + the
+   * driver template (BRA-93 item 9), so the key is the sha256 of
+   * exactly those parts:
+   *   - frozenHash: from the driver's import specifier — the driver
+   *     imports the frozen entry path (stateDir/frozen/<hash>/...),
+   *     so the hash IS the closure content (BRA-71 content
+   *     addressing). A changed workflow gets a different hash and
+   *     misses; a stale bundle after a workflow change is
+   *     impossible.
+   *   - input: the JSON text of the entry(...) call in the driver.
+   *     The driver bakes the validated input in, so the same
+   *     closure with a different input is a different bundle and
+   *     must miss — a frozenHash-only key would silently run the
+   *     first input. A 0-arg entry bakes entry() — the input part
+   *     is empty. The entry call is a single line (JSON.stringify
+   *     escapes newlines), so a line-anchored greedy match takes
+   *     the whole JSON text even when it contains ");" in a string.
+   *   - engineVersion (dquickts pin + durablets.c hash), Bun.version
+   *     (the bundler), DRIVER_TEMPLATE_VERSION.
+   * Returns null for a driver that is not a host-generated frozen
+   * driver (a live-path driver, or a hand-written one): those are
+   * never cached — a live path names no content, so caching it
+   * could serve a bundle built from a file edited since. The safe
+   * fallback is to build every time, as before. */
+  private bundleCacheKey(driverPath: string): string | null {
+    let text: string;
+    try {
+      text = fs.readFileSync(driverPath, "utf8");
+    } catch {
+      return null;
+    }
+    const importM = text.match(/^import entry from "([^"]+)";$/m);
+    const hashM = importM?.[1].match(/\/frozen\/([0-9a-f]{64})\//);
+    if (!hashM) return null;
+    const entryM = text.match(/^entry\((.*)\);$/m);
+    if (!entryM) return null;
+    const h = crypto.createHash("sha256");
+    h.update("bra94-v1\0");
+    h.update(hashM[1]);
+    h.update("\0");
+    h.update(entryM[1]);
+    h.update("\0");
+    h.update(this.engineVersion());
+    h.update("\0");
+    h.update(Bun.version);
+    h.update("\0");
+    h.update(String(DRIVER_TEMPLATE_VERSION));
+    return h.digest("hex");
+  }
+
+  /** Disk cache for built driver bundles (BRA-94):
+   * stateDir/bundles/<key>/ holds bundle.js + bundle.js.map.
+   * Content-addressed (the key is the bundle's inputs), so there
+   * is no invalidation: a changed input or closure changes the key
+   * and misses. Entries are never deleted by the cache itself —
+   * one small bundle per distinct (closure, input) — and a crash
+   * mid-publish cannot leave a partial entry (publish is an atomic
+   * directory rename). The cache is on disk, not in memory, on
+   * purpose: CLI invocations are separate processes (submit, then
+   * queue run), so an in-memory cache would never hit across the
+   * production path. */
+  private bundleCacheDir(key: string): string {
+    return path.join(this.stateDir, "bundles", key);
+  }
+
+  /** Look up a cached bundle: the bundle file must be present, else
+   * null (a missing entry is a miss, rebuilt, never served). The
+   * source map is optional in the record, like pinBundle — a build
+   * without one still pins the bundle — so lookup does not require
+   * it; when present it is published atomically with the bundle. */
+  private lookupBundleCache(key: string): string | null {
+    const bundlePath = path.join(this.bundleCacheDir(key), "bundle.js");
+    if (fs.existsSync(bundlePath)) return bundlePath;
+    return null;
+  }
+
+  /** Publish a freshly built bundle + its source map into the cache
+   * (BRA-94): copy both into a unique tmp dir and rename it into
+   * place, so a crash never leaves a partial entry. If another
+   * process published the same key first, discard the tmp copy and
+   * use the winner — the content is identical (same key means same
+   * inputs). A rename that loses the race the same way falls back
+   * to the winner too. Returns the cached bundle path. */
+  private publishBundleCache(key: string, bundlePath: string): string {
+    const dest = this.bundleCacheDir(key);
+    const hit = this.lookupBundleCache(key);
+    if (hit) return hit;
+    const tmp = path.join(this.stateDir, "bundles", `.tmp-${key.slice(0, 12)}-${process.pid}`);
+    fs.mkdirSync(tmp, { recursive: true });
+    fs.copyFileSync(bundlePath, path.join(tmp, "bundle.js"));
+    const mapSrc = `${bundlePath}.map`;
+    if (fs.existsSync(mapSrc)) fs.copyFileSync(mapSrc, path.join(tmp, "bundle.js.map"));
+    try {
+      fs.renameSync(tmp, dest);
+    } catch {
+      // Lost a publish race: another process renamed first. Use the
+      // winner when it is complete; otherwise the failure is real.
+      fs.rmSync(tmp, { recursive: true, force: true });
+      const winner = this.lookupBundleCache(key);
+      if (winner) return winner;
+      throw new Error(`failed to publish bundle cache entry ${key}`);
+    }
+    return path.join(dest, "bundle.js");
+  }
+
   /** Bundle a driver + the workflow + the agentts module into one
    * self-contained script with Bun.build; the C host never resolves
    * imports. Refuses loudly when the bundle still contains export
@@ -3273,6 +4064,16 @@ export class Host {
    * eval as a module (which cannot suspend) is a broken run, not a
    * run to ship. */
   async bundle(entryPath: string, outName: string): Promise<string> {
+    // BRA-94: a bundle is a deterministic function of its inputs,
+    // so a second run of the same frozen workflow + input reuses
+    // the cached build instead of paying Bun.build again. The
+    // cache returns the cached bundle path; a driver with no key
+    // (live path or hand-written) builds every time, as before.
+    const key = this.bundleCacheKey(entryPath);
+    if (key) {
+      const hit = this.lookupBundleCache(key);
+      if (hit) return hit;
+    }
     const outPath = path.join(this.workdir, outName);
     const result = await Bun.build({
       entrypoints: [entryPath],
@@ -3296,6 +4097,11 @@ export class Host {
         `bundle ${outPath} still contains export/import syntax after Bun.build — refusing to run a bundle the C host would eval as a module`,
       );
     }
+    // BRA-94: publish the fresh build into the cache for the next
+    // run with the same key. The workdir copy stays this run's
+    // execution artifact (unchanged behavior); the cached copy is
+    // what later runs reuse.
+    if (key) this.publishBundleCache(key, outPath);
     return outPath;
   }
 
@@ -3306,7 +4112,15 @@ export class Host {
     // A re-run starts a fresh journal (the old file is the previous
     // run's record, not this one's).
     if (fs.existsSync(this.journalPath(runId))) fs.rmSync(this.journalPath(runId));
+    // BRA-90: a re-run with the same runId starts a fresh chain —
+    // drop any checkpoint the previous run left behind.
+    this.discardCheckpoint(runId);
     const env = { AGENTTS_RUN_ID: runId };
+    // BRA-90: the first slice writes a base (no manifest yet, so
+    // chainEnvFor returns base with no base path). The chain env is
+    // merged into the slice env only — entry.env stays the plain
+    // run id, and every later slice recomputes its env fresh.
+    const sliceEnv = { ...env, ...this.chainEnvFor(runId) };
     // G1 (BRA-74): a first slice has no blob yet (storeBlob only runs on suspension), so a
     // C-host crash here is retried as a fresh run — no trap was dispatched, the journal was just
     // wiped, and the re-run is idempotent. Bounded: 3 attempts, then the crash fails loudly.
@@ -3318,7 +4132,7 @@ export class Host {
         ["run", entryPath, path.join(this.workdir, p + ".snap")],
         path.join(this.workdir, p + ".out"),
         path.join(this.workdir, p + ".log"),
-        env,
+        sliceEnv,
       );
       if (rc === 0 || rc === 2 || rc === 3) break;
       const outcome = this.classifySliceCrash(runId);
@@ -3375,6 +4189,8 @@ export class Host {
     else {
       this.registry.delete(runId);
       this.finished.set(runId, rc);
+      // BRA-90: terminal on the first slice — no checkpoint to keep.
+      this.discardCheckpoint(runId);
     }
     this.saveRunEntry(runId);
     return rc;
@@ -3541,6 +4357,12 @@ export class Host {
       }
       case "clock":
         return { value: { now: this.nowISO(runId), nowMs: this.clockMsFor(runId) } };
+      case "run": {
+        // BRA-105: a child run, host-owned like sleep/cron — the
+        // adapter never sees a run trap. The child's result is the
+        // trap result; a held child (gate) holds the parent.
+        return this.resolveRunTrap(runId, trapId, arg);
+      }
       case "gate": {
         // A delivered answer (host queue) wins over the adapter: the
         // direct adapter holds every gate, so without this the run
@@ -3552,6 +4374,286 @@ export class Host {
       default:
         return this.adapter.answer(type, arg, { runId, trapId, ordinal });
     }
+  }
+
+  // ------------------------------------------------- run/call (BRA-105)
+  //
+  // Form B sub-workflows (BRA-52 Q2): a parent workflow calls a
+  // sub-workflow by file path, and the sub-workflow's result IS the
+  // trap result. The five mechanics, as implemented:
+  //
+  // (1) Trap mechanics — a NEW trap type, "run". The parent suspends
+  //     on it (ordinary rc-2 trap suspension) and rides the existing
+  //     trap machinery end to end: extractor site (key
+  //     `run:<workflow-literal>`), dispatch validation against the
+  //     extracted Output schema, deliverResult/deliverThrow resume.
+  //     No C core change: trap() is generic over the type string.
+  //     The host owns the trap (this case), like sleep/cron — the
+  //     adapter never sees it.
+  // (2) Where the child executes — same process, same host instance,
+  //     driven inline inside the parent's dispatch (the fork-branch
+  //     pattern: runOneBranch drives a branch to completion the same
+  //     way). Own runId `<trapId>/child`, deterministic from the trap
+  //     execution, so a re-dispatch reuses it and never double-
+  //     executes the child — the G3 analogue for run traps. Own
+  //     journal, own frozen closure, own checkpoint chain: the child
+  //     does NOT extend the parent's BRA-90 chain (different
+  //     workflow, different heap — a branch shares the parent's
+  //     keyframe, a child run starts its own). Parentage is recorded
+  //     twice: the parent journal's "run-child" event (durable) and
+  //     the child registry entry's parentRunId/parentTrapId (live).
+  //     Cancellation propagates down via cancelTree, which walks the
+  //     parent's run-child events deepest-first (BRA-40).
+  // (3) Freeze — the child's closure is pinned like any run (own
+  //     freezeWorkflow at child start), AND the child file is part
+  //     of the parent's frozen closure (collectClosureFiles), so the
+  //     child source is pinned at parent submit: an edit after
+  //     submit cannot change what executes. The child path resolves
+  //     against the parent's FROZEN entry directory at dispatch.
+  //     The extractor fails loudly at first run when the literal
+  //     names a missing file.
+  // (4) Return-value channel — the child's result (validated against
+  //     the child's entry Output schema by result()) becomes the trap
+  //     result, then validated again against the parent's run-site
+  //     Output schema by dispatchTrap: two validations, both loud.
+  //     (No dispatch-time schema comparison between the two: there
+  //     is no deep-equal helper in the tree, and the two validations
+  //     already fail loudly on mismatch — after the child ran, which
+  //     wastes work but is loud and correct.) A child failure throws
+  //     at the call site with the child's error name and message
+  //     preserved (catchable by the parent, BRA-40); a child
+  //     cancelled with the parent throws CancellationError. A child
+  //     held at a gate holds the parent at the run trap (HOLD); a
+  //     later drive re-dispatches (same child runId) and resumes the
+  //     child from its blob. A host-level failure driving the child
+  //     (DriveCapError, missing schema) propagates as a host error
+  //     and fails the parent loudly — it is not catchable, same as
+  //     the parent's own drive cap.
+  // (5) Signature — run<Input, Output>({ workflow, input }): the
+  //     workflow path MUST be a string literal (same rule as job's
+  //     spec literal); relative paths resolve against the parent
+  //     workflow's directory, absolute paths as-is.
+  //
+  // Why inline instead of a queued child run: the child rides the
+  // parent's drive (submit → runQueue → result works end to end
+  // with no new queue plumbing), and re-dispatch/resume fall out of
+  // the existing G3 + blob machinery. A queued child would need
+  // parent linkage on queue entries, a delivery step, and
+  // cross-process registry handling for no benefit at this scale.
+
+  /**
+   * Resolve a "run" trap: run the child workflow to a settled
+   * outcome and return its result as the trap answer. Returns HOLD
+   * when the child is still suspended (held at a gate) — the parent
+   * stays suspended at the run trap and a later drive re-dispatches.
+   */
+  private resolveRunTrap(
+    parentRunId: string,
+    trapId: string,
+    arg: any,
+  ): TrapAnswer | typeof HOLD {
+    const workflow = arg?.workflow;
+    if (typeof workflow !== "string" || !workflow) {
+      throw new Error(
+        `run trap ${trapId}: arg.workflow must be a non-empty string (got ${JSON.stringify(workflow)}) — write run<...>({ workflow: "./child.ts", input: ... })`,
+      );
+    }
+    const parentFrozen = this.frozenFor(parentRunId);
+    if (!parentFrozen) {
+      throw new Error(
+        `run trap ${trapId}: no frozen copy for parent run ${parentRunId} — a run/call parent must be submitted (frozen) before it can start a child`,
+      );
+    }
+    const childAbs = path.resolve(path.dirname(parentFrozen.entryPath), workflow);
+    if (!fs.existsSync(childAbs)) {
+      throw new Error(
+        `run trap ${trapId}: child workflow ${JSON.stringify(workflow)} not found in the parent's frozen closure (resolved ${childAbs}) — the child file must exist when the parent run is submitted; it is pinned with the parent's frozen closure (BRA-71)`,
+      );
+    }
+    const childRunId = `${trapId}/child`;
+    // Re-freeze is content-addressed and idempotent: a re-dispatch
+    // in a fresh process restores the child's frozen closure and
+    // extraction (frozenCopies), so the child can be resumed from
+    // its blob without ever re-running from scratch.
+    const frozen = this.freezeWorkflow(childAbs);
+    this.frozenCopies.set(childRunId, frozen);
+    const outcome = this.childOutcome(childRunId);
+    if (outcome) {
+      if (outcome.state === "done") return { value: outcome.output };
+      return { throw: this.childThrow(childRunId, workflow, outcome.error) };
+    }
+    const started =
+      this.registry.get(childRunId) !== undefined ||
+      this.finished.get(childRunId) !== undefined ||
+      this.journal(childRunId).length > 0;
+    if (!started) {
+      this.journalEvent(parentRunId, {
+        event: "run-child",
+        runId: parentRunId,
+        trapId,
+        childRunId,
+        workflow,
+        childPath: childAbs,
+      });
+      this.startChildRun(childAbs, childRunId, parentRunId, trapId, arg.input);
+    }
+    const rc = this.driveToCompletion(childRunId);
+    const after = this.childOutcome(childRunId);
+    if (after) {
+      if (after.state === "done") return { value: after.output };
+      return { throw: this.childThrow(childRunId, workflow, after.error) };
+    }
+    // Still suspended — the child is held (a gate). Hold the parent
+    // at the run trap; a later drive re-dispatches (same child
+    // runId) and resumes the child from its blob.
+    if (rc !== 2 && rc !== 3) {
+      throw new Error(
+        `run trap ${trapId}: child run ${childRunId} stopped with rc ${rc} but has no recorded outcome — see the child journal`,
+      );
+    }
+    return HOLD;
+  }
+
+  /**
+   * Start a child run: freeze + prepare + validate the input +
+   * bundle + start the first slice. The sync twin of startRun
+   * (which is async only because Bun.build has no sync form — see
+   * bundleSync): dispatch is synchronous, so the child bundle is
+   * built by shelling out to the same Bun binary with the same
+   * flags. The child has no queue entry — it is driven inline by
+   * the parent's dispatch, like a fork branch. The caller drives it
+   * to completion (driveToCompletion).
+   */
+  private startChildRun(
+    childAbs: string,
+    childRunId: string,
+    parentRunId: string,
+    trapId: string,
+    input: unknown,
+  ): void {
+    const frozen = this.freezeWorkflow(childAbs);
+    this.frozenCopies.set(childRunId, frozen);
+    this.prepareRun(frozen.entryPath, childRunId);
+    const trapPin = this.computeTrapPin(childRunId, this.adapter);
+    this.trapPins.set(childRunId, trapPin);
+    this.validateAndStoreInput(childRunId, input);
+    const driverPath = this.driverFor(childRunId);
+    const bundlePath = this.bundleSync(driverPath, `bundle-${prefixFor(childRunId)}.js`);
+    this.pinBundle(childRunId, bundlePath);
+    this.startRunFrom(bundlePath, childRunId);
+    const entry = this.registry.get(childRunId);
+    if (entry) {
+      entry.parentRunId = parentRunId;
+      entry.parentTrapId = trapId;
+      this.saveRunEntry(childRunId);
+    }
+  }
+
+  /**
+   * Synchronous bundle build for child runs (dispatch is
+   * synchronous and Bun.build has no sync form — Bun.buildSync does
+   * not exist). Shells out to the same Bun binary that runs this
+   * host, with the same semantics as bundle() (entrypoints, outdir,
+   * target bun, naming, sourcemap external), and applies the same
+   * output checks. CLI notes: the flag is --entry-naming (the API's
+   * `naming` has no CLI twin — --naming is silently ignored and
+   * its value parsed as an entry point), and the value flags take
+   * `--flag=value` form. One fresh Bun process per child-run start
+   * — the cost is paid once per run call, not per trap.
+   */
+  private bundleSync(entryPath: string, outName: string): string {
+    // BRA-94: same cache as bundle() — a child run of the same
+    // frozen workflow + input reuses the cached build instead of
+    // spawning a fresh Bun process per child-run start. A driver
+    // with no key (live path or hand-written) builds every time.
+    const key = this.bundleCacheKey(entryPath);
+    if (key) {
+      const hit = this.lookupBundleCache(key);
+      if (hit) return hit;
+    }
+    const outPath = path.join(this.workdir, outName);
+    const r = spawnSync(
+      process.execPath,
+      ["build", entryPath, `--outdir=${this.workdir}`, "--target=bun", `--entry-naming=${outName}`, "--sourcemap=external"],
+      { encoding: "utf8" },
+    );
+    if (r.status !== 0) {
+      throw new Error(`bun build failed for child-run bundle ${outName}: ${(r.stderr ?? "").trim() || "(no stderr)"}`);
+    }
+    if (!fs.existsSync(outPath)) throw new Error("no bundle output");
+    const text = fs.readFileSync(outPath, "utf8");
+    if (/^\s*export\s/m.test(text) || /^\s*import\s/m.test(text)) {
+      throw new Error(
+        `bundle ${outPath} still contains export/import syntax after Bun.build — refusing to run a bundle the C host would eval as a module`,
+      );
+    }
+    // BRA-94: publish the fresh build into the cache (see bundle()).
+    if (key) this.publishBundleCache(key, outPath);
+    return outPath;
+  }
+
+  /** A child run's settled outcome, from the durable record (the
+   * finished map in-process, else the journal): done with its
+   * validated output, failed with its error string, or null when
+   * the child has not settled. The journal path is what makes a
+   * re-dispatch in a FRESH process see a child that settled in a
+   * previous one (the finished map is in-memory only, and a
+   * completed child's run entry file may be gone). */
+  private childOutcome(
+    childRunId: string,
+  ): { state: "done"; output: unknown } | { state: "failed"; error: string } | null {
+    const fin = this.finished.get(childRunId);
+    if (fin === 0) {
+      const r = this.result(childRunId);
+      if (r.status === "done" && !r.error) return { state: "done", output: r.output };
+      return { state: "failed", error: r.error ?? `child run ${childRunId} completed but its result could not be read` };
+    }
+    if (fin !== undefined) {
+      return { state: "failed", error: this.childFailureMessage(childRunId, `run ${childRunId} exited ${fin}`) };
+    }
+    const events = this.journal(childRunId);
+    if (!events.length) return null;
+    const failed = [...events].reverse().find((e) => e.event === "lifecycle" && e.lifecycle === "failed");
+    if (failed) {
+      const err = (failed as any).error;
+      return { state: "failed", error: typeof err === "string" && err ? err : `run ${childRunId} failed` };
+    }
+    if (events.some((e) => e.event === "lifecycle" && e.lifecycle === "completed")) {
+      const r = this.result(childRunId);
+      if (r.status === "done" && !r.error) return { state: "done", output: r.output };
+      return { state: "failed", error: r.error ?? `child run ${childRunId} completed but its result could not be read` };
+    }
+    return null;
+  }
+
+  /** The child's failure message: the "Name: message" string the C
+   * host wrote on the child's failed lifecycle event, else the
+   * fallback. */
+  private childFailureMessage(childRunId: string, fallback: string): string {
+    const events = this.journal(childRunId);
+    for (let i = events.length - 1; i >= 0; i--) {
+      const e = events[i];
+      if (e.event === "lifecycle" && e.lifecycle === "failed" && typeof (e as any).error === "string" && (e as any).error) {
+        return (e as any).error;
+      }
+    }
+    return fallback;
+  }
+
+  /**
+   * The throw payload for a failed child: the child's error name
+   * and message PRESERVED (BRA-40: child errors surface at the call
+   * site, catchable by the parent — a child that threw
+   * CancellationError surfaces as CancellationError, not as a
+   * wrapped ChildRunFailed). The message carries the child runId
+   * and workflow path for context; a child error with no "Name:
+   * message" shape becomes ChildRunFailed.
+   */
+  private childThrow(childRunId: string, workflow: string, error: string): { name: string; message: string } {
+    const m = error.match(/^([A-Za-z_$][A-Za-z0-9_$]*): ([\s\S]*)$/);
+    const name = m ? m[1] : "ChildRunFailed";
+    const message = m ? m[2] : error;
+    return { name, message: `child run ${childRunId} (${workflow}) failed: ${message}` };
   }
 
   private validationErrorRecord(
@@ -3652,27 +4754,39 @@ export class Host {
     // submit — before the adapter (or any worker process) sees
     // the trap. job/decide/exec only: sleep/cron/clock are
     // host-owned and a gate answer comes from a human.
-    if (type === "job" || type === "decide" || type === "exec") {
+    if (type === "job" || type === "decide" || type === "exec" || type === "run") {
       this.assertTrapPin(runId, trapId);
     }
 
     let answer = this.resolveAnswer(type, arg, runId, trapId, ordinal);
     if (answer === HOLD) {
-      this.pendingGate.add(runId);
-      this.journalEvent(runId, {
-        event: "gate-held",
-        runId,
-        trapId,
-        question: arg?.question ?? null,
-      });
+      if (type === "gate") {
+        this.pendingGate.add(runId);
+        this.journalEvent(runId, {
+          event: "gate-held",
+          runId,
+          trapId,
+          question: arg?.question ?? null,
+        });
+      }
+      // A non-gate HOLD is a run trap whose child is held (BRA-105):
+      // the parent suspends WITHOUT a pending gate of its own — the
+      // child's gate is the pending one, and runQueue sees it via
+      // hasHeldChildRun. Recording a gate-held event here (or
+      // pendingGate for the parent) would claim a gate that does not
+      // exist and let deliverGate "answer" the parent's runId while
+      // the child stays held.
       return HOLD;
     }
     // BRA-73 (item 4): the adapter's dispatch provenance — see the
     // method comment. Captured once, carried through every return
-    // below that rebuilds the answer.
-    const provenance: { worker?: string; tokens?: number } = {
+    // below that rebuilds the answer. BRA-119: `auto` rides the
+    // same path — a repaired auto-answer is still an auto-answer,
+    // and the journal must not lose the marking to a repair.
+    const provenance: { worker?: string; tokens?: number; auto?: boolean } = {
       ...(typeof (answer as any).worker === "string" ? { worker: (answer as any).worker as string } : {}),
       ...(typeof (answer as any).tokens === "number" ? { tokens: (answer as any).tokens as number } : {}),
+      ...(answer as any).auto === true ? { auto: true as const } : {},
     };
     if ("throw" in answer) {
       // A throw payload crosses the same resume path as a value: it
@@ -3815,15 +4929,33 @@ export class Host {
       const e = events[i];
       if (e.trapId !== trapId) continue;
       if (e.event === "trap-result" && e.result !== undefined) {
+        // BRA-86: the event carries the dispatch worker (attached at
+        // ingest, BRA-57); the rebuilt answer must carry it too, or
+        // the recovery path loses profiler attribution for the trap.
+        // BRA-114: same for tokens (attached at ingest from
+        // pendingTrapMeta, host.ts:2741) — the caller reads
+        // recorded.answer.tokens into pendingTrapMeta.
+        // BRA-119: same for auto (attached at ingest from
+        // pendingTrapMeta) — a re-dispatched auto-answer stays
+        // marked, or the journal would lose the marking to a crash.
         return {
-          answer: { value: e.result },
+          answer: {
+            value: e.result,
+            ...(typeof e.worker === "string" ? { worker: e.worker } : {}),
+            ...(typeof e.tokens === "number" ? { tokens: e.tokens } : {}),
+            ...(e.auto === true ? { auto: true as const } : {}),
+          },
           ...(typeof e.adapter === "string" ? { adapter: e.adapter } : {}),
           ...(typeof e.wallMs === "number" ? { wallMs: e.wallMs } : {}),
         };
       }
       if (e.event === "trap-error" && e.error !== undefined) {
         return {
-          answer: { throw: e.error },
+          answer: {
+            throw: e.error,
+            ...(typeof e.worker === "string" ? { worker: e.worker } : {}),
+            ...(typeof e.tokens === "number" ? { tokens: e.tokens } : {}),
+          },
           ...(typeof e.adapter === "string" ? { adapter: e.adapter } : {}),
           ...(typeof e.wallMs === "number" ? { wallMs: e.wallMs } : {}),
         };
@@ -3988,7 +5120,12 @@ export class Host {
   private deliverResult(runId: string, result: any): number {
     const entry = this.registry.get(runId)!;
     this.loadBlob(runId, entry.snap);
-    const rc = this.runHost(["resume", entry.snap, JSON.stringify(result)], entry.out, entry.log, entry.env);
+    const rc = this.runHost(
+      ["resume", entry.snap, JSON.stringify(result)],
+      entry.out,
+      entry.log,
+      { ...entry.env, ...this.chainEnvFor(runId) },
+    );
     if (rc === 0 || rc === 2 || rc === 3) {
       entry.rc = rc;
       this.refresh(entry);
@@ -4008,7 +5145,7 @@ export class Host {
       ["resume", entry.snap, "throw:" + JSON.stringify(err)],
       entry.out,
       entry.log,
-      entry.env,
+      { ...entry.env, ...this.chainEnvFor(runId) },
     );
     if (rc === 0 || rc === 2 || rc === 3) {
       entry.rc = rc;
@@ -4044,10 +5181,21 @@ export class Host {
     const csnap = path.join(this.workdir, cprefix + ".snap");
     this.clean(cprefix);
     this.journals.delete(child);
+    // BRA-90: a re-run reuses the child runId — drop any checkpoint
+    // the previous run's branch left behind, and read the parent's
+    // manifest (the fork-point checkpoint this branch extends).
+    this.discardCheckpoint(child);
+    const parentManifest = this.readManifest(parentRunId);
     fs.copyFileSync(snap, csnap);
     fs.writeFileSync(path.join(this.workdir, cprefix + ".out"), "");
     fs.writeFileSync(path.join(this.workdir, cprefix + ".log"), "");
     const cenv = { ...env, AGENTTS_RUN_ID: child, AGENTTS_PARENT_FORK: forkId };
+    // BRA-90: the branch slice resumes the PARENT's checkpoint
+    // (csnap is a copy of the parent's live snap), so it carries
+    // the chain env for the parent's manifest — the base path when
+    // the fork-point checkpoint is a delta. The chain env is merged
+    // into the slice env only; cenv stays the plain child env.
+    const branchSliceEnv = { ...cenv, ...this.chainEnvFor(parentRunId) };
     // G1 (BRA-74): same as startRunFrom — a branch's first slice has no blob yet, so a C-host
     // crash here is retried as a fresh branch start (no trap dispatched yet). Bounded: 3 attempts.
     let rc = -1;
@@ -4056,7 +5204,7 @@ export class Host {
         ["branch", csnap, String(index)],
         path.join(this.workdir, cprefix + ".out"),
         path.join(this.workdir, cprefix + ".log"),
-        cenv,
+        branchSliceEnv,
       );
       if (rc === 0 || rc === 2 || rc === 3) break;
       const outcome = this.classifySliceCrash(child);
@@ -4102,10 +5250,14 @@ export class Host {
     this.refresh(entry);
     const parentExtraction = this.extractions.get(parentRunId);
     if (parentExtraction) this.extractions.set(child, parentExtraction);
-    if (rc === 2 || rc === 3) this.storeBlob(child, csnap);
+    // BRA-90: the child's first checkpoint extends the parent's
+    // chain at the fork point (prev = parent's manifest) — the
+    // branch shares the parent's keyframe, never copies it.
+    if (rc === 2 || rc === 3) this.storeBlob(child, csnap, parentManifest);
     else {
       this.registry.delete(child);
       this.finished.set(child, rc);
+      this.discardCheckpoint(child);
     }
     this.saveRunEntry(child);
     return rc;
@@ -4331,7 +5483,13 @@ export class Host {
    */
   driveStep(runId: string, opts: { allowUnresolved?: boolean } = {}): number {
     const rc = this.driveStepOnce(runId, opts);
-    if (rc === 0 || rc === 1) this.finished.set(runId, rc);
+    if (rc === 0 || rc === 1) {
+      this.finished.set(runId, rc);
+      // BRA-90: terminal completion — the checkpoint will never be
+      // resumed, so drop it (unpins the keyframe). A run that fails
+      // with a throw keeps its checkpoint (see discardCheckpoint).
+      this.discardCheckpoint(runId);
+    }
     return rc;
   }
 
@@ -4364,6 +5522,10 @@ export class Host {
           ...(typeof (recorded.answer as any).tokens === "number"
             ? { tokens: (recorded.answer as any).tokens as number }
             : {}),
+          // BRA-119: the recorded answer carries auto (from the
+          // trap-dispatched result or a rebuilt trap-result) — keep
+          // it, so the trap-result event on resume stays marked.
+          ...((recorded.answer as any).auto === true ? { auto: true as const } : {}),
         });
         if ("throw" in recorded.answer) rc = this.deliverThrow(runId, recorded.answer.throw);
         else rc = this.deliverResult(runId, recorded.answer.value);
@@ -4426,6 +5588,20 @@ export class Host {
       // trap-result on a successful resume — the duplication is the
       // price of having the result before the resume, and the
       // journal already carries full results.)
+      // BRA-119: an auto-answered gate is marked AND logged loudly.
+      // A gate the mock adapter answered "yes" by itself had no
+      // human behind it — the journal event carries `auto: true`
+      // (and the answer carries it in `result`, via the TrapAnswer
+      // provenance), and the log line names the run and the trap so
+      // an operator reading the run output can see the checkpoint
+      // did not hold. A delivered (human) answer never carries it.
+      const autoAnswered = trapEv.type === "gate" && (ans as any).auto === true;
+      if (autoAnswered) {
+        console.error(
+          `GATE AUTO-ANSWERED: run ${runId} trap ${trapEv.trapId} answered "yes" with no human input ` +
+            `(--gates auto is the default; pass --gates hold on BOTH run/submit and queue run for a real human checkpoint)`,
+        );
+      }
       this.journalEvent(runId, {
         event: "trap-dispatched",
         runId,
@@ -4435,6 +5611,7 @@ export class Host {
         result: ans,
         adapter: fromHostGateQueue ? "host" : this.adapter.name,
         wallMs,
+        ...(autoAnswered ? { auto: true as const } : {}),
       });
       // TEST HOOK (BRA-75): crash after dispatch, before resume —
       // simulates a host SIGKILL in the G3 window (dispatch done,
@@ -4451,6 +5628,11 @@ export class Host {
         ...(typeof (ans as any).worker === "string" ? { worker: (ans as any).worker as string } : {}),
         wallMs,
         ...(typeof (ans as any).tokens === "number" ? { tokens: (ans as any).tokens as number } : {}),
+        // BRA-119: carry the auto marking to the trap-result event
+        // (attached at ingest, like worker/tokens) so the journal
+        // reader sees the answer was auto without digging into
+        // trap-dispatched.
+        ...(autoAnswered ? { auto: true as const } : {}),
       });
       if ("throw" in ans) rc = this.deliverThrow(runId, ans.throw);
       else rc = this.deliverResult(runId, ans.value);
@@ -4463,7 +5645,10 @@ export class Host {
         if (opts.allowUnresolved) return 3;
         throw new Error(`fork ${fork.forkId} has no children and the drive is not bounded`);
       }
-      const env = { AGENTTS_RUN_ID: runId };
+      // BRA-90: the join slice resumes the parent's checkpoint
+      // (loadBlob inside runJoinSlice), so it carries the chain env
+      // for the parent's manifest.
+      const env = { AGENTTS_RUN_ID: runId, ...this.chainEnvFor(runId) };
       if (fork.kind === "all") rc = this.doAllJoin(entry.snap, entry.out, entry.log, env, fork);
       else if (fork.kind === "any") rc = this.doAnyJoin(entry.snap, entry.out, entry.log, env, fork);
       else if (fork.kind === "race") rc = this.doRaceJoin(entry.snap, entry.out, entry.log, env, fork);
@@ -4522,8 +5707,11 @@ export class Host {
       rc = this.driveStep(runId, opts);
       // A held gate stops the drive here (rc stays 2): the run is
       // suspended until the test delivers an answer. Without this
-      // the loop would re-dispatch the same held gate forever.
-      if (this.pendingGate.has(runId)) return 2;
+      // the loop would re-dispatch the same held gate forever. The
+      // same holds for a run trap whose CHILD is held (BRA-105): the
+      // re-dispatch would drive the same held child forever, so the
+      // loop stops when the run is held directly or transitively.
+      if (this.pendingGate.has(runId) || this.hasHeldChildRun(runId)) return 2;
       if (opts.allowUnresolved && rc === 3) {
         const fork = this.lastFork(runId);
         if (fork && !fork.childRuns.length) return 3;
@@ -4574,6 +5762,33 @@ export class Host {
     return lastTrap !== null && lastTrap.type === "gate" && !resolvedAfter;
   }
 
+  /**
+   * BRA-105: does this run have a run/call descendant held at a
+   * gate? A child held at a gate holds its parent transitively —
+   * the parent's drive ends rc 2 (suspended at the run trap) with
+   * no gate pending under the PARENT's own runId, so runQueue
+   * would mark it "failed" ("run exited 2") and never re-drive it.
+   * Recursive: a grandchild's gate holds the child (no queue
+   * entry of its own) and the parent above it. The tree is finite
+   * and acyclic (child runIds derive from trapIds), so the
+   * recursion terminates.
+   */
+  private hasHeldChildRun(runId: string): boolean {
+    for (const e of this.journal(runId)) {
+      if (e.event === "run-child" && typeof e.childRunId === "string") {
+        const child = e.childRunId;
+        if (
+          this.pendingGate.has(child) ||
+          this.isGateSuspended(child) ||
+          this.hasHeldChildRun(child)
+        ) {
+          return true;
+        }
+      }
+    }
+    return false;
+  }
+
   /** Deliver a held gate's answer, then re-queue the run so `queue
    * run` drives it. Does NOT drive — the run path is submit →
    * runQueue → result, and deliver-gate is not a second drive mode.
@@ -4594,6 +5809,24 @@ export class Host {
       if (entry && entry.status === "held") {
         entry.status = "queued";
         this.writeQueue(q);
+      }
+      // BRA-105: a gate held by a run/call CHILD holds its parent
+      // transitively (runQueue marks the parent "held" via
+      // hasHeldChildRun). Waking the child alone would leave the
+      // parent held forever — re-queue the parent too, so the next
+      // queue drive resumes the child through the parent's
+      // re-dispatch. Walk up the parentage chain (a grandchild's
+      // gate holds the child, which has no queue entry, and the
+      // parent above it) until a held queue entry is found.
+      let up = this.registry.get(runId)?.parentRunId;
+      while (up) {
+        const parentEntry = q.find((e) => e.runId === up);
+        if (parentEntry && parentEntry.status === "held") {
+          parentEntry.status = "queued";
+          this.writeQueue(q);
+          break;
+        }
+        up = this.registry.get(up)?.parentRunId;
       }
     });
     // The run can be driven again — wake the tick agent so it
@@ -4627,10 +5860,24 @@ export class Host {
     const recordPath = path.join(this.workdir, p + ".cancel.json");
     fs.writeFileSync(recordPath, JSON.stringify(toJsonValue(record, "cancel record")));
     this.loadBlob(runId, entry.snap);
-    const rc = this.runHost(["cancel", entry.snap, recordPath], entry.out, entry.log, entry.env);
+    const rc = this.runHost(
+      ["cancel", entry.snap, recordPath],
+      entry.out,
+      entry.log,
+      { ...entry.env, ...this.chainEnvFor(runId) },
+    );
     entry.rc = rc;
     this.refresh(entry);
     if (rc === 2 || rc === 3) this.storeBlob(runId, entry.snap);
+    // BRA-131: a terminal cancel (rc 0/1) is a finished run — record
+    // it like driveStep does, so result() (which checks finished
+    // first) and driveStepOnce/driveToCompletion (which return the
+    // recorded code) see the failure instead of a run that is still
+    // in the registry. The registry entry itself stays, with rc 1:
+    // crash-recovery classification reads it, and a fresh process
+    // derives the failure from the entry's rc + the journal (see
+    // result()).
+    if (rc === 0 || rc === 1) this.finished.set(runId, rc);
     this.saveRunEntry(runId);
     return rc;
   }
@@ -4648,6 +5895,31 @@ export class Host {
           direct.push(child);
         }
       }
+    }
+    // BRA-105: run/call children (BRA-40 — cancellation propagates
+    // down the tree). The parent journal's "run-child" events name
+    // the direct children; each child's own journal names ITS
+    // children, so recursion walks the tree deepest-first. Cancelled
+    // before the parent, like fork branches: the parent is only
+    // cancelled after its children are.
+    const runChildren = [...this.journal(runId)]
+      .reverse()
+      .filter((e) => e.event === "run-child" && typeof e.childRunId === "string")
+      .map((e) => e.childRunId as string);
+    for (const child of runChildren) {
+      const ce = this.registry.get(child);
+      if (ce && (ce.rc === 2 || ce.rc === 3)) {
+        cancelled.push(...this.cancelTree(child, reason, "parent cancelled"));
+        direct.push(child);
+      }
+    }
+    if (direct.length > 0) {
+      this.journalEvent(runId, {
+        event: "run-child-cancelled",
+        runId,
+        children: direct,
+        reason,
+      });
     }
     const rc = this.cancelRun(runId, reason, trigger, direct);
     if (rc !== null) cancelled.push(runId);

@@ -52,8 +52,10 @@ Rules that follow from the shape (see `ARCHITECTURE.md` §8 and
   run (see §4).
 - **The old global-script shape is gone.** Do not write it, do not
   document it. (BRA-59 function flip.)
-- **Workflows live under `apps/agentts/workflows/`** (library
-  workflows) or `apps/agentts/tests/workflows/` (test workflows).
+- **Workflows live under `apps/agentts/workflows/library/`** (the
+  standard library) or `apps/agentts/workflows/dogfood/` (real
+  consumers proving the engine) or `apps/agentts/tests/workflows/`
+  (test workflows).
   They import the run-side module as `../src/agentts` (or
   `../../src/agentts` from `tests/workflows/`). The canonical module
   source is `packages/durablets/src/agentts.ts`;
@@ -75,7 +77,7 @@ routes traps by type string only and never interprets them.
 | --- | --- | --- | --- |
 | `job` | `job<Input, Output>({ spec, input })` | `Output` (call-site type) | A worker agent session. `spec` is the jobspec name; `input` is that session's input. The expensive, general tool — anything needing judgment. |
 | `exec` | `exec({ cmd, args?, cwd? })` | `{ stdout, exitCode, stderr? }` | Run a shell command for real (direct adapter) or canned (mock). One command, one result. |
-| `gate` | `gate({ question, options? })` | `{ answer }` | A human answer. The run holds until a human delivers one with `deliver-gate`. Never auto-answered by the direct adapter. |
+| `gate` | `gate({ question, options? })` | `{ answer }` | A human answer. The run holds until a human delivers one with `deliver-gate`. Never auto-answered by the direct adapter. The mock adapter (default outside the production state dir) auto-answers "yes" unless the run is submitted AND driven with `--gates hold` — pass it to BOTH `run` and `queue run` (BRA-119); an auto-answer logs `GATE AUTO-ANSWERED` and marks the journal events `auto: true`. |
 | `sleep` | `sleep({ ms })` | `{ sleptMs }` | Wait a duration from now. Host-owned clock, not an adapter call. |
 | `cron` | `cron({ at })` | `{ scheduled }` | Wait until a single ISO datetime. **One-shot** — the name does not imply recurrence. Host-owned. |
 | `decide` | `decide<Output>({ question, options? })` | `Output` (call-site type) | A cheap, narrow decision — no agent session. See §2.1. |
@@ -154,7 +156,7 @@ Consequences for authors:
   three decide calls with three different result types are a loud
   extraction conflict, not three contracts. The library pattern is a
   single shared type — `LoopDecision { choice: string; confidence:
-  number }` in `workflows/judge-fix-loop.ts` — with the different
+  number }` in `workflows/library/judge-fix-loop.ts` — with the different
   meanings carried in the question/options, not the type. The
   canonical Decision shape is `Decision` in the `agentts` module
   (BRA-47, landed 2026-11-16); the cascade's decide tier uses
@@ -319,14 +321,22 @@ scriptPath }`, direct adapter; the muse worker loop reads the same
 format) and `--mock-answers answers.json` (`{ spec: cannedValue }`,
 mock adapter). Both fail loudly on a missing file or bad JSON.
 An unregistered spec on the direct adapter is a loud error, never a
-canned default.
+canned default. **BRA-111:** the workers-config is carried on the
+Host and applied to every DirectAdapter it loads — its own adapter
+and every fresh one loaded for a queued entry — so the worker
+server's driver honors it too (`worker serve --workers-config` /
+`AGENTTS_WORKERS_CONFIG`, read fresh on every drive; a missing or
+malformed file fails the drive loudly with 500). Before BRA-111 the
+server driver built a plain DirectAdapter per request and a run
+submitted with `--adapter direct` + a workers-config lost its
+workers at the queue drive.
 
 **What mock testing does not prove.** A mock run proves the loop
 logic, the trap wiring, and the gate. It does not prove the real
 worker, real exec, or real timing. Run the same workflow under
 `--adapter direct` before believing a result that depends on
 worker behavior — the direct adapter spawns real worker processes
-(`bun workflows/worker.ts '<json>'`, result JSON from the last
+(`bun workflows/library/worker.ts '<json>'`, result JSON from the last
 stdout line) with a 600s timeout, runs real `exec`, holds every
 gate, and answers `decide` with the local decision model.
 
@@ -342,14 +352,14 @@ done, 2 held at a gate, 1 error / refusal.
 ```sh
 # Submit (returns the run ID immediately) — input via --input-file,
 # or inline JSON with --input (giving both is refused, exit 1)
-bun src/cli.ts run workflows/hello.ts --run-id run-hello \
+bun src/cli.ts run workflows/library/hello.ts --run-id run-hello \
   --input-file /tmp/hello-input.json --state-dir /tmp/agentts-quickstart/state
 # RUN run-hello
-# bun src/cli.ts run workflows/hello.ts --run-id run-hello \
+# bun src/cli.ts run workflows/library/hello.ts --run-id run-hello \
 #   --input '{"name":"world"}' --state-dir /tmp/agentts-quickstart/state
 
 # Submit + drive + fetch result in one command
-bun src/cli.ts run workflows/hello.ts --run-id run-hello \
+bun src/cli.ts run workflows/library/hello.ts --run-id run-hello \
   --input-file /tmp/hello-input.json --wait --state-dir /tmp/agentts-quickstart/state
 # { "greeting": "Hello, world!" }
 
@@ -430,7 +440,8 @@ it never executes a run itself (see `ARCHITECTURE.md` §6).
 
 ## 7. The workflow library
 
-The library lives in `apps/agentts/workflows/`. The canonical
+The library lives in `apps/agentts/workflows/library/` (dogfood
+consumers live alongside in `apps/agentts/workflows/dogfood/`). The canonical
 inventory — name, file, purpose, input/output, when to use it,
 versioning, state — is `apps/agentts/workflows/README.md`
 (BRA-52); this section is the how-to for the same entries and
@@ -544,7 +555,7 @@ its fix step can only append revision markers).
 skill; the BRA-55 proof run is the evidence):
 
 ```sh
-bun src/cli.ts run workflows/daily-ai-briefing.ts --adapter briefing \
+bun src/cli.ts run workflows/dogfood/daily-ai-briefing.ts --adapter briefing \
   --input-file <input.json> --state-dir <scratch-state-dir> --wait
 ```
 
@@ -553,11 +564,23 @@ lands under `.agentts-scratch/briefing-test-2026-11-16` (relative to
 the host cwd). Mock mode (fixture data, no files written) is the
 briefing adapter's `AGENTTS_BRIEFING_MOCK=1`; the workflow's
 `input.mock` only marks the edition TEST in its scope note. The
-input shape is `BriefingInput` in the workflow file itself — note
-the header cites `tests/fixtures/briefing-input.json` as a sample
-input, but that file does not exist in the repo (see "Known
-disagreements"). No gate:
+input shape is `BriefingInput` in the workflow file itself; a
+sample input lives at `tests/fixtures/briefing-input.json`
+(created by BRA-87). No gate:
 no step here needs a human decision.
+
+**Production path (BRA-111).** The live cutover runs the workflow
+with `--adapter direct --workers-config
+workflows/dogfood/briefing-workers.json` (the checked-in config
+maps all five briefing specs to `briefing-worker.ts`; paths are
+relative to `apps/agentts` — run the CLI and the server from
+there), driven through the queue by the tick loop and delivered to
+the outbox — the `--adapter briefing` plugin is the workaround the
+workers-config replaces. The Nov 18 trial ran this path on a
+scratch server; the live briefing stays on the 06:15 cron until
+parity is shown and Brandon decides the switch. The mechanism is
+proven by `tests/test-bra111.ts` (direct fails loudly without a
+config, drives briefing jobs with one, bad configs fail loudly).
 
 ### 7.4 `workflow-bugfix-bra54.ts` — the bug-fix workflow (BRA-54)
 
@@ -565,7 +588,7 @@ no step here needs a human decision.
 engine: reproduce → diagnose → fix → judge the fix (JudgeFixLoop)
 → test (full staged `run.sh`) → verify (CLI mock path converges).
 Steps are `job` traps (specs `bugfix-*`) served by
-`workflows/bugfix-worker.ts` — a real worker process with fs + exec
+`workflows/dogfood/bugfix-worker.ts` — a real worker process with fs + exec
 access under the direct adapter, and the same code in-process with
 `simulate: true` under the mock adapter (simulated results always
 carry `simulated: true`).
@@ -583,6 +606,196 @@ deterministically for fast iteration. No runtime `gate` trap: the
 fix is the issue's prescribed option, and human review is post-hoc
 (the coordinator verifies and closes the issue after the run), not
 in-loop. The first-run type-check gate still runs.
+
+### 7.5 `presentations.ts` — presentations (standard-library workflow, BRA-109)
+
+**What it does.** Takes a deck outline (title + slides) and a
+presentation rubric (inline, a `{ file }` reference to a rubric
+JSON file, or the default rubric — criteria `["one-idea",
+"concise", "concrete", "complete"]`, threshold 0.8), builds the
+deck (`slides-create` job trap), runs a JudgeFixLoop review/polish
+step over the deck, and renders the final deck to files
+(`slides-render` job trap: deck.json + deck.md, default
+`.agentts-scratch/presentations-out/`). At most `maxLoops` loops
+(default 3). The result carries the final deck, its id and paths,
+and the loop outcome (loops, converged, final mean score).
+
+**When to use it.** Turning an outline into a reviewed deck: the
+outline states the content, the rubric states the quality bar,
+the loop polishes the deck against it. Prefer it over raw
+JudgeFixLoop when the item is a deck and the deliverable is the
+deck files.
+
+**v1 limits, stated plainly** (from the file header): the Slides
+steps are job traps served by the deterministic workers — they do
+NOT call the live Google Slides API. `slides-create` computes the
+deck locally and returns a deterministic deck id; a live Slides
+adapter plugs into the same two specs later. The v0 judge/fix
+workers are deterministic keyword/coverage workers, not LLM
+judgment — the fix edits the deck structurally (fills empty
+slides, shortens long bullets, adds a concrete bullet, trims
+over-full slides) rather than rewriting prose, and a criterion
+the fix does not know (a custom rubric criterion outside
+one-idea / concise / concrete / complete) stays outstanding and
+the loop hits the cap honestly instead of pretending to improve.
+
+**Verified live** (mock adapter, fixture
+`tests/fixtures/presentations/input-converging.json`, see §9):
+converged after 2 loops with 1 revision, final mean score 0.98;
+slide 1 trimmed from 6 to 5 bullets keeping the number-bearing
+evidence bullet, the long bullet shortened to 12 words +
+ellipsis; `deckPath` / `markdownPath` under
+`.agentts-scratch/presentations-converging/` (the mock render
+computes paths + bytes without writing files). Under the direct
+adapter the same fixture converges in 2 loops and the files are
+actually written.
+
+### 7.6 `plan-driven-work.ts` — plan-driven-work (the plan → review → execute → review template, BRA-117)
+
+**What it does.** The reusable codification of Brandon's own
+6-step loop (plan, review, execute, review, commit, push).
+Takes a request + a phase outline + a plan rubric, drafts a
+plan (`plan-draft` job trap), improves it through a
+JudgeFixLoop (max 3 loops; default rubric criteria
+`["covers-request", "sequenced", "jobspec", "acceptance",
+"review-points", "gate-placement"]`, threshold 0.8), holds at
+a `gate` trap for the human checkpoint (options approve /
+revise / reject; revise = one more JudgeFixLoop pass then a
+second gate, max 2 gate rounds), and only then executes the
+approved plan — frozen, byte-identical to the approved one.
+Execution groups phases into dependency waves (topological
+sort over `dependsOn`): phases in a wave run in parallel via
+`all([...])`, waves serially. Each executed phase is reviewed
+by the phase-review child workflow (§7.7) via the `run` trap,
+one child run per executed phase. Commit/push is a
+caller-supplied `exec` command, run last. `executeThrough`
+bounds the run: phases after it are recorded deferred, never
+executed (staged execution — the BRA-110 proof runs the
+plan's opening phases this way).
+
+**When to use it.** Any multi-step job with a real human
+checkpoint in the middle: the plan is the thing reviewed, the
+gate is the decision point, execution follows the approved
+plan and nothing else. Prefer it over a hand-rolled sequence
+when the plan needs review before work starts and each phase
+needs review after it runs. Trivial tasks still skip the
+template — the loop costs a plan draft, a review loop, a gate,
+and a review per phase.
+
+**v1 limits, stated plainly** (from the file header): the v0
+plan-draft sequences and validates a caller-supplied outline —
+it does NOT author phases from prose; the caller states the
+phases. The v0 plan-phase produces an execution record
+(validate + content hash + summary of prior results); real
+agent execution arrives with worker agents following the
+plan-phase jobspec. Phases are job/exec traps only; a phase
+that is itself a sub-workflow is not supported in v1. The
+commit/push leg is a caller-supplied exec command, not a
+built-in. The production deliver half rides on BRA-110 (the
+template's first real consumer). A failed phase stops the run
+loudly with the real message (BRA-121 fixed the join slice so
+the failure throw journals a lifecycle "failed" event instead
+of crashing it; the `sleep(0)` workaround is gone). JudgeFixLoop's
+fix is append-only per BRA-44: a criterion the fix does not
+know (a custom rubric criterion outside the default six)
+stays outstanding and the loop hits the cap honestly instead
+of pretending to improve.
+
+**Verified live** (direct adapter, fixture
+`tests/fixtures/plan-driven-work/bra110-plan-input.json`,
+see §9): the run held at the gate, the plan loop converged in
+2 loops at mean 0.98, after the "approve" answer the run
+completed with 3 executed / 3 deferred, all 3 phase reviews
+converged in 1 loop at 0.98, the commit wrote for real, and
+the frozen-vs-executed check passed from the journal (the
+approved plan reconstructed after completion equals the
+result's plan; exactly 1 exec trap per command phase, exactly
+1 plan-phase trap for the agent phase, 0 traps for any deferred
+phase). Under the mock adapter the same plan arc holds (2
+loops, 0.98), but the mock's phase reviews score 0.55 then
+0.70 on the mock's base-score judges and hit the 2-loop cap
+honestly — the direct run is the convergence proof.
+
+### 7.7 `phase-review.ts` — phase-review (per-phase review child workflow, BRA-117)
+
+**What it does.** One phase's review, as a child workflow
+invoked by the template via the `run` trap (form B). Takes the
+phase's evidence text and its acceptance criterion, runs a
+JudgeFixLoop over them (one criterion: the acceptance itself,
+threshold 0.8, max 2 loops), and returns the loop outcome
+(loops, converged, final mean score). It is a separate library
+entry because the child carries its own extraction — two
+JudgeFixLoop instantiations with different item types in one
+workflow would collide on the `job:judge` contract
+(one-key-one-contract).
+
+**When to use it.** Only as the template's per-phase review
+step. For anything other than a phase's evidence-vs-acceptance
+check, use JudgeFixLoop (§7.1) directly.
+
+### 7.8 `rubric-review.ts` — rubric-review (the rubric-rubric workflow)
+
+**What it does.** Judges a rubric against the meta-rubric
+(`workflows/rubrics/meta-rubric.md` — 14 criteria with 0/5/10
+anchors, organized under four perspective headings) and improves
+it through a JudgeFixLoop. Takes the rubric under review (inline
+text or a `{ file }` reference — the general inline-or-file
+indirection for instruction handoffs), the scope the rubric claims
+(in scope / explicitly out / boundaries — generality is judged
+against it), the artifact kind, reference examples (REQUIRED: at
+least one known-good and one known-mediocre — a rubric cannot be
+judged in the abstract), the meta-rubric (default: the checked-in
+file), the numeric threshold (default 0.8, separate from the
+prose, never parsed out of it), and `maxLoops` (default 3). The
+three judges receive rubric + scope + kind + references + the
+meta-rubric and return scored criteria (0–10, interpolated, one
+line of reason each) PLUS open-ended feedback: answers to the
+five guided questions (the missed dimension; the adversarial
+probe — construct a bad artifact that would PASS this rubric;
+where two careful judges would disagree; what is rewarded or
+punished wrongly; free-form) plus free-form text. The fix
+receives the rubric and all verdicts INCLUDING all open-ended
+feedback. The output carries the revised rubric, the loop
+outcome, and the final round's verdicts — the per-criterion
+scores and the full open-ended feedback — so a human can read
+them in the run result. The aggregate summarizes recurring
+open-feedback themes alongside the mean score.
+
+**When to use it.** Before trusting any rubric: run it through
+`rubricReview` with a known-good and a known-mediocre reference
+example. The first consumer is the morning report rubric
+(trial edition = mediocre reference, recent cron edition = good
+reference); the plan template's plan rubric gets the same
+treatment when it next changes. The meta-rubric itself is
+validated separately — self-test (it must pass its own
+definition of good) plus a generalization suite (negative
+control: the current five-word briefing rubric, which must
+score low; positive control: a strong rubric; cross-kind:
+code-review, plan, and briefing rubrics) — run by Meroki
+operating this workflow, before the meta-rubric is trusted on
+anything else.
+
+**v1 limits, stated plainly** (from the file header): the v0
+judge/fix workers are deterministic keyword/coverage workers,
+not LLM judgement — the judge scores each meta-criterion 10
+when the rubric names it and 0 when it does not, and the fix
+appends one addressing sentence per missed criterion rather
+than rewriting the rubric. A rubric that fails discrimination
+needs its criteria rewritten, not its scores argued with; if
+three loops do not converge, the rubric needs a human rethink,
+not a fourth loop. The meta-rubric file is data, not process:
+perspectives, graded questions with anchors, open-ended
+questions — no steps, no sequencing in the prose.
+
+**Verified live** (direct + mock adapters,
+`tests/test-rubric-review.ts`, see §9): the negative control
+(five-word briefing rubric) scores 0 in round 1 and converges
+in loop 2 at 1.0; the meta-rubric itself scores 1.0 in round 1
+and converges in 1 loop; a mid rubric naming 3 of 14 criteria
+scores a 0.22 round-1 aggregate, then converges in loop 2.
+Inline vs file resolution agree; missing/empty rubrics fail
+loudly; reference-examples enforcement fails loudly; the
+rubric-update job returns a text rubric unchanged.
 
 ## 8. The run / journal / result model
 
@@ -663,6 +876,17 @@ held | done | failed`. A done run's delivery is recorded with
 with `needsAttention: true` — that *is* the escalation for a
 terminal failure. A non-terminal run is a loud error.
 
+**Deliver proof (BRA-110).** `tests/test-bra110.ts` proves drive +
+deliver end to end on the production path: the tick standin drives
+a direct-adapter run with a real exec trap over HTTP and delivers
+it; the outbox record's output is the run's validated result; two
+concurrent deliveries plus a re-delivery leave exactly one record
+file (the BRA-61 idempotency guard — the append-only
+`deliveries.log` records one line per attempt, audit, not a
+duplicate); a failed run delivers with `needsAttention: true`.
+The proof runs on a scratch server — the live production outbox
+still awaits its first real delivery.
+
 **Drive integrity (what can stop a run).** Drive cap
 (`MAX_DRIVE_ROUNDS = 50`): hitting it fails the run loudly with the
 blob intact; the remedy is to split the workflow into fewer traps
@@ -694,12 +918,12 @@ the same command was already proven (README quickstart: `version`,
 | `decide` signals | `run workflows/bra69-decide-demo.ts --adapter direct --wait` | Signal question → `{ choice: "keep", confidence: 0.65 }`; no-signal question → `{ choice: "blue", confidence: 0.5 }` |
 | Reference by hash | `run workflows/bra69-ref-demo.ts --adapter direct --wait` | `{ verified: true, chars: 45, location: "/tmp/bra69-70-skills/doc.txt" }` (sha256 verified with `sha256sum` before the run) |
 | JudgeFixLoop, mock | `run tests/workflows/workflow-judge-fix-loop.ts --adapter mock --wait` (fixture `judge-fix-loop-input.json`) | Converged, 5 loops, mean 0.85, rubric gained `"concrete example"`; profile: 287 events across 16 journals, 34 traps (23 job, 11 decide), 5 forks, 351ms wall |
-| Improve-loop, mock | `run workflows/improve-loop.ts --adapter mock --wait` (fixture `improve-loop/input-inline.json`) | Converged after 2 rounds, 2 changes, final mean score 1, outstanding empty |
-| Submit-only | `run workflows/hello.ts --run-id run-hello-verify` (no `--wait`) | `RUN run-hello-verify`, exit 0; `queue list` showed it `queued`, then `done` after `queue run`; `result` → `{ "greeting": "Hello, world!" }` |
+| Improve-loop, mock | `run workflows/library/improve-loop.ts --adapter mock --wait` (fixture `improve-loop/input-inline.json`) | Converged after 2 rounds, 2 changes, final mean score 1, outstanding empty |
+| Submit-only | `run workflows/library/hello.ts --run-id run-hello-verify` (no `--wait`) | `RUN run-hello-verify`, exit 0; `queue list` showed it `queued`, then `done` after `queue run`; `result` → `{ "greeting": "Hello, world!" }` |
 | Jobspec hash | `worker serve --port 18799` + `GET /jobspec?spec=judge` | Returned hash `14ee7811…` identical to `sha256sum plugins/muse/jobspecs/judge.md`; unknown spec → `{"error":"no jobspec file for \"nonexistent-spec\""}` |
 
 Scratch workflows used for verification (`workflows/bra69-*.ts`,
-`workflows/hello.ts`) were deleted after the runs; the only files
+`workflows/library/hello.ts`) were deleted after the runs; the only files
 this skill adds to the repo are the two skill files (plus the two
 README link lines — see the report). The daily-ai-briefing run
 command in §7.3 is quoted from that workflow's header and was not
@@ -713,11 +937,11 @@ re-run for this skill.
   `apps/agentts/plugins/direct/src/direct-adapter.ts`,
   `apps/agentts/plugins/muse/src/muse-adapter.ts`,
   `apps/agentts/plugins/mock/src/mock-adapter.ts`, `src/cli.ts`
-  (BRA-54 `setCanned` wiring), `workflows/bugfix-worker.ts`
+  (BRA-54 `setCanned` wiring), `workflows/dogfood/bugfix-worker.ts`
   (why the bare mock decide stays canned).
 - §3: `packages/durablets/src/agentts.ts` (combinator re-exports),
-  `ARCHITECTURE.md` §2, `workflows/judge-fix-loop.ts`,
-  `workflows/improve-loop.ts` (unwrap idiom).
+  `ARCHITECTURE.md` §2, `workflows/library/judge-fix-loop.ts`,
+  `workflows/library/improve-loop.ts` (unwrap idiom).
 - §4: `apps/agentts/src/gate.ts`, `src/extract.ts`,
   `src/checker.ts`, `ARCHITECTURE.md` §8.
 - §5: `apps/agentts/plugins/mock/src/mock-adapter.ts`,
@@ -726,9 +950,9 @@ re-run for this skill.
 - §6: `apps/agentts/src/cli.ts` (header comment, authoritative),
   `ARCHITECTURE.md` §11, `apps/agentts/src/host.ts`
   (`driveStepOnce`, `deliverGate`, `repairQueue`).
-- §7: `apps/agentts/workflows/judge-fix-loop.ts`,
-  `workflows/improve-loop.ts`, `workflows/daily-ai-briefing.ts`,
-  `workflows/workflow-bugfix-bra54.ts`,
+- §7: `apps/agentts/workflows/library/judge-fix-loop.ts`,
+  `workflows/library/improve-loop.ts`, `workflows/dogfood/daily-ai-briefing.ts`,
+  `workflows/dogfood/workflow-bugfix-bra54.ts`,
   `tests/workflows/workflow-judge-fix-loop.ts`,
   `tests/fixtures/judge-fix-loop-input.json`,
   `tests/fixtures/improve-loop/input-inline.json`.
@@ -745,18 +969,19 @@ re-run for this skill.
   bare `MockAdapter`'s own switch returns canned `{ choice: "a",
   confidence: 0.9 }` — deliberate, because the swap test requires
   the host mock adapter to match the mock plugin byte-identically
-  (`workflows/bugfix-worker.ts` documents the reason). This skill
+  (`workflows/dogfood/bugfix-worker.ts` documents the reason). This skill
   follows the code and names the distinction.
 - **The host README's CLI list is stale** (`ARCHITECTURE.md` §14):
   it omits `result`, `deliver-result`, `deliveries`, `escalate`,
   `watchdog`, `queue repair`, and `worker get-job` /
   `complete-job`. `src/cli.ts` is authoritative; §6 follows it.
-- **The daily-ai-briefing header cites a sample input that does
-  not exist.** `workflows/daily-ai-briefing.ts` says "See
-  `tests/fixtures/briefing-input.json` for a sample input" — no
-  such file exists anywhere in the repo (only the header cites it).
-  The input shape is `BriefingInput`, defined in the workflow file.
-  This skill follows the code and does not repeat the pointer.
-- **The top-level README quickstart's `workflows/hello.ts` is not a
-  committed file** — the README tells the reader to write it. It
-  was written fresh for verification and deleted afterwards.
+- **The daily-ai-briefing header cites a sample input — RESOLVED
+  (BRA-87, 2026-11-17).** The fixture now exists at
+  `tests/fixtures/briefing-input.json`, so the header's pointer is
+  true. (At skill-writing time no such file existed anywhere in the
+  repo.)
+- **The top-level README quickstart's `workflows/library/hello.ts` is a
+  committed file** — it ships in the repo as the hello quickstart
+  (a library entry, gate-checked). At skill-writing time it was not
+  committed, so it was written fresh for verification and deleted
+  afterwards; that is no longer the case.

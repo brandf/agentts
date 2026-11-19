@@ -10,21 +10,21 @@ specs have no CLI path to a worker. This plugin uses the sanctioned
 Direct (real workers, real network):
 
 ```sh
-bun src/cli.ts run workflows/daily-ai-briefing.ts --adapter briefing \
+bun src/cli.ts run workflows/dogfood/daily-ai-briefing.ts --adapter briefing \
     --state-dir <scratch-state-dir>
 ```
 
 Mock (deterministic fixture answers, no files written — gate/swap checks):
 
 ```sh
-AGENTTS_BRIEFING_MOCK=1 bun src/cli.ts run workflows/daily-ai-briefing.ts \
+AGENTTS_BRIEFING_MOCK=1 bun src/cli.ts run workflows/dogfood/daily-ai-briefing.ts \
     --adapter briefing --state-dir <scratch-state-dir>
 ```
 
 ## What it registers
 
 Direct mode returns a `DirectAdapter` with these specs mapped to
-`workflows/briefing-worker.ts` (resolved relative to this file, with
+`workflows/dogfood/briefing-worker.ts` (resolved relative to this file, with
 a fallback to the `agentts-host` working tree):
 
 - `briefing-discover`, `briefing-read`, `briefing-relate`,

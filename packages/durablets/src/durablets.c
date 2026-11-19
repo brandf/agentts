@@ -1572,10 +1572,99 @@ static uint8_t *load_file(const char *filename, size_t *plen)
     return buf;
 }
 
+/* ---- BRA-90: incremental snapshots (hash-linked chain) ----
+ *
+ * The snapshot chain is always on (one mode, no threshold). The
+ * TypeScript host owns the chain: it names the keyframe by content
+ * hash, records each checkpoint in a manifest, and decides per
+ * slice whether this suspension writes a base (keyframe) or a
+ * delta. This file is only the snapshot engine -- it obeys two
+ * per-slice instructions passed in the environment:
+ *
+ *   DURABLETS_SAVE_MODE=base|delta
+ *       What save_snapshot writes. "base" writes a full snapshot
+ *       with JS_SNAPSHOT_BASE (which becomes the runtime's base,
+ *       replacing any previous one); "delta" writes
+ *       JS_SNAPSHOT_DELTA against the attached base. Default is
+ *       "base" -- a fresh run, a legacy resume, or any direct use
+ *       of this binary writes a full snapshot, exactly as before.
+ *       A delta write with no base attached fails loudly
+ *       (JS_WriteSnapshot returns NULL).
+ *   DURABLETS_BASE_PATH=<path>
+ *       The keyframe file to read alongside the snapshot file on
+ *       resume/branch/join/cancel. When set, the snapshot file is
+ *       read as a delta against that base; when unset, the snapshot
+ *       file is read as a plain full snapshot (the legacy path,
+ *       kept so blobs written before the chain still resume).
+ *
+ * The engine itself verifies a delta against its base (a wrong
+ * pair fails JS_ReadSnapshot loudly with "the delta was not
+ * written from this base"; a truncated file fails loudly too), so
+ * a mismatched or torn checkpoint is a loud failure, never a
+ * silently wrong resume. A missing base file exits loudly in
+ * load_file.
+ *
+ * Resume loads ONE keyframe + ONE delta, never a replay: deltas
+ * are not chained (each one only needs the base). Keyframing is
+ * the host's rebase rule (DURABLETS_KEYFRAME_INTERVAL, default
+ * 25 suspensions, 0 = full snapshot every suspension); this file
+ * never decides it.
+ */
+static int bra90_save_delta(void)
+{
+    const char *v = getenv("DURABLETS_SAVE_MODE");
+    return v && !strcmp(v, "delta");
+}
+
+/* Pair-aware snapshot load for resume/branch/join/cancel.
+ * Returns 0 on success, 1 on failure (message already printed). */
+static int read_snapshot(JSRuntime *rt, const char *filename,
+                         JSSnapshotResult *res)
+{
+    char err[256];
+    const char *base_path = getenv("DURABLETS_BASE_PATH");
+    if (base_path && base_path[0]) {
+        size_t blen, dlen;
+        uint8_t *bbuf = load_file(base_path, &blen);
+        uint8_t *dbuf = load_file(filename, &dlen);
+        int rc = JS_ReadSnapshot(rt, bbuf, blen, dbuf, dlen,
+                                 &durablets_host, res, err, sizeof(err));
+        if (rc) {
+            fprintf(stderr, "%s + %s: %s\n", base_path, filename, err);
+            free(bbuf);
+            free(dbuf);
+            return 1;
+        }
+        free(bbuf);
+        free(dbuf);
+        return 0;
+    }
+    {
+        size_t len;
+        uint8_t *buf = load_file(filename, &len);
+        int rc = JS_ReadSnapshot(rt, buf, len, NULL, 0, &durablets_host,
+                                 res, err, sizeof(err));
+        if (rc) {
+            fprintf(stderr, "%s: %s\n", filename, err);
+            free(buf);
+            return 1;
+        }
+        free(buf);
+        return 0;
+    }
+}
+
 static int save_snapshot(JSContext *ctx, const char *filename)
 {
     size_t size;
-    uint8_t *buf = JS_WriteSnapshot(ctx, &size, &durablets_host, NULL, 0, 0);
+    /* BRA-90: the host decides per slice (DURABLETS_SAVE_MODE);
+     * "base" is the default, so a fresh run or a direct use of
+     * this binary writes a full snapshot exactly as before -- only
+     * now it is a BASE snapshot, which is itself a complete,
+     * restorable snapshot and also becomes the runtime's base. */
+    int delta = bra90_save_delta();
+    uint8_t *buf = JS_WriteSnapshot(ctx, &size, &durablets_host, NULL, 0,
+                                    delta ? JS_SNAPSHOT_DELTA : JS_SNAPSHOT_BASE);
     int rc;
     if (!buf) {
         print_exception(ctx);
@@ -1589,7 +1678,8 @@ static int save_snapshot(JSContext *ctx, const char *filename)
     js_free(ctx, buf);
     if (rc != 0)
         return 1;
-    fprintf(stderr, "[host] snapshot saved: %s (%zu bytes)\n", filename, size);
+    fprintf(stderr, "[host] snapshot saved: %s (%zu bytes, %s)\n", filename, size,
+            delta ? "delta" : "base");
     return 0;
 }
 
@@ -1923,18 +2013,15 @@ int main(int argc, char **argv)
 
     if (argc == 4 && !strcmp(argv[1], "resume")) {
         JSSnapshotResult res;
-        char err[256];
         int throw_flag = 0, rc, branch;
         const char *result_json = argv[3];
-        buf = load_file(argv[2], &len);
         rt = JS_NewRuntime();
-        if (JS_ReadSnapshot(rt, buf, len, NULL, 0, &durablets_host, &res,
-                            err, sizeof(err))) {
-            fprintf(stderr, "%s: %s\n", argv[2], err);
+        /* BRA-90: pair-aware load (plain full read when the host
+         * names no base -- see read_snapshot). */
+        if (read_snapshot(rt, argv[2], &res)) {
             JS_FreeRuntime(rt);
             return 1;
         }
-        free(buf);
         ctx = res.contexts[0];
         JS_FreeSnapshotResult(rt, &res);
         /* Resuming inside the workflow entry (the snapshot was taken
@@ -2035,20 +2122,17 @@ int main(int argc, char **argv)
 
     if (argc == 4 && !strcmp(argv[1], "branch")) {
         JSSnapshotResult res;
-        char err[256];
         char driver[64];
         int index = atoi(argv[3]);
         JSAtom atom;
         JSValue stash;
-        buf = load_file(argv[2], &len);
         rt = JS_NewRuntime();
-        if (JS_ReadSnapshot(rt, buf, len, NULL, 0, &durablets_host, &res,
-                            err, sizeof(err))) {
-            fprintf(stderr, "%s: %s\n", argv[2], err);
+        /* BRA-90: pair-aware load (plain full read when the host
+         * names no base -- see read_snapshot). */
+        if (read_snapshot(rt, argv[2], &res)) {
             JS_FreeRuntime(rt);
             return 1;
         }
-        free(buf);
         ctx = res.contexts[0];
         JS_FreeSnapshotResult(rt, &res);
         /* Resuming inside the workflow entry (the snapshot was taken
@@ -2146,21 +2230,18 @@ int main(int argc, char **argv)
 
     if (argc >= 4 && !strcmp(argv[1], "join")) {
         JSSnapshotResult res;
-        char err[256];
         int i, rc, branch;
         struct strbuf b;
         char *outcomes_json, *run;
         int64_t fork_n;
         JSValue outcomes;
-        buf = load_file(argv[2], &len);
         rt = JS_NewRuntime();
-        if (JS_ReadSnapshot(rt, buf, len, NULL, 0, &durablets_host, &res,
-                            err, sizeof(err))) {
-            fprintf(stderr, "%s: %s\n", argv[2], err);
+        /* BRA-90: pair-aware load (plain full read when the host
+         * names no base -- see read_snapshot). */
+        if (read_snapshot(rt, argv[2], &res)) {
             JS_FreeRuntime(rt);
             return 1;
         }
-        free(buf);
         ctx = res.contexts[0];
         JS_FreeSnapshotResult(rt, &res);
         /* Resuming inside the workflow entry (the snapshot was taken
@@ -2223,7 +2304,14 @@ int main(int argc, char **argv)
                 JS_FreeValue(ctx, exc);
                 return 0;
             }
+            /* BRA-121: record the failed lifecycle event, like the
+             * run/resume/cancel paths do — without it the host
+             * classifies the rc=1 slice as a crash and retries the
+             * join 3 times, misreporting the workflow's real error
+             * as "C host crashed joining". print_exception first: it
+             * stashes the "Name: message" the failed event carries. */
             print_exception(ctx);
+            emit_lifecycle(ctx, "failed", -1);
             return 1;
         }
         rc = finish_slice(rt, ctx, argv[2]);
@@ -2246,7 +2334,6 @@ int main(int argc, char **argv)
 
     if (argc == 4 && !strcmp(argv[1], "join-value")) {
         JSSnapshotResult res;
-        char err[256];
         int rc, branch;
         struct strbuf b;
         size_t rlen;
@@ -2255,15 +2342,13 @@ int main(int argc, char **argv)
         char *value_json, *cancelled_json, *completed_json;
         char *run;
         int64_t fork_n, winner_n = -1;
-        buf = load_file(argv[2], &len);
         rt = JS_NewRuntime();
-        if (JS_ReadSnapshot(rt, buf, len, NULL, 0, &durablets_host, &res,
-                            err, sizeof(err))) {
-            fprintf(stderr, "%s: %s\n", argv[2], err);
+        /* BRA-90: pair-aware load (plain full read when the host
+         * names no base -- see read_snapshot). */
+        if (read_snapshot(rt, argv[2], &res)) {
             JS_FreeRuntime(rt);
             return 1;
         }
-        free(buf);
         ctx = res.contexts[0];
         JS_FreeSnapshotResult(rt, &res);
         /* Resuming inside the workflow entry (the snapshot was taken
@@ -2336,7 +2421,14 @@ int main(int argc, char **argv)
                 JS_FreeValue(ctx, exc);
                 return 0;
             }
+            /* BRA-121: record the failed lifecycle event, like the
+             * run/resume/cancel paths do — without it the host
+             * classifies the rc=1 slice as a crash and retries the
+             * join 3 times, misreporting the workflow's real error
+             * as "C host crashed joining". print_exception first: it
+             * stashes the "Name: message" the failed event carries. */
             print_exception(ctx);
+            emit_lifecycle(ctx, "failed", -1);
             return 1;
         }
         rc = finish_slice(rt, ctx, argv[2]);
@@ -2359,7 +2451,6 @@ int main(int argc, char **argv)
 
     if (argc == 4 && !strcmp(argv[1], "join-aggregate")) {
         JSSnapshotResult res;
-        char err[256];
         int rc, branch, i;
         struct strbuf b;
         size_t rlen;
@@ -2369,15 +2460,13 @@ int main(int argc, char **argv)
         char *errors_json, *completed_json, *cancelled_json;
         char *run;
         int64_t fork_n, nerr = 0;
-        buf = load_file(argv[2], &len);
         rt = JS_NewRuntime();
-        if (JS_ReadSnapshot(rt, buf, len, NULL, 0, &durablets_host, &res,
-                            err, sizeof(err))) {
-            fprintf(stderr, "%s: %s\n", argv[2], err);
+        /* BRA-90: pair-aware load (plain full read when the host
+         * names no base -- see read_snapshot). */
+        if (read_snapshot(rt, argv[2], &res)) {
             JS_FreeRuntime(rt);
             return 1;
         }
-        free(buf);
         ctx = res.contexts[0];
         JS_FreeSnapshotResult(rt, &res);
         /* Resuming inside the workflow entry (the snapshot was taken
@@ -2485,7 +2574,14 @@ int main(int argc, char **argv)
                 JS_FreeValue(ctx, exc);
                 return 0;
             }
+            /* BRA-121: record the failed lifecycle event, like the
+             * run/resume/cancel paths do — without it the host
+             * classifies the rc=1 slice as a crash and retries the
+             * join 3 times, misreporting the workflow's real error
+             * as "C host crashed joining". print_exception first: it
+             * stashes the "Name: message" the failed event carries. */
             print_exception(ctx);
+            emit_lifecycle(ctx, "failed", -1);
             return 1;
         }
         rc = finish_slice(rt, ctx, argv[2]);
@@ -2508,7 +2604,6 @@ int main(int argc, char **argv)
 
     if (argc == 4 && !strcmp(argv[1], "join-throw")) {
         JSSnapshotResult res;
-        char err[256];
         int rc, branch;
         struct strbuf b;
         size_t rlen;
@@ -2518,15 +2613,13 @@ int main(int argc, char **argv)
         char *failed_json, *error_json, *cancelled_json, *completed_json;
         char *run;
         int64_t fork_n, failed_branch = -1;
-        buf = load_file(argv[2], &len);
         rt = JS_NewRuntime();
-        if (JS_ReadSnapshot(rt, buf, len, NULL, 0, &durablets_host, &res,
-                            err, sizeof(err))) {
-            fprintf(stderr, "%s: %s\n", argv[2], err);
+        /* BRA-90: pair-aware load (plain full read when the host
+         * names no base -- see read_snapshot). */
+        if (read_snapshot(rt, argv[2], &res)) {
             JS_FreeRuntime(rt);
             return 1;
         }
-        free(buf);
         ctx = res.contexts[0];
         JS_FreeSnapshotResult(rt, &res);
         /* Resuming inside the workflow entry (the snapshot was taken
@@ -2604,7 +2697,14 @@ int main(int argc, char **argv)
                 JS_FreeValue(ctx, exc);
                 return 0;
             }
+            /* BRA-121: record the failed lifecycle event, like the
+             * run/resume/cancel paths do — without it the host
+             * classifies the rc=1 slice as a crash and retries the
+             * join 3 times, misreporting the workflow's real error
+             * as "C host crashed joining". print_exception first: it
+             * stashes the "Name: message" the failed event carries. */
             print_exception(ctx);
+            emit_lifecycle(ctx, "failed", -1);
             return 1;
         }
         rc = finish_slice(rt, ctx, argv[2]);
@@ -2627,7 +2727,6 @@ int main(int argc, char **argv)
 
     if (argc == 4 && !strcmp(argv[1], "cancel")) {
         JSSnapshotResult res;
-        char err[256];
         int rc, branch;
         size_t rlen;
         uint8_t *rbuf;
@@ -2641,15 +2740,13 @@ int main(int argc, char **argv)
             has_parent = 0, has_branch = 0;
         struct strbuf b;
         const char *c;
-        buf = load_file(argv[2], &len);
         rt = JS_NewRuntime();
-        if (JS_ReadSnapshot(rt, buf, len, NULL, 0, &durablets_host, &res,
-                            err, sizeof(err))) {
-            fprintf(stderr, "%s: %s\n", argv[2], err);
+        /* BRA-90: pair-aware load (plain full read when the host
+         * names no base -- see read_snapshot). */
+        if (read_snapshot(rt, argv[2], &res)) {
             JS_FreeRuntime(rt);
             return 1;
         }
-        free(buf);
         ctx = res.contexts[0];
         JS_FreeSnapshotResult(rt, &res);
         /* Resuming inside the workflow entry (the snapshot was taken
@@ -2797,9 +2894,11 @@ int main(int argc, char **argv)
             /* BRA-44: emit the failure lifecycle event, like run and
              * resume do on this path — without it a run that fails on
              * cancel never journals its failure and stays in the
-             * host registry forever. */
-            emit_lifecycle(ctx, "failed", -1);
+             * host registry forever. BRA-125: print_exception first —
+             * it stashes the "Name: message" the failed event carries;
+             * emitting first left the event with no error at all. */
             print_exception(ctx);
+            emit_lifecycle(ctx, "failed", -1);
             return 1;
         }
         rc = finish_slice(rt, ctx, argv[2]);

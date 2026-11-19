@@ -2,7 +2,7 @@
 /**
  * Improve-loop tests (standard library workflow).
  *
- * Runs workflows/improve-loop.ts under the Host with the mock adapter
+ * Runs workflows/library/improve-loop.ts under the Host with the mock adapter
  * (input-dependent mock judges — the same logic as the real workers,
  * so the mock run shows a real improving arc) and under the direct
  * adapter (real worker processes). Asserts the workflow's contract:
@@ -25,7 +25,7 @@ import { DirectAdapter } from "../plugins/direct/src/direct-adapter";
 
 const DIR = path.dirname(new URL(import.meta.url).pathname);
 const ROOT = path.resolve(DIR, "..");
-const WORKFLOW = path.join(ROOT, "workflows", "improve-loop.ts");
+const WORKFLOW = path.join(ROOT, "workflows", "library", "improve-loop.ts");
 const FIXTURES = path.join(ROOT, "tests", "fixtures", "improve-loop");
 const WORKDIR = process.env.IMPROVE_WORKDIR || fs.mkdtempSync(path.join(os.tmpdir(), "improve-loop-test-"));
 

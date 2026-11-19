@@ -329,7 +329,7 @@ function testRealWorkflows(): void {
   // (per-field flows). Every edge the tracer establishes must be
   // schema-compatible.
   expectPass(
-    () => checkWorkflowFile(path.join(ROOT, "workflows", "daily-ai-briefing.ts"), CACHE),
+    () => checkWorkflowFile(path.join(ROOT, "workflows", "dogfood", "daily-ai-briefing.ts"), CACHE),
     "BRIEFING",
   );
   expectPass(

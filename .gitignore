@@ -13,3 +13,6 @@ experiments/dquickts-prototype/proto
 experiments/restore-eval/reval
 experiments/all-combinator/host
 experiments/cancellation/host
+# AgentTS scratch (BRA-112 inline one-shot materializations, improve-loop
+# / briefing test outputs) — ephemeral by convention, never committed.
+.agentts-scratch/

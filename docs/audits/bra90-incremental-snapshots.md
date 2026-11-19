@@ -936,3 +936,127 @@ final checkpoint (30 suspensions after the drop).
   weight in RAM on every resume until the run ends. If a run's heap
   is expected to shrink by a large factor mid-run (e.g. a big
   context is dropped), the interval is what caps that exposure.
+
+## 11. Implementation (2026-11-17, BRA-90)
+
+Landed as designed (§3 + §8.7), with two deviations recorded
+plainly below. Framing, corrected by Brandon and repeated here so
+it is not re-broken: the savings are **bytes WRITTEN over a run,
+not bytes stored**. The live set is a keyframe + the latest delta,
+marginally MORE stored than one full snapshot; load is slightly
+slower (one keyframe + one delta to read). The wins are write
+amplification over long runs and fork storage.
+
+### What changed
+
+- `packages/durablets/src/durablets.c` — `save_snapshot` obeys
+  `DURABLETS_SAVE_MODE=base|delta` (default `base`; a base write
+  is now `JS_SNAPSHOT_BASE`, which is itself a complete,
+  restorable snapshot and also becomes the runtime's base). All 7
+  `JS_ReadSnapshot` sites (resume, branch, join, join-value,
+  join-throw, join-aggregate, cancel) now go through one
+  `read_snapshot()` helper: when `DURABLETS_BASE_PATH` names a
+  keyframe, the snapshot file is read as a delta against it;
+  otherwise a plain full read (the legacy path). The engine
+  version is source-derived from this file, so the format change
+  bumps it (`dquickts-96a9a79+durablets-47f512ac166dbcc1`, was
+  `...1a31de6141d8d`) and old snapshots fail loudly on version
+  mismatch via `assertEngineVersion` instead of loading wrongly.
+- `apps/agentts/src/host.ts` — the chain. Layout (forced by the
+  BRA-76 C1 test: `blobs/<run>.snap` must stay > 1000 bytes after
+  a 50-sleep run, and a counter-only delta is ~150–300 B):
+  `blobs/<run>.snap` = verbatim copy of the latest KEYFRAME;
+  `blobs/<run>.delta` = latest delta bytes; `blobs/keyframes/
+  <sha256>.snap` = immutable content-addressed keyframes, shared
+  across forks; `blobs/<run>.checkpoint.json` = the manifest
+  (`bra90-chain-v1`: keyframeHash, deltaHash,
+  prevCheckpointHash, ordinal, sinceKeyframe, baseSize,
+  lastDelta, trigger), written LAST via tmp+fsync+rename — the
+  commit point. `decideSave(prev)` is pure + recomputable: the
+  slice env (`chainEnvFor`, before the slice) and `storeBlob`
+  (after it) call it with the same manifest, so they always
+  agree. Keyframes at ordinals 0, 25, 50, … (at most 24
+  consecutive deltas at interval 25) or when the previous delta
+  exceeds 75% of the estimated full snapshot (interval first).
+  `DURABLETS_KEYFRAME_INTERVAL`, default 25, 0 = full-only.
+  Branches extend the parent's chain at the fork point
+  (`storeBlob(child, snap, parentManifest)`); the child's first
+  save is a delta against the shared keyframe. Pruning is
+  mark-and-sweep over all manifests, after the new manifest
+  commits; a completed run's manifest is discarded (unpinning
+  its keyframe). A run that fails with a throw keeps its
+  checkpoint (the DriveCapError message promises the blob
+  intact).
+- `apps/agentts/tests/test-bra90.ts` (+ 3 workflows) — the
+  fault-injection proof + chain checks, wired into `run.sh`
+  after the bra112 suite. See the test's header for the case
+  list. The suite passes standalone (2026-11-17): exit 0, 147
+  checks green. Headline results are in "Measured numbers"
+  below.
+
+### Measured numbers (real runs, standalone suite)
+
+- Write amplification, 30-sleep run: keyframe 34,196 B; 2
+  keyframes 68,399 B + 28 deltas 8,036 B = **76,435 B written
+  vs 1,025,880 B for full snapshots every suspension — ratio
+  0.075 (13.4× less written)**. The 4.71×/10.35× prototype
+  totals were 500-suspension harness numbers; this is the
+  same effect measured on a real 30-suspension run, and it is
+  larger here because the counter-only deltas are ~287 B
+  against a 34 KB keyframe. Re-measured inside the full
+  `run.sh` verification (staged AND copy-path, identical):
+  keyframe 34,182 B, written-total 76,211 B vs 1,025,460 B,
+  **ratio 0.074**.
+- Ratio rule, accumulate run (1 KB first chunk, then 100 KB per
+  suspension): saves [35,443, 101,296, 201,296, 335,452,
+  401,291] bytes, base at ordinals 0 and 3 — the ratio rebase
+  fired at ordinal 3, not 2: at ordinal 2 the test is
+  4×101,296 = 405,184 vs 3×(35,443+101,296) = 410,217, just
+  under 0.75 (the real base is 35 KB, not the ~16 KB the
+  prototype's small-heap estimate assumed). At ordinal 3 it
+  fires decisively (805,184 vs 710,217). The rule works as
+  specified; the firing ordinal depends on the real base size,
+  which the test asserts as "ordinal 2 or 3".
+- Fork: both branch slices wrote deltas only, each 1,805 B vs
+  the 34,401 B keyframe (19× smaller), against the one shared
+  keyframe; the join completed with both branch names.
+- Fault injection, all loud, none silent: truncated delta and
+  truncated keyframe both end "C host crashed resuming … 3
+  times … (last blob intact at blobs/<run>.snap)" with no
+  result; wrong-hash pairing is rejected by the engine ("the
+  delta was not written from this base", in the slice log);
+  missing delta / missing keyframe / corrupt manifest all fail
+  with the named BRA-90 error and no result (never a bare-base
+  resume).
+- Legacy migration: a keyframe-suspension blob with manifest +
+  delta deleted resumes directly (29 trap events, no replay),
+  the first post-resume suspension writes a base + fresh
+  manifest, result correct.
+
+### Deviations from the report (recorded, not silent)
+
+1. **No host-side hash check on load.** The report (§8.7)
+   recommends hash-checking both files on load. That would
+   change the crash-recovery error path BRA-76 A2 / BRA-83 B1
+   pin (a truncated `.snap` must surface as "C host crashed
+   resuming", naming the blob path). The engine is the
+   load-time verifier instead: it rejects truncated and
+   mismatched pairs loudly (measured in §4, re-proven by
+   test-bra90 D1–D3). Manifest hashes are still recorded and
+   verified at store time. The safety property — loud failure,
+   never a silently wrong resume — is preserved; only where
+   the failure is detected moved.
+2. **A manifest-less delta checkpoint rewinds, it does not
+   fail.** Deleting a manifest + delta from a chain blob leaves
+   `.snap` = the ordinal-0 keyframe, not the latest checkpoint
+   (that is what `.snap` holds by design). The run resumes
+   from the keyframe and replays the recorded trap answers
+   from the journal (BRA-75) — the result stays correct, but
+   it is a replay, not a direct resume. This is the safe
+   fallback, not a silent rewind: no trap is re-dispatched
+   (the journal's recorded answers are delivered), and the
+   test documents it rather than proving the false claim that
+   the manifest-less case is a legacy resume. A TRUE legacy
+   blob (`.snap` = the latest full snapshot) resumes directly;
+   scenario G strands at a keyframe suspension to construct
+   exactly that.

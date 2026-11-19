@@ -34,10 +34,15 @@ export const HOLD = Symbol("adapter-hold");
  * is the identity), `tokens` the tokens consumed when known
  * (no adapter reports tokens today — the field exists so the
  * journal can carry them when one does). The host journals both
- * on the trap-result/trap-error event. */
+ * on the trap-result/trap-error event. `auto` (BRA-119) marks a
+ * gate answer no human gave: an adapter sets it when it answers
+ * a gate by itself — the mock adapter's auto-"yes" — so the host
+ * can log it loudly and mark the journal event. A delivered
+ * (human) answer and a queued (deliberate) answer never carry
+ * it. Like worker/tokens it never crosses into the engine. */
 export type TrapAnswer =
-  | { value: unknown; worker?: string; tokens?: number }
-  | { throw: unknown; worker?: string; tokens?: number };
+  | { value: unknown; worker?: string; tokens?: number; auto?: boolean }
+  | { throw: unknown; worker?: string; tokens?: number; auto?: boolean };
 
 /** What the host passes to the adapter for one trap. */
 export interface TrapContext {

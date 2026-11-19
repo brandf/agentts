@@ -346,7 +346,7 @@ twice (implementation vs seam) are in
 | Adapter | What it does |
 | --- | --- |
 | `mock` (`plugins/mock/src/mock-adapter.ts`, seam `plugins/mock/src/adapter.ts`) | Canned answers: job specs `score`/`verify`/`aggregate` by table, `exec echo hi`, `cat <file>` reads the file for real, gate auto-yes (or held with `--gates hold`), decide via the local decision model. The default outside the production state dir. |
-| `direct` (`plugins/direct/src/direct-adapter.ts`, seam `plugins/direct/src/adapter.ts`) | Real execution: one worker process per job trap (`bun workflows/worker.ts '<json>'`, genuine computation over the real input, result JSON from the last stdout line); real `exec`; held gates; local decision model for `decide`. The default on the production state dir. |
+| `direct` (`plugins/direct/src/direct-adapter.ts`, seam `plugins/direct/src/adapter.ts`) | Real execution: one worker process per job trap (`bun workflows/library/worker.ts '<json>'`, genuine computation over the real input, result JSON from the last stdout line); real `exec`; held gates; local decision model for `decide`. The default on the production state dir. |
 | `muse` (`plugins/muse/src/muse-adapter.ts`, seam `plugins/muse/src/adapter.ts`) | Enqueues each job on the get-job/complete-job pool queue (Section 5) and blocks until a worker completes it. Auto-starts the queue server in the state dir when none answers. |
 | `briefing` (`plugins/briefing/`) | A worked plugin example; untouched by the BRA-56 fix below. |
 
@@ -744,7 +744,7 @@ at confidence 0.5 when there is no signal. It computes from the
 question content; it is not a general reasoner. A full agent is
 a `job`, not a `decide`.
 
-**Library workflows.** `JudgeFixLoop` (`workflows/judge-fix-loop.ts`)
+**Library workflows.** `JudgeFixLoop` (`workflows/library/judge-fix-loop.ts`)
 is generic over the loop and concrete at the traps: the library
 owns the loop logic (fan-out via `all`, reduce, decide cadence,
 convergence rule) and calls the traps itself — `job`/`decide` with
@@ -775,7 +775,10 @@ Default state dir is `./.agentts-state` in the working directory
 | Path | Contents |
 | --- | --- |
 | `journals/<run>.journal` | JSONL, the source of truth (Section 7) |
-| `blobs/<run>.snap` | Snapshot from the last successful suspension, sha256-verified; the only snapshot the host trusts on resume |
+| `blobs/<run>.snap` | Verbatim copy of the latest KEYFRAME bytes (never a bare delta); the file resume trusts for base/keyframe checkpoints |
+| `blobs/<run>.delta` | Latest delta bytes (verbatim copy of the live slice snap at a delta suspension) |
+| `blobs/keyframes/<sha256>.snap` | Immutable keyframe bytes, content-addressed, shared across forks (BRA-90) |
+| `blobs/<run>.checkpoint.json` | Checkpoint manifest (`bra90-chain-v1`: keyframe/delta hashes, chain link, ordinal, trigger), written last — the commit point (BRA-90) |
 | `slices/<run>.{snap,out,log}` | Transient live snapshot, captured stdout, C-host stderr log |
 | `slices/<run>.result.json` | Run result file written by the C host on completion |
 | `runs/<run>.json` | Persisted registry entry (snapshot path, exit code, workflow path, frozen copy, engine version) |
@@ -815,11 +818,11 @@ $ cd apps/agentts
 $ bun src/cli.ts version
 agentts-host v0 (BRA-44), typescript 5.9.3
 
-$ bun src/cli.ts check workflows/hello.ts --state-dir /tmp/bra64-qs/state
-CHECK OK workflows/hello.ts: 1 trap site(s), entry hello(HelloInput): HelloResult,
+$ bun src/cli.ts check workflows/library/hello.ts --state-dir /tmp/bra64-qs/state
+CHECK OK workflows/library/hello.ts: 1 trap site(s), entry hello(HelloInput): HelloResult,
 gate + checker passed (typescript 5.9.3, checker bra29.3)
 
-$ bun src/cli.ts run workflows/hello.ts --run-id run-hello \
+$ bun src/cli.ts run workflows/library/hello.ts --run-id run-hello \
     --input-file /tmp/bra64-qs/hello-input.json --wait \
     --state-dir /tmp/bra64-qs/state
 {
@@ -838,7 +841,7 @@ shape (Section 7) — run-start enrichment, trap with site, suspend:
 ```json
 {"event":"lifecycle","lifecycle":"started","runId":"run-hello",
  "workflowHash":"7cda9d93f9f4ff62f9a2a5eda70beb4841bc507b5acdacfdcaa6bc6e20c190e3",
- "workflowPath":".../apps/agentts/workflows/hello.ts",
+ "workflowPath":".../apps/agentts/workflows/library/hello.ts",
  "submittedAt":"2026-11-16T22:01:05.178Z",
  "bundlePath":"/tmp/bra64-qs/state/runs/run-hello.bundle.js",
  "bundleMapPath":"/tmp/bra64-qs/state/runs/run-hello.bundle.js.map",
@@ -859,7 +862,7 @@ shape (Section 7) — run-start enrichment, trap with site, suspend:
 `agentts profile run-hello` renders the same run as a timeline
 with counters (1 trap, 1 result, 0 errors, 1 clock-advance,
 8ms total wall time). The state dir also held the frozen closure
-(`frozen/<hash>/workflows/hello.ts` + `src/agentts.ts`), the
+(`frozen/<hash>/workflows/library/hello.ts` + `src/agentts.ts`), the
 extraction cache, `queue.json` (+ `.bak`), the blob
 (`blobs/run-hello.snap`), and the pinned bundle + map.
 

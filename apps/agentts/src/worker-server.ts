@@ -7,6 +7,58 @@
 // synchronous (no awaits in the mutation path) and every mutation is
 // written through to disk before the response is sent.
 //
+// Driver endpoints (BRA-116): the tick agent drives the queue over
+// HTTP instead of spawning `bun src/cli.ts` per action (BRA-100:
+// 11 fresh Bun processes, ~2.3s per unit of work, ~350ms of it the
+// cli.ts module graph per spawn). The six endpoints mirror the CLI
+// driver commands exactly — same Host calls, same refusal semantics,
+// same outputs — so the operator path (CLI) and the tick-agent path
+// (HTTP) cannot drift apart:
+//
+//   POST /queue/run        {entries, repair, failed}   — queue run
+//   POST /deliver-result   {runId} -> DeliveryRecord   — deliver-result
+//   GET  /queue/list       {entries}                   — queue list
+//   GET  /deliveries      {deliveries}                — deliveries
+//   POST /escalate         {kind, runId?, reason, detail?} -> {path}
+//   POST /deliver-gate     {runId, answer} -> {ok, runId}
+//
+// Host lifecycle (decided BRA-116, see makeDriverHost in host.ts):
+// a fresh Host is constructed PER REQUEST, exactly like the CLI does
+// — a Host held by the server would go stale the moment another
+// process drives the same state dir, and would pin every journal in
+// memory forever (BRA-98). Cost ~8ms at bench sizes (constructor
+// 0.4–1.6ms + adapter load, measured standalone).
+//
+// Driver lock: the server drive holds the file lock (runQueue
+// acquires it with the server's pid), so a concurrent CLI `queue
+// run` refuses loudly as today — and a CLI drive holding the lock
+// makes POST /queue/run answer 409. Drives are serialized by that
+// same lock, in-process as well as across processes: two concurrent
+// POST /queue/run calls cannot both hold it. A server restart
+// mid-drive leaves a stranded "running" entry + a lock with a dead
+// pid; the next drive repairs it (BRA-72) — see test-bra116.ts.
+//
+// The server names itself: start() sets AGENTTS_WORKER_SERVER to
+// its own URL, so driver Hosts constructed inside this process
+// notify events to THIS server (not the default port) and the muse
+// adapter health-checks this server instead of auto-starting a
+// second one on the default port.
+//
+// Driver Hosts notify in-process (BRA-116): driverHost() passes the
+// server's emitEvent as the Host's onEvent sink (see HostConfig in
+// host.ts). A driver Host must not notify over HTTP to itself —
+// notifyEvent's synchronous curl POST blocks this server's event
+// loop while it waits for a response the blocked loop cannot serve,
+// burning its whole 2s timeout per terminal drive and losing the
+// event. The CLI's Hosts notify over HTTP as before (a separate
+// process, whose loop is free to answer).
+//
+// Submit stays CLI (decided BRA-116): the submitter is the operator
+// / coordinator, not the tick agent, and a /submit endpoint would
+// move gate+extract+validation into the server — a bigger API and
+// process-lifecycle surface. The remaining ~0.5s submit spawn is the
+// production path's floor after this change; see AUDIT-BRA116.md.
+//
 // Crash/timeout policy (decided BRA-48): a running job whose lease
 // expires is RE-QUEUED (attempts incremented), not failed — a worker
 // crash looks exactly like a timeout, and the work is retried by
@@ -55,6 +107,8 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import * as crypto from "node:crypto";
 import { atomicWriteFile, CorruptionLog, type CorruptionRecord } from "./corruption";
+import { Host, HostRefusalError, makeDriverHost } from "./host";
+import { LocalTaskBackend, syncRunToTask } from "./task-backend";
 import { DEFAULT_DISPATCH_AGING_MS, DispatchScheduler } from "./scheduler";
 import { CostModel } from "./cost-model";
 import { QuotaTracker } from "./quotas";
@@ -142,6 +196,13 @@ export interface WorkerServerConfig {
   maxTokensPerHour: number;
   /** Ms of waiting per one-step priority improvement at dispatch. */
   dispatchAgingMs: number;
+  /** Workers-config file for the driver Host (BRA-111): --workers-config
+   * flag or AGENTTS_WORKERS_CONFIG env. The driver reads it fresh on
+   * every drive (makeDriverHost) and registers its scripts on the
+   * DirectAdapters it builds — so a run submitted with --adapter
+   * direct + a workers-config keeps its workers through the queue
+   * drive. Absent: no extra workers (the pre-BRA-111 behavior). */
+  workersConfigPath?: string;
 }
 
 export function serverConfigFromArgs(args: string[]): WorkerServerConfig {
@@ -167,6 +228,8 @@ export function serverConfigFromArgs(args: string[]): WorkerServerConfig {
     dispatchAgingMs: Number(
       flag(args, "--dispatch-aging-ms") ?? process.env.AGENTTS_DISPATCH_AGING_MS ?? DEFAULT_DISPATCH_AGING_MS,
     ),
+    workersConfigPath:
+      flag(args, "--workers-config") ?? process.env.AGENTTS_WORKERS_CONFIG ?? undefined,
   };
 }
 
@@ -1144,6 +1207,147 @@ export class WorkerServer {
     return { status: 200, body: this.store.jobs[jobId] };
   }
 
+  // ------------------------------------------------------------ driver (BRA-116)
+  /** One driver Host per request (see makeDriverHost in host.ts): a
+   * fresh Host loads current disk state, exactly like the CLI's
+   * `queue run` does. */
+  private driverHost(): Promise<Host> {
+    // The driver Host notifies in-process (BRA-116): its events
+    // land in this server's own queue via emitEvent, instead of a
+    // synchronous HTTP POST to itself that would block this
+    // server's event loop for its whole 2s timeout per terminal
+    // drive — and lose the event.
+    // BRA-111: the driver also carries the server's workers-config
+    // (see serverConfigFromArgs), so queue drives honor it.
+    return makeDriverHost(this.config.stateDir, {
+      onEvent: (type, detail) => this.emitEvent(type, detail),
+      workersConfigPath: this.config.workersConfigPath,
+    });
+  }
+
+  /** Drive the queue, mirroring `agentts queue run` (src/cli.ts
+   * cmdQueue "run") exactly: runQueue — which repairs stranded
+   * entries under the driver lock (the report is lastRepairReport)
+   * — then the --task sync for terminal runs. A live driver holding
+   * the lock is a 409 (HostRefusalError): the same refusal the CLI
+   * prints, as an HTTP status. */
+  private async driveQueue(): Promise<{ status: number; body: unknown }> {
+    const host = await this.driverHost();
+    let q;
+    try {
+      q = await host.runQueue();
+    } catch (e) {
+      if (e instanceof HostRefusalError) return { status: 409, body: { error: e.message } };
+      throw e;
+    }
+    // --task sync, as cmdQueue "run" does it: a terminal run with a
+    // taskId syncs to the task backend, or the task never learns the
+    // run completed.
+    for (const e of q) {
+      if (e.taskId && (e.status === "done" || e.status === "failed")) {
+        const backend = new LocalTaskBackend(host.stateDir);
+        await backend.setTaskRun(e.taskId, e.runId);
+        await syncRunToTask(backend, e.taskId, e.runId, host.journal(e.runId));
+      }
+    }
+    return {
+      status: 200,
+      body: {
+        entries: q,
+        repair: host.lastRepairReport,
+        failed: q.some((e) => e.status === "failed"),
+      },
+    };
+  }
+
+  /** Deliver one run's result, mirroring `agentts deliver-result`:
+   * the outbox record for a terminal run. Unknown runId is a 404;
+   * a run that is not terminal yet is a 400 (there is nothing to
+   * deliver) — both loud, never a silent empty record. `deliveredBy`
+   * is optional (default "tick-agent", as the CLI); the test
+   * standin passes its own name so the record names the driver. */
+  private async deliverResult(body: any): Promise<{ status: number; body: unknown }> {
+    const runId = body?.runId;
+    if (typeof runId !== "string" || !runId) {
+      return { status: 400, body: { error: "deliver-result requires a runId" } };
+    }
+    const host = await this.driverHost();
+    const exists =
+      host.readQueue().some((e) => e.runId === runId) ||
+      host.registryHas(runId) ||
+      host.journal(runId).length > 0;
+    if (!exists) return { status: 404, body: { error: `no run ${runId} in ${host.stateDir}` } };
+    try {
+      const record = host.recordDelivery(
+        runId,
+        typeof body?.deliveredBy === "string" ? body.deliveredBy : "tick-agent",
+      );
+      return { status: 200, body: record };
+    } catch (e) {
+      return { status: 400, body: { error: e instanceof Error ? e.message : String(e) } };
+    }
+  }
+
+  /** Queue list / deliveries, mirroring `agentts queue list` and
+   * `agentts deliveries --json`: the current queue entries and the
+   * outbox records, as JSON. */
+  private async queueList(): Promise<{ status: number; body: unknown }> {
+    const host = await this.driverHost();
+    return { status: 200, body: { entries: host.readQueue() } };
+  }
+  private async deliveries(): Promise<{ status: number; body: unknown }> {
+    const host = await this.driverHost();
+    return { status: 200, body: { deliveries: host.listDeliveries() } };
+  }
+
+  /** Escalate, mirroring `agentts escalate '<json>'`: kind + a
+   * non-empty reason are required (400 otherwise); the record lands
+   * in <stateDir>/escalations/ and the watchdog surfaces it. */
+  private async escalate(body: any): Promise<{ status: number; body: unknown }> {
+    if (!body || typeof body !== "object" || Array.isArray(body)) {
+      return { status: 400, body: { error: `escalate: expected a JSON object {"kind","runId"?,"reason","detail"?}` } };
+    }
+    const rec = body as { kind?: unknown; runId?: unknown; reason?: unknown; detail?: unknown };
+    if (typeof rec.kind !== "string" || typeof rec.reason !== "string" || !rec.reason) {
+      return { status: 400, body: { error: "escalate: requires a kind and a non-empty reason" } };
+    }
+    const host = await this.driverHost();
+    try {
+      const p = host.writeEscalation({
+        kind: rec.kind as "gate-held" | "stuck-running" | "other",
+        ...(typeof rec.runId === "string" ? { runId: rec.runId } : {}),
+        reason: rec.reason,
+        ...(rec.detail !== undefined ? { detail: rec.detail } : {}),
+      });
+      return { status: 200, body: { path: p } };
+    } catch (e) {
+      return { status: 400, body: { error: e instanceof Error ? e.message : String(e) } };
+    }
+  }
+
+  /** Deliver a gate answer, mirroring `agentts deliver-gate`: the
+   * answer is queued for the run's next gate trap and a held entry
+   * is re-queued, so the next drive resumes it. No suspended run
+   * is a 404 (the CLI's "no suspended run" refusal); no gate
+   * pending is a 400. The answer is any JSON value — including null
+   * — so presence is checked by key, not by truthiness. */
+  private async deliverGate(body: any): Promise<{ status: number; body: unknown }> {
+    const runId = body?.runId;
+    if (typeof runId !== "string" || !runId || !body || !("answer" in body)) {
+      return { status: 400, body: { error: "deliver-gate requires a runId and an answer" } };
+    }
+    const host = await this.driverHost();
+    if (!host.registryHas(runId)) {
+      return { status: 404, body: { error: `no suspended run ${runId} in ${host.stateDir}` } };
+    }
+    try {
+      host.deliverGate(runId, body.answer);
+      return { status: 200, body: { ok: true, runId } };
+    } catch (e) {
+      return { status: 400, body: { error: e instanceof Error ? e.message : String(e) } };
+    }
+  }
+
   // ------------------------------------------------------------ tick (BRA-65)
   /**
    * The tick agent's blocking long-poll. Holds until a system event
@@ -1232,6 +1436,14 @@ export class WorkerServer {
 
   /** Start listening. Returns the bound port. */
   start(): number {
+    // BRA-116: this process IS the worker server at this URL. Name
+    // it, so driver Hosts constructed inside this process (the
+    // driver endpoints) post their notifyEvent calls to THIS server
+    // — not the default port — and the muse adapter health-checks
+    // this server instead of auto-starting a second one on the
+    // default port. A test that starts a server on a throwaway port
+    // gets the same behavior for its own Hosts.
+    process.env.AGENTTS_WORKER_SERVER = `http://127.0.0.1:${this.config.port}`;
     const handler = async (req: Request): Promise<Response> => {
       const url = new URL(req.url);
       const json = (body: unknown, status = 200): Response =>
@@ -1288,6 +1500,36 @@ export class WorkerServer {
         }
         if (req.method === "POST" && url.pathname === "/tick-beat") {
           const r = this.tickBeat();
+          return json(r.body, r.status);
+        }
+        if (req.method === "POST" && url.pathname === "/queue/run") {
+          const r = await this.driveQueue();
+          return json(r.body, r.status);
+        }
+        if (req.method === "POST" && url.pathname === "/deliver-result") {
+          const body = await this.readJson(req);
+          if (body === null) return json({ error: "deliver-result body must be JSON" }, 400);
+          const r = await this.deliverResult(body);
+          return json(r.body, r.status);
+        }
+        if (req.method === "GET" && url.pathname === "/queue/list") {
+          const r = await this.queueList();
+          return json(r.body, r.status);
+        }
+        if (req.method === "GET" && url.pathname === "/deliveries") {
+          const r = await this.deliveries();
+          return json(r.body, r.status);
+        }
+        if (req.method === "POST" && url.pathname === "/escalate") {
+          const body = await this.readJson(req);
+          if (body === null) return json({ error: "escalate body must be JSON" }, 400);
+          const r = await this.escalate(body);
+          return json(r.body, r.status);
+        }
+        if (req.method === "POST" && url.pathname === "/deliver-gate") {
+          const body = await this.readJson(req);
+          if (body === null) return json({ error: "deliver-gate body must be JSON" }, 400);
+          const r = await this.deliverGate(body);
           return json(r.body, r.status);
         }
         if (req.method === "POST" && url.pathname === "/event") {
@@ -1417,4 +1659,5 @@ if (import.meta.main) {
   server.start();
   console.log(`worker queue state dir: ${server.dir}`);
   console.log(`jobspec dir: ${config.jobspecDir}`);
+  if (config.workersConfigPath) console.log(`workers config: ${config.workersConfigPath}`);
 }

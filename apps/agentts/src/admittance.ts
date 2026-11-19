@@ -99,7 +99,7 @@ export function resolveWorkflow(task: Task, config: AdmitConfig): string | null 
     const name = label.slice("workflow:".length).trim();
     if (!name) return null;
     if (name.includes("/") || name.endsWith(".ts") || name.endsWith(".js")) return name;
-    const dir = config.workflowsDir ?? "workflows";
+    const dir = config.workflowsDir ?? "workflows/library";
     return `${dir}/${name}.ts`;
   }
   return null;

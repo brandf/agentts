@@ -84,10 +84,10 @@ bun src/cli.ts version
 # agentts-host v0 (BRA-44), typescript 5.9.3
 
 # 5. Run the hello quickstart (README.md, "Quickstart").
-#    A hello workflow ships at apps/agentts/workflows/hello.ts.
+#    A hello workflow ships at apps/agentts/workflows/library/hello.ts.
 #    ~13s for the three commands.
-bun src/cli.ts check workflows/hello.ts --state-dir /tmp/agentts-quickstart/state
-bun src/cli.ts run workflows/hello.ts --run-id run-hello \
+bun src/cli.ts check workflows/library/hello.ts --state-dir /tmp/agentts-quickstart/state
+bun src/cli.ts run workflows/library/hello.ts --run-id run-hello \
   --input-file /tmp/hello-input.json --wait \
   --state-dir /tmp/agentts-quickstart/state
 # Inline JSON works too: --input '{"name":"world"}' instead of

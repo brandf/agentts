@@ -14,7 +14,7 @@
  * and re-queueing resumes the run.
  *
  *   S1. Direct worker: submit a run suspended on an exec trap,
- *       edit workflows/worker.ts mid-run (judge score 0 -> 0.99):
+ *       edit workflows/library/worker.ts mid-run (judge score 0 -> 0.99):
  *       the resume is refused loudly naming worker.ts, the run is
  *       failed, the blob is kept — then restore the file, re-queue
  *       by hand, and the run completes with the ORIGINAL score 0
@@ -24,15 +24,15 @@
  *   S3. Decide: same run shape, edit src/decision-model.ts
  *       mid-run (mean >= threshold forced true): refused loudly
  *       naming decision-model.ts.
- *   S4. Mock adapter: gate-held run, edit workflows/bugfix-worker.ts
+ *   S4. Mock adapter: gate-held run, edit workflows/dogfood/bugfix-worker.ts
  *       mid-run: refused loudly naming it (the live runBugfix
  *       import) — then restore, re-queue, and the run completes
  *       with the simulated reproduce result.
- *   S5. Briefing adapter: edit workflows/briefing-worker.ts
+ *   S5. Briefing adapter: edit workflows/dogfood/briefing-worker.ts
  *       mid-run: refused loudly naming it (refusal-only: the
  *       discover step does live arXiv fetches, so no control leg
  *       executes it).
- *   S6. Briefing-prep exec: edit workflows/briefing-prep.ts
+ *   S6. Briefing-prep exec: edit workflows/dogfood/briefing-prep.ts
  *       mid-run: refused loudly naming it — then restore, re-queue,
  *       and the run completes with prep exit code 0.
  *   S7. Pool jobspec snapshot (worker-server level): enqueue a job,
@@ -88,13 +88,13 @@ const WORKFLOW_MOCK = path.join(ROOT, "tests", "workflows", "workflow-bra89-mock
 const WORKFLOW_BRIEFING = path.join(ROOT, "tests", "workflows", "workflow-bra89-briefing.ts");
 const WORKFLOW_PREP = path.join(ROOT, "tests", "workflows", "workflow-bra89-briefing-prep.ts");
 
-const WORKER = path.join(ROOT, "workflows", "worker.ts");
+const WORKER = path.join(ROOT, "workflows", "library", "worker.ts");
 const DECISION_MODEL = path.join(ROOT, "src", "decision-model.ts");
 const JOBSPEC_JUDGE = path.join(ROOT, "plugins", "muse", "jobspecs", "judge.md");
 const JOBSPEC_IMPROVE_JUDGE = path.join(ROOT, "plugins", "muse", "jobspecs", "improve-judge.md");
-const BUGFIX_WORKER = path.join(ROOT, "workflows", "bugfix-worker.ts");
-const BRIEFING_WORKER = path.join(ROOT, "workflows", "briefing-worker.ts");
-const BRIEFING_PREP = path.join(ROOT, "workflows", "briefing-prep.ts");
+const BUGFIX_WORKER = path.join(ROOT, "workflows", "dogfood", "bugfix-worker.ts");
+const BRIEFING_WORKER = path.join(ROOT, "workflows", "dogfood", "briefing-worker.ts");
+const BRIEFING_PREP = path.join(ROOT, "workflows", "dogfood", "briefing-prep.ts");
 
 const FAILURES: string[] = [];
 function fail(msg: string): void {
@@ -331,7 +331,7 @@ async function scenarioS1(): Promise<void> {
   const runId = "bra89-s1";
   const marker = path.join(WORKDIR, "bra89-s1.marker");
   submit(stateDir, WORKFLOW, runId, { markerFile: marker, sleepMs: 5000 }, "direct");
-  check(pinHas(stateDir, runId, "workflows/worker.ts"), "S1 PIN: trap pin includes workflows/worker.ts");
+  check(pinHas(stateDir, runId, "workflows/library/worker.ts"), "S1 PIN: trap pin includes workflows/library/worker.ts");
   check(pinHas(stateDir, runId, "plugins/muse/jobspecs/judge.md"), "S1 PIN: trap pin includes the judge jobspec");
   check(pinHas(stateDir, runId, "src/decision-model.ts"), "S1 PIN: trap pin includes decision-model.ts");
   const child = await strandRun(stateDir, runId, marker);
@@ -343,7 +343,7 @@ async function scenarioS1(): Promise<void> {
     "edited judge score",
   );
   driveFails(stateDir, "S1");
-  assertRefused(stateDir, runId, marker, "workflows/worker.ts", "S1");
+  assertRefused(stateDir, runId, marker, "workflows/library/worker.ts", "S1");
   // Restore + re-queue by hand: the run resumes and completes with
   // the ORIGINAL score 0 and decision "revise" — the edited worker
   // (0.99) never answers a trap.
@@ -400,7 +400,7 @@ async function scenarioS4(): Promise<void> {
   const stateDir = stateDirFor("s4");
   const runId = "bra89-s4";
   submit(stateDir, WORKFLOW_MOCK, runId, { repoRoot: ROOT, workflow: "tests/workflows/workflow-judge-fix-loop.ts" }, "mock", ["--gates", "hold"]);
-  check(pinHas(stateDir, runId, "workflows/bugfix-worker.ts"), "S4 PIN: trap pin includes workflows/bugfix-worker.ts (the live runBugfix import)");
+  check(pinHas(stateDir, runId, "workflows/dogfood/bugfix-worker.ts"), "S4 PIN: trap pin includes workflows/dogfood/bugfix-worker.ts (the live runBugfix import)");
   // Drive in a child: the run holds at the gate and the drive exits
   // on its own (rc 0, no failed entries) — no SIGKILL needed. The
   // drive process builds its own host, so --gates hold must be
@@ -418,7 +418,7 @@ async function scenarioS4(): Promise<void> {
   const dg = cli(["deliver-gate", runId, '{"answer":"yes"}', "--state-dir", stateDir]);
   check(dg.rc === 0, `S4 DELIVER OK: deliver-gate exited 0 (got ${dg.rc}${dg.rc !== 0 ? ` err=${dg.err.slice(0, 200)}` : ""})`);
   driveFails(stateDir, "S4");
-  assertRefused(stateDir, runId, path.join(WORKDIR, "bra89-s4.marker"), "workflows/bugfix-worker.ts", "S4");
+  assertRefused(stateDir, runId, path.join(WORKDIR, "bra89-s4.marker"), "workflows/dogfood/bugfix-worker.ts", "S4");
   // The gate trap's answer was journaled (trap-dispatched) before
   // the job trap refused, so the recovery drive re-delivers it
   // without needing another deliver-gate.
@@ -443,12 +443,12 @@ async function scenarioS5(): Promise<void> {
   const seenPath = path.join(WORKDIR, "bra89-s5-seen.md");
   fs.writeFileSync(seenPath, "");
   submit(stateDir, WORKFLOW_BRIEFING, runId, { markerFile: marker, sleepMs: 5000, seenPath, endDate: "2026-11-16" }, "briefing");
-  check(pinHas(stateDir, runId, "workflows/briefing-worker.ts"), "S5 PIN: trap pin includes workflows/briefing-worker.ts");
+  check(pinHas(stateDir, runId, "workflows/dogfood/briefing-worker.ts"), "S5 PIN: trap pin includes workflows/dogfood/briefing-worker.ts");
   const child = await strandRun(stateDir, runId, marker);
   children.push(child);
   editFile(BRIEFING_WORKER, "dogfood/0.1", "dogfood/9.9-bra89-test-edit", "edited worker user-agent");
   driveFails(stateDir, "S5");
-  assertRefused(stateDir, runId, marker, "workflows/briefing-worker.ts", "S5");
+  assertRefused(stateDir, runId, marker, "workflows/dogfood/briefing-worker.ts", "S5");
   restoreOriginals();
   snapshotOriginals();
 }
@@ -460,12 +460,12 @@ async function scenarioS6(): Promise<void> {
   const marker = path.join(WORKDIR, "bra89-s6.marker");
   const scratchDir = path.join(WORKDIR, "bra89-s6-scratch");
   submit(stateDir, WORKFLOW_PREP, runId, { markerFile: marker, sleepMs: 5000, scratchDir }, "direct");
-  check(pinHas(stateDir, runId, "workflows/briefing-prep.ts"), "S6 PIN: trap pin includes workflows/briefing-prep.ts (closure scan found the exec'd script)");
+  check(pinHas(stateDir, runId, "workflows/dogfood/briefing-prep.ts"), "S6 PIN: trap pin includes workflows/dogfood/briefing-prep.ts (closure scan found the exec'd script)");
   const child = await strandRun(stateDir, runId, marker);
   children.push(child);
   editFile(BRIEFING_PREP, "copied: copies.length", "copied: 999 /* bra89-test-edit */", "edited prep copy count");
   driveFails(stateDir, "S6");
-  assertRefused(stateDir, runId, marker, "workflows/briefing-prep.ts", "S6");
+  assertRefused(stateDir, runId, marker, "workflows/dogfood/briefing-prep.ts", "S6");
   restoreOriginals();
   snapshotOriginals();
   check(setQueueStatus(stateDir, runId, "queued"), "S6 REQUEUE: entry set back to queued by hand");
@@ -543,7 +543,7 @@ async function scenarioS7(): Promise<void> {
     // A worker-loop run against the edited file must read the
     // snapshot, not the live file — and complete the job.
     const workersJson = path.join(WORKDIR, "bra89-s7-workers.json");
-    fs.writeFileSync(workersJson, JSON.stringify({ "improve-judge": path.join(ROOT, "workflows", "worker.ts") }));
+    fs.writeFileSync(workersJson, JSON.stringify({ "improve-judge": path.join(ROOT, "workflows", "library", "worker.ts") }));
     const workspaces = path.join(WORKDIR, "bra89-s7-workspaces");
     const loop = spawn(
       [BUN, path.join(ROOT, "plugins", "muse", "worker-loop.ts"), "--server", serverUrl, "--worker-id", "w-bra89", "--workspace-root", workspaces, "--workers-config", workersJson, "--poll-ms", "300", "--once"],
@@ -579,7 +579,7 @@ async function scenarioS8(): Promise<void> {
   const files = pinFiles(stateDir, runId);
   check(files.length > 0, `S8 PIN EXISTS: queue entry records a trap pin (${files.length} files)`);
   for (const suffix of [
-    "workflows/worker.ts",
+    "workflows/library/worker.ts",
     "plugins/muse/jobspecs/judge.md",
     "src/decision-model.ts",
     "plugins/direct/src/direct-adapter.ts",
@@ -587,7 +587,7 @@ async function scenarioS8(): Promise<void> {
   ]) {
     check(pinHas(stateDir, runId, suffix), `S8 PIN INCLUDES: ${suffix}`);
   }
-  for (const suffix of ["workflows/bugfix-worker.ts", "workflows/briefing-worker.ts", "workflows/briefing-prep.ts"]) {
+  for (const suffix of ["workflows/dogfood/bugfix-worker.ts", "workflows/dogfood/briefing-worker.ts", "workflows/dogfood/briefing-prep.ts"]) {
     check(!pinHas(stateDir, runId, suffix), `S8 PIN EXCLUDES: ${suffix} (no spec references it)`);
   }
   const e = queueEntry(stateDir, runId);

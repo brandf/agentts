@@ -1,0 +1,75 @@
+{
+  "commit": {
+    "args": [
+      "-c",
+      "printf 'plan-driven-work bra110-plan: 3 executed, 3 deferred\\n' >> __OUTDIR__/delivery-record.txt"
+    ],
+    "cmd": "sh"
+  },
+  "context": "Proof run through the plan-driven-work template: the plan's opening phases execute for real in this run's scratch outDir; the production phases are deferred (executeThrough) \u2014 the production deliver proof itself is the next item, not this run.",
+  "executeThrough": "summarize-baseline",
+  "phaseOutlines": [
+    {
+      "acceptance": "delivery records listed",
+      "args": [
+        "-1",
+        "__OUTDIR__/outbox"
+      ],
+      "command": "ls",
+      "description": "List the delivery outbox in this run's outDir",
+      "kind": "command",
+      "name": "survey-outbox"
+    },
+    {
+      "acceptance": "baseline written",
+      "args": [
+        "-c",
+        "ls -1 __OUTDIR__/outbox > __OUTDIR__/baseline.txt && echo baseline written"
+      ],
+      "command": "sh",
+      "dependsOn": [
+        "survey-outbox"
+      ],
+      "description": "Write the survey baseline file from the outbox listing",
+      "kind": "command",
+      "name": "record-baseline"
+    },
+    {
+      "acceptance": "baseline summary recorded",
+      "dependsOn": [
+        "record-baseline"
+      ],
+      "description": "Summarize the survey baseline into the run record",
+      "kind": "agent",
+      "name": "summarize-baseline"
+    },
+    {
+      "acceptance": "production run submitted",
+      "dependsOn": [
+        "summarize-baseline"
+      ],
+      "description": "Submit a production run through the CLI with the production state dir",
+      "kind": "agent",
+      "name": "submit-production-run"
+    },
+    {
+      "acceptance": "delivery recorded exactly once",
+      "dependsOn": [
+        "submit-production-run"
+      ],
+      "description": "Drive the production run to completion and verify its result lands in the delivery outbox exactly once",
+      "kind": "agent",
+      "name": "drive-and-verify-delivery"
+    },
+    {
+      "acceptance": "delivery record filed",
+      "dependsOn": [
+        "drive-and-verify-delivery"
+      ],
+      "description": "Record the delivery with the BRA-61 idempotency markers as the double-delivery guard",
+      "kind": "agent",
+      "name": "record-delivery"
+    }
+  ],
+  "request": "Prove the production deliver half end to end (BRA-110): submit a production run, drive it to completion, and verify its result lands in the delivery outbox exactly once, with the delivery recorded. Fold in the BRA-61 idempotency markers as the guard against double-delivery."
+}

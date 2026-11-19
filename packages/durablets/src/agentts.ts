@@ -94,15 +94,25 @@ export interface TrapSite {
 }
 
 /**
- * The six wrapper names, plus this helper and the boundary check:
+ * The seven wrapper names, plus this helper and the boundary check:
  * frames for these are the trap machinery, not the call site.
- * A workflow function that happens to share one of these names and
- * calls a wrapper is skipped one frame too far — the site reported
- * is then its caller, still a real call site in the workflow.
  * decisionCascade is here too: its internal wrapper calls report
  * the workflow's decisionCascade() call site, not the module
  * interior — the four tiers share that one call site, and the
  * journal tells them apart by trapId/type.
+ *
+ * `run` is ambiguous (BRA-105): it is both a wrapper and the
+ * conventional entry-function name, so a workflow's call-site
+ * frame is itself named `run`. captureTrapSite therefore treats a
+ * `run` frame as a wrapper frame ONLY when it directly called
+ * captureTrapSite (the first frame after it) — any later `run`
+ * frame is the workflow's entry, i.e. the call site. The old
+ * blanket skip walked past the call site to the driver's `run()`
+ * line for every trap in every conventionally-named workflow.
+ * The other names are safe to skip blanket-wise: a workflow helper
+ * sharing one (e.g. a local `job`) is skipped one frame too far,
+ * and the site reported is then its caller, still a real call site
+ * in the workflow.
  */
 const TRAP_FRAME_NAMES = new Set([
   "job",
@@ -111,6 +121,7 @@ const TRAP_FRAME_NAMES = new Set([
   "sleep",
   "cron",
   "decide",
+  "run",
   "decisionCascade",
   "captureTrapSite",
   "toJsonValue",
@@ -131,6 +142,11 @@ export function captureTrapSite(): TrapSite | null {
   try {
     const stack = new Error().stack;
     if (typeof stack !== "string") return null;
+    // The first "at" frame is this function itself (the Error was
+    // created here); the frame after it is the wrapper that called
+    // us. `firstAfterCapture` tracks exactly that frame: a `run`
+    // frame is a wrapper frame only there (see TRAP_FRAME_NAMES).
+    let firstAfterCapture = true;
     for (const raw of stack.split("\n")) {
       const line = raw.trim();
       if (!line.startsWith("at ")) continue;
@@ -143,6 +159,16 @@ export function captureTrapSite(): TrapSite | null {
       const lineNo = Number(m[3] ?? m[6]);
       const colNo = Number(m[4] ?? m[7]);
       if (!file || !Number.isFinite(lineNo) || !Number.isFinite(colNo)) continue;
+      if (name === "captureTrapSite") {
+        firstAfterCapture = true;
+        continue;
+      }
+      // A later `run` frame is the workflow's entry — the call site
+      // itself — not a wrapper frame. Return it.
+      if (name === "run" && !firstAfterCapture) {
+        return { file, line: lineNo, column: colNo };
+      }
+      firstAfterCapture = false;
       if (TRAP_FRAME_NAMES.has(name)) continue;
       return { file, line: lineNo, column: colNo };
     }
@@ -193,8 +219,8 @@ export const all: AllFn = (globalThis as unknown as { all: AllFn }).all;
 export const any: AnyFn = (globalThis as unknown as { any: AnyFn }).any;
 export const race: RaceFn = (globalThis as unknown as { race: RaceFn }).race;
 
-/** The six trap types, by the string the core routes on. */
-export type TrapType = "job" | "exec" | "gate" | "sleep" | "cron" | "decide";
+/** The seven trap types, by the string the core routes on. */
+export type TrapType = "job" | "exec" | "gate" | "sleep" | "cron" | "decide" | "run";
 
 /**
  * Any clean JSON value — the type of "arbitrary data that may cross a
@@ -477,7 +503,24 @@ export function exec(spec: ExecSpec): ExecResult {
 }
 
 // -------------------------------------------------------------------- gate
-/** Wait for a human answer. The result type is fixed by the trap type. */
+/**
+ * Wait for a human answer. The result type is fixed by the trap type.
+ *
+ * A gate is a human checkpoint — but it only holds when the run is
+ * driven by an adapter that holds gates. The direct and muse
+ * adapters ALWAYS hold: the run suspends until a human delivers an
+ * answer (CLI `deliver-gate` / this chat). The mock adapter — the
+ * default outside the production state dir — auto-answers "yes"
+ * unless the run is submitted AND driven with `--gates hold`
+ * (BRA-119: `--gates` defaults to `auto`, and `run` and `queue run`
+ * build separate Hosts, so the flag must be passed to BOTH). An
+ * auto-answer is loud: the drive logs `GATE AUTO-ANSWERED` naming
+ * the run and the trap, and the journal's `trap-dispatched` and
+ * `trap-result` events carry `auto: true`. A workflow whose gate
+ * is a real human checkpoint must be run with `--gates hold` on
+ * both commands — otherwise the gate never holds and the run sails
+ * through on "yes" with no human input.
+ */
 export interface GateSpec {
   question: string;
   options?: string[];
@@ -540,6 +583,60 @@ export interface DecideSpec {
 
 export function decide<Output>(spec: DecideSpec): Output {
   return trap("decide", withTrapSite(toJsonValue(spec, "decide arg"), captureTrapSite())) as Output;
+}
+
+// --------------------------------------------------------------------- run
+/**
+ * Run a sub-workflow as a child run (BRA-105, BRA-52 Q2 form B).
+ *
+ * `workflow` is the sub-workflow's file path; `input` is its entry
+ * input, typed as `Input`. The sub-workflow's result IS the trap
+ * result, typed as `Output` — the parent does not know the child's
+ * code, only its path and its entry contract.
+ *
+ * Supply BOTH type arguments explicitly, as concrete, named types:
+ * `run<ChildInput, ChildOutput>({ workflow: "./child.ts", input: {...} })`.
+ * The output type cannot be inferred from the call — there is no
+ * inference site for it — so omitting it leaves `Output = unknown`
+ * and the host has no output contract to extract. Extra per-call
+ * parameters belong inside `input`, not as extra fields here: the
+ * spec shape is exactly `{ workflow, input }`, which is also
+ * exactly the trap arg.
+ *
+ * The workflow path MUST be a string literal, like job's spec
+ * literal: the host maps the trap to its contract by the key
+ * `run:<workflow>` (see siteKeyFor), and the literal is what lets
+ * the freeze pin the child file with the parent's closure at submit
+ * (BRA-71). Relative paths resolve against the parent workflow's
+ * directory; absolute paths are accepted as-is. A non-literal path
+ * fails loudly at first run; a literal naming a missing file fails
+ * loudly at first run too.
+ *
+ * Durability (the full story is in the host's resolveRunTrap, and
+ * in workflows/README.md §3 — this is the contract the host keeps):
+ * the child runs as a child run with its own runId
+ * (`<trapId>/child`), own journal, own frozen closure, and own
+ * checkpoint chain — it does NOT share the parent's journal or
+ * extend the parent's snapshot chain. The parent suspends on the
+ * run trap while the child runs; the child's result is delivered
+ * as the trap result. A child failure throws at the call site with
+ * the child's error name and message preserved (catchable by the
+ * parent, BRA-40); a child cancelled with the parent throws
+ * CancellationError. A child held at a gate holds the parent at
+ * the run trap until the gate is answered. Nested run() calls work:
+ * a child may itself call run().
+ *
+ * The arg is checked by toJsonValue() before trap() is called, as
+ * for every wrapper. A Date anywhere in the input crosses as its
+ * ISO string.
+ */
+export interface RunSpec<Input> {
+  workflow: string;
+  input: Input;
+}
+
+export function run<Input, Output>(spec: RunSpec<Input>): Output {
+  return trap("run", withTrapSite(toJsonValue(spec, "run arg"), captureTrapSite())) as Output;
 }
 
 // ------------------------------------------------------- decision cascade (BRA-47)

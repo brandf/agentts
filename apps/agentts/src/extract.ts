@@ -79,6 +79,7 @@ export const WRAPPER_NAMES = new Set([
   "gate",
   "sleep",
   "cron",
+  "run",
 ]);
 
 /** Fixed (input, output) type names per wrapper, from the agentts module. */
@@ -179,6 +180,13 @@ export function siteKeyFor(type: string, arg: any): string {
   if (type === "job" && arg !== null && typeof arg === "object" && !Array.isArray(arg)) {
     if (typeof arg.spec === "string") return `job:${arg.spec}`;
     if (typeof arg.op === "string") return `job:${arg.op}`;
+  }
+  // BRA-105: a run call's contract identity is the child workflow
+  // path, like a job's spec — two run calls to different children
+  // are different contracts; two to the same child with different
+  // types are the usual one-key-one-contract conflict.
+  if (type === "run" && arg !== null && typeof arg === "object" && !Array.isArray(arg)) {
+    if (typeof arg.workflow === "string") return `run:${arg.workflow}`;
   }
   return type;
 }
@@ -685,6 +693,83 @@ export function collectWorkflowFiles(entryAbs: string): string[] {
   return out;
 }
 
+/**
+ * The frozen closure (BRA-105): the workflow's transitive relative
+ * imports (collectWorkflowFiles) PLUS the transitive literal targets
+ * of `run({ workflow: "..." })` calls — a child workflow is code
+ * the parent may execute, so it is pinned with the parent at submit
+ * (BRA-71) exactly like an imported library file: an edit of the
+ * child after the parent is submitted cannot change what the child
+ * run executes. The walk recurses into every collected file, so a
+ * child that itself imports or run-calls further files pulls them
+ * in too. Only `run` calls imported from the agentts module count —
+ * a local helper named `run` is not a trap call (same rule as the
+ * extractor's importedWrappers), including under an import alias
+ * (`import { run as runChild }`). A missing or non-literal target is
+ * skipped here; the extractor fails loudly on it at gate time, and
+ * the dispatch fails loudly if the frozen copy lacks the child.
+ *
+ * This is the FREEZE file set only. Extraction and checking walk
+ * the program (imports only): a run target's trap sites belong to
+ * the child's own extraction/checker pass when the child run
+ * starts, not to the parent's — merging them would invent
+ * one-key-one-contract conflicts between two runs.
+ */
+export function collectClosureFiles(entryAbs: string): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  const walk = (fileAbs: string): void => {
+    const abs = path.resolve(fileAbs);
+    if (seen.has(abs) || !fs.existsSync(abs)) return;
+    seen.add(abs);
+    out.push(abs);
+    const source = fs.readFileSync(abs, "utf8");
+    const probe = ts.createSourceFile(abs, source, ts.ScriptTarget.Latest, false);
+    let importsRun = false;
+    // Local name -> imported (canonical) wrapper name, so an alias
+    // (`import { run as runChild }`) still counts as a run call.
+    const wrapperAliases = new Map<string, string>();
+    for (const st of probe.statements) {
+      if (!ts.isImportDeclaration(st) || !ts.isStringLiteral(st.moduleSpecifier)) continue;
+      const spec = st.moduleSpecifier.text;
+      if (spec.includes("agentts")) {
+        const clause = st.importClause;
+        if (clause?.namedBindings && ts.isNamedImports(clause.namedBindings)) {
+          for (const el of clause.namedBindings.elements) {
+            wrapperAliases.set(el.name.text, el.propertyName?.text ?? el.name.text);
+            if ((el.propertyName?.text ?? el.name.text) === "run") importsRun = true;
+          }
+        }
+      }
+      if (!spec.startsWith(".")) continue;
+      if (spec.includes("agentts")) continue;
+      const resolved = ts.resolveModuleName(spec, abs, GATE_COMPILER_OPTIONS, ts.sys);
+      const target = resolved.resolvedModule?.resolvedFileName;
+      if (!target || target.includes("node_modules")) continue;
+      walk(target);
+    }
+    if (!importsRun) return;
+    const visit = (node: ts.Node): void => {
+      if (
+        ts.isCallExpression(node) &&
+        ts.isIdentifier(node.expression) &&
+        // Resolve an import alias: `run as runChild` is still a run call.
+        (wrapperAliases.get(node.expression.text) ?? node.expression.text) === "run" &&
+        node.arguments.length > 0
+      ) {
+        const workflow = literalProp(node.arguments[0], "workflow");
+        if (workflow !== null && (workflow.startsWith(".") || path.isAbsolute(workflow))) {
+          walk(path.resolve(path.dirname(abs), workflow));
+        }
+      }
+      ts.forEachChild(node, visit);
+    };
+    visit(probe);
+  };
+  walk(entryAbs);
+  return out;
+}
+
 /** Combined hash of the workflow's relative imports (contents, sorted
  * by path) — null when there are none. */
 export function depHashFor(files: string[], entryAbs: string): string | null {
@@ -809,6 +894,13 @@ export function extractWorkflow(
     sf: ts.SourceFile;
     fileAbs: string;
     importedWrappers: Set<string>;
+    /** Local name -> imported (canonical) wrapper name, per file.
+     * An import alias (`import { run as runChild }`) binds the
+     * wrapper under its LOCAL name; the call-site walk resolves
+     * through this map so an aliased call extracts exactly like
+     * the canonical name. propertyName is the imported name, name
+     * is the local binding. */
+    wrapperAliases: Map<string, string>;
     localNames: Set<string>;
   }
   function fileCtx(fileAbs: string): FileCtx | null {
@@ -817,6 +909,7 @@ export function extractWorkflow(
     // Which names are the agentts module's wrappers in this file: the
     // names imported from a module specifier containing "agentts".
     const importedWrappers = new Set<string>();
+    const wrapperAliases = new Map<string, string>();
     for (const st of sf.statements) {
       if (ts.isImportDeclaration(st) && ts.isStringLiteral(st.moduleSpecifier) && st.moduleSpecifier.text.includes("agentts")) {
         importsAgentts = true;
@@ -824,6 +917,7 @@ export function extractWorkflow(
         if (clause?.namedBindings && ts.isNamedImports(clause.namedBindings)) {
           for (const el of clause.namedBindings.elements) {
             importedWrappers.add(el.name.text);
+            wrapperAliases.set(el.name.text, el.propertyName?.text ?? el.name.text);
           }
         }
       }
@@ -837,7 +931,7 @@ export function extractWorkflow(
       ts.forEachChild(node, collectLocals);
     }
     collectLocals(sf);
-    return { sf, fileAbs, importedWrappers, localNames };
+    return { sf, fileAbs, importedWrappers, wrapperAliases, localNames };
   }
 
   interface FoundSite {
@@ -918,10 +1012,15 @@ export function extractWorkflow(
   }
 
   function visit(ctx: FileCtx, node: ts.Node): void {
-    const { sf, fileAbs, importedWrappers, localNames } = ctx;
+    const { sf, fileAbs, importedWrappers, localNames, wrapperAliases } = ctx;
     if (ts.isCallExpression(node)) {
       const name = calleeName(node.expression);
-      if (name !== null && (name === "trap" || WRAPPER_NAMES.has(name))) {
+      // BRA-105: resolve an import alias to the wrapper's canonical
+      // name before matching — `run as runChild` is still a run
+      // call. `trap` is a global, never an import alias, so it keeps
+      // the local name.
+      const resolved = wrapperAliases.get(name ?? "") ?? name ?? "";
+      if (name !== null && (name === "trap" || WRAPPER_NAMES.has(resolved))) {
         const where = `${fileAbs}:${loc(sf, node)}`;
         const args = node.typeArguments ?? [];
         if (name === "trap") {
@@ -977,12 +1076,19 @@ export function extractWorkflow(
                 const spec = literalProp(argExpr, "spec") ?? literalProp(argExpr, "op");
                 if (spec !== null) key = `job:${spec}`;
               }
+              // BRA-105: a direct trap("run", ...) keys on the child
+              // workflow literal, like a job keys on its spec.
+              if (trapType === "run") {
+                const workflow = literalProp(argExpr, "workflow");
+                if (workflow !== null) key = `run:${workflow}`;
+              }
               pushSite(ctx, node, key, "trap", inputType, outputType, fileAbs, fileAbs, inputNode, outputNode);
             }
           }
         } else if (importedWrappers.has(name)) {
-          // Module wrapper call.
-          if (name === "job") {
+          // Module wrapper call (name is the local binding; resolved
+          // is the canonical wrapper name — see above).
+          if (resolved === "job") {
             if (args.length !== 2) {
               problems.push(
                 `${where}: job(...) has ${args.length} type argument(s) — it must carry exactly two, <Input, Output>, both concrete, named types`,
@@ -999,7 +1105,7 @@ export function extractWorkflow(
             if (inputType && outputType && spec !== null) {
               pushSite(ctx, node, `job:${spec}`, "job", inputType, outputType, fileAbs, fileAbs, args[0], args[1]);
             }
-          } else if (name === "decide") {
+          } else if (resolved === "decide") {
             if (args.length !== 1) {
               problems.push(
                 `${where}: decide(...) has ${args.length} type argument(s) — it must carry exactly one, <Output>, a concrete, named type`,
@@ -1011,15 +1117,44 @@ export function extractWorkflow(
               // is declared in the workflow.
               pushSite(ctx, node, "decide", "decide", "DecideSpec", outputType, modulePath, fileAbs, undefined, args[0]);
             }
+          } else if (resolved === "run") {
+            // BRA-105: like job, two type arguments and a literal
+            // identity — here the child workflow path, not a spec.
+            // The key is run:<workflow-literal>, so the dispatch
+            // key (siteKeyFor, from the runtime arg) matches the
+            // static key exactly. The literal must name a file that
+            // exists (resolved against the call-site file's
+            // directory): a missing child fails loudly at first run,
+            // not mid-run at dispatch.
+            if (args.length !== 2) {
+              problems.push(
+                `${where}: run(...) has ${args.length} type argument(s) — it must carry exactly two, <Input, Output>, both concrete, named types`,
+              );
+            }
+            const inputType = readTypeArg(args[0], "input", where, problems);
+            const outputType = readTypeArg(args[1], "output", where, problems);
+            const workflow = literalProp(node.arguments[0], "workflow");
+            if (workflow === null) {
+              problems.push(
+                `${where}: run workflow must be a string literal so the host can map the trap to its contract (run:<workflow>) and pin the child file at submit — write run<...>({ workflow: "./child.ts", input: ... })`,
+              );
+            } else if (!fs.existsSync(path.resolve(path.dirname(fileAbs), workflow))) {
+              problems.push(
+                `${where}: run workflow ${JSON.stringify(workflow)} does not exist (resolved against ${path.dirname(fileAbs)}) — the child file must exist when the parent run is submitted`,
+              );
+            }
+            if (inputType && outputType && workflow !== null) {
+              pushSite(ctx, node, `run:${workflow}`, "run", inputType, outputType, fileAbs, fileAbs, args[0], args[1]);
+            }
           } else {
             // Fixed-result wrappers: no type args, types from the module.
             if (args.length !== 0) {
               problems.push(
-                `${where}: ${name}(...) carries ${args.length} type argument(s) — it carries none; its result type is fixed by the trap type (${FIXED_WRAPPER_TYPES[name][1]} from the agentts module)`,
+                `${where}: ${name}(...) carries ${args.length} type argument(s) — it carries none; its result type is fixed by the trap type (${FIXED_WRAPPER_TYPES[resolved][1]} from the agentts module)`,
               );
             } else {
-              const [inputType, outputType] = FIXED_WRAPPER_TYPES[name];
-              pushSite(ctx, node, name, name, inputType, outputType, modulePath, modulePath);
+              const [inputType, outputType] = FIXED_WRAPPER_TYPES[resolved];
+              pushSite(ctx, node, resolved, resolved, inputType, outputType, modulePath, modulePath);
             }
           }
         } else if (!localNames.has(name)) {
@@ -1047,7 +1182,7 @@ export function extractWorkflow(
       // key is the usual one-key-one-contract extraction conflict.
       // A decisionCascade that is NOT imported from the agentts
       // module (a local helper sharing the name) synthesizes nothing.
-      if (name === "decisionCascade" && importedWrappers.has(name)) {
+      if (name !== null && resolved === "decisionCascade" && importedWrappers.has(name)) {
         pushSite(ctx, node, "exec", "exec", "ExecSpec", "ExecResult", modulePath, modulePath);
         pushSite(ctx, node, "decide", "decide", "DecideSpec", "DecideTierResult", modulePath, modulePath);
         pushSite(ctx, node, "job:decision", "job", "DecisionJobInput", "DecisionJobResult", modulePath, modulePath);

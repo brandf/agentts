@@ -28,6 +28,16 @@ listed in §5 for completeness; they are not library entries, but
 they are half of each entry's implementation, so the inventory
 names them.
 
+**Layout.** `workflows/` has two subdirs. `library/` is the
+standard library: reusable, supported control flow (the generic
+loop, the improve-loop, the hello quickstart, and the worker
+process they run through). `dogfood/` is real consumers proving
+the engine: the daily briefing and the one-off bug-fix workflow
+plus their worker/helper scripts. Dogfood entries are listed in
+§1 because the conformance check covers them too, not because
+they are reusable — they are concrete one-off consumers, not
+building blocks.
+
 **Conformance.** `tests/test-bra52.ts` (wired into `run.sh`)
 parses the tables in §1 and §4 and checks every row: the file
 exists, the entry symbol is in it, every runnable entry passes
@@ -41,12 +51,17 @@ backticked file paths and the `Gate` column.)
 
 | Name | File | Kind | Entry symbol | Gate |
 |---|---|---|---|---|
-| JudgeFixLoop | `judge-fix-loop.ts` | library | `judgeFixLoop` | via `tests/workflows/workflow-judge-fix-loop.ts` |
-| improve-loop | `improve-loop.ts` | workflow | `improveLoop` | check |
-| daily-ai-briefing | `daily-ai-briefing.ts` | workflow | `dailyAiBriefing` | check |
-| workflow-bugfix-bra54 | `workflow-bugfix-bra54.ts` | workflow | `bugfixBra54` | check |
+| JudgeFixLoop | `library/judge-fix-loop.ts` | library | `judgeFixLoop` | via `tests/workflows/workflow-judge-fix-loop.ts` |
+| diagnosis | `library/diagnosis.ts` | library | `diagnosePhaseReview` | via `workflows/library/phase-review.ts` |
+| improve-loop | `library/improve-loop.ts` | workflow | `improveLoop` | check |
+| presentations | `library/presentations.ts` | workflow | `presentations` | check |
+| plan-driven-work | `library/plan-driven-work.ts` | workflow | `planDrivenWork` | check |
+| phase-review | `library/phase-review.ts` | workflow | `phaseReview` | check |
+| rubric-review | `library/rubric-review.ts` | workflow | `rubricReview` | check |
+| daily-ai-briefing | `dogfood/daily-ai-briefing.ts` | workflow | `dailyAiBriefing` | check |
+| workflow-bugfix-bra54 | `dogfood/workflow-bugfix-bra54.ts` | workflow | `bugfixBra54` | check |
 | decisionCascade | `../src/agentts.ts` | helper | `decisionCascade` | via `tests/workflows/workflow-bra47-cascade.ts` |
-| hello | `hello.ts` | workflow | `hello` | check |
+| hello | `library/hello.ts` | workflow | `hello` | check |
 
 Kinds: `library` = a generic function a workflow imports and
 calls (no default export, not runnable on its own); `workflow` =
@@ -61,7 +76,7 @@ means the entry has no default export so the gate cannot run on
 it directly; it is gated through the named consumer, whose
 extraction walks the entry's transitive imports.
 
-### 1.1 `judge-fix-loop.ts` — JudgeFixLoop (generic loop, BRA-44)
+### 1.1 `library/judge-fix-loop.ts` — JudgeFixLoop (generic loop, BRA-44)
 
 **What it does.** Sends work item `X` + rubric `R` to 3
 independent judge agents in parallel (the `all` combinator,
@@ -95,10 +110,17 @@ more loops must pass before convergence can be declared.
 - Output: `JudgeFixLoopResult<X, R>` — `{ item, rubric, loops,
   converged, lastAggregate }`.
 - Shared shapes (defined here, imported by consumers):
-  `JudgeVerdict { score, label, notes }`, `AggregateScore {
-  approved, failed, meanScore, summary }`, `LoopDecision {
+  `JudgeVerdict { score, label, notes, scores?,
+  guidedAnswers?, openFeedback? }`, `AggregateScore {
+  approved, failed, meanScore, summary, openFeedbackThemes?
+  }`, `LoopDecision {
   choice, confidence }` — ONE decide-result type per workflow,
-  by the extractor's one-key-one-contract rule.
+  by the extractor's one-key-one-contract rule. The optional
+  verdict fields carry rubric-review's per-criterion scores
+  and open-ended feedback (see §1.9); the result also carries
+  `lastVerdicts: JudgeVerdict[]` — the final round's verdicts,
+  so the full open-ended feedback escapes the loop into the
+  run result.
 
 **When to use it.** Any item that improves by critique-and-
 revise against a stable rubric: a draft, a fix, a plan. Use it
@@ -114,7 +136,7 @@ least 2 loops have passed since the last rubric improvement
 (`loopsSinceRubricChange >= 2`). A rubric update resets the
 counter to 0.
 
-**State.** In use — called by §1.3 and §1.4, and by the test
+**State.** In use — called by §1.3, §1.4, §1.6, and §1.9, and by the test
 consumer `tests/workflows/workflow-judge-fix-loop.ts`.
 Tested: the test consumer runs mock (5 loops, converged, mean
 0.85, rubric gained `"concrete example"` at loop 3) and direct;
@@ -122,7 +144,7 @@ the host suite and the swap test exercise it. Not itself
 runnable — it has no default export by design (the trap calls
 live in the loop itself, specialized per call site — BRA-106).
 
-### 1.2 `improve-loop.ts` — improve-loop (standard-library workflow)
+### 1.2 `library/improve-loop.ts` — improve-loop (standard-library workflow)
 
 **What it does.** Takes a work item (almost anything: a
 document, a presentation, a pull request) and a rubric (inline,
@@ -184,11 +206,11 @@ instead of pretending to improve.
 `tests/test-improve-loop.ts` runs it under the mock adapter
 (converging fixture: 2 rounds, converged, 3 changes, final mean
 score 1.0) and the direct adapter (real worker processes), plus
-the core with fake steps; `improve-loop.INTEGRATION-TEST.md`
+the core with fake steps; `library/improve-loop.INTEGRATION-TEST.md`
 documents the real-engine end-to-end run. Gate: `CHECK OK`
 (6 trap sites), verified 2026-11-16.
 
-### 1.3 `daily-ai-briefing.ts` — the daily AI research briefing (BRA-55)
+### 1.3 `dogfood/daily-ai-briefing.ts` — the daily AI research briefing (BRA-55)
 
 **What it does.** A real edition end to end through the real
 engine: arXiv discovery (reads arxiv.org/list past-week pages —
@@ -198,6 +220,20 @@ prior-work relations, a must-read selection by `decide` trap,
 rendered markdown + meta.json, a JudgeFixLoop structural polish
 over the draft, and the weekly HTML page via the existing
 builder — all into scratch.
+
+**Morning-report rubric (v0.2).** Step 0 reads
+`workflows/rubrics/morning-report-rubric.md` (the reviewed rubric,
+v0.2 — see §1.9) with `resolveTextBlob` and passes the text to the
+read and render job inputs, so the rubric reaches the draft and read
+steps before drafting (meta-rubric criterion 9). The v0
+deterministic workers cannot act on prose yet, so in v0 this is
+contractual — the text is in the inputs so a real drafter reads it.
+Step 7 keeps the five-word structural rubric: the v0 judge checks
+the first word of each criterion string and cannot read a text
+rubric (question-derived criteria would false-negative and the fix
+would append "(revised N)." to the published edition). Edits to the
+rubric file take effect the next morning with no code change; a
+missing or empty file fails the run loudly at step 0.
 
 **Contract.**
 
@@ -230,23 +266,39 @@ it produces is dated 2026-11-16 and marked TEST in its scope
 note; every output lands under
 `.agentts-scratch/briefing-test-2026-11-16`. The live daily
 briefing is still the 06:15 cron, not this workflow. Run:
-`bun src/cli.ts run workflows/daily-ai-briefing.ts --adapter
+`bun src/cli.ts run workflows/dogfood/daily-ai-briefing.ts --adapter
 briefing --input-file <input.json> --state-dir <scratch> --wait`
 (mock mode is the briefing adapter's
 `AGENTTS_BRIEFING_MOCK=1`; the workflow's `input.mock` only
-marks the edition TEST). Note: the file header cites
-`tests/fixtures/briefing-input.json` as a sample input — that
-file does not exist in the repo; the input shape is
-`BriefingInput` in the file itself. Gate: `CHECK OK` (11 trap
+marks the edition TEST). A sample input lives at
+`tests/fixtures/briefing-input.json` (the 2026-11-16 TEST
+edition's shape; `venvPython` is machine-specific — point it at
+a venv with the `markdown` module). Gate: `CHECK OK` (11 trap
 sites), verified 2026-11-16.
 
-### 1.4 `workflow-bugfix-bra54.ts` — the bug-fix workflow (BRA-54)
+**Production path (BRA-111).** The cutover runs the workflow
+with `--adapter direct --workers-config
+workflows/dogfood/briefing-workers.json` (checked-in; all five
+briefing specs map to `briefing-worker.ts`, paths relative to
+`apps/agentts` — run the CLI and the server from there),
+driven through the queue by the tick loop and delivered to the
+outbox. The server driver honors the config (`worker serve
+--workers-config` / `AGENTTS_WORKERS_CONFIG`, read fresh per
+drive); before BRA-111 it built a plain DirectAdapter per
+request and a briefing run lost its workers at the queue drive.
+`tests/test-bra111.ts` proves the mechanism; the Nov 18 trial
+ran the real day's inputs on a scratch server and is compared
+against the cron's Nov 18 edition in `~/workspace/bra111-comparison.md`.
+The live briefing stays on the cron until parity is shown and
+Brandon decides the switch.
+
+### 1.4 `dogfood/workflow-bugfix-bra54.ts` — the bug-fix workflow (BRA-54)
 
 **What it does.** Fixes a real bug end to end through the real
 engine: reproduce → diagnose → fix → judge the fix
 (JudgeFixLoop) → test (full staged `run.sh`) → verify (CLI mock
 path converges). Steps are `job` traps (specs `bugfix-*`)
-served by `workflows/bugfix-worker.ts` — a real worker process
+served by `workflows/dogfood/bugfix-worker.ts` — a real worker process
 with fs + exec access under the direct adapter, and the same
 code in-process with `simulate: true` under the mock adapter
 (simulated results always carry `simulated: true`).
@@ -345,6 +397,383 @@ decisions inside a workflow (BRA-47), not because a workflow
 already calls it. Gate: via the test consumer (`CHECK OK`,
 verified by the bra47 suite in `run.sh`).
 
+### 1.6 `library/presentations.ts` — presentations (standard-library workflow, BRA-109)
+
+**What it does.** Takes a deck outline (title + slides) and a
+presentation rubric (inline, a `{ file }` reference to a rubric
+JSON file, or the default rubric), builds the deck as a Google
+Slides presentation, runs a JudgeFixLoop review/polish step over
+the deck, and renders the final deck to files (deck.json +
+deck.md). At most `maxLoops` loops (default 3).
+
+**Contract.**
+
+- Input: `PresentationInput { title, slides: SlideDraft[],
+  rubric?: PresentationRubric | { file: string }, outDir?,
+  maxLoops? }` — `SlideDraft { title, bullets, notes? }`; the
+  rubric is `{ criteria: string[], threshold }` (the JudgeFixLoop
+  shape, as in the daily briefing). Omitted rubric means the
+  default: criteria `["one-idea", "concise", "concrete",
+  "complete"]`, threshold 0.8.
+- Output: `PresentationResult { deck, deckId, title, slides,
+  deckPath, markdownPath, loops, converged, finalMeanScore }` —
+  the final deck is in the result (the form-A return-value
+  channel), and the deck files are also written (default
+  `.agentts-scratch/presentations-out/`).
+- Entry: `export default function presentations(input:
+  PresentationInput): PresentationResult`.
+- Trap contracts (concrete, named types at every call site):
+  `slides-create` (`SlidesCreateInput → Deck`),
+  `slides-render` (`SlidesRenderInput → SlidesRenderResult`),
+  and the JudgeFixLoop step reuses §1.1 with `Deck` /
+  `PresentationRubric` and the `judge` / `aggregate` / `fix` /
+  `rubric-update` specs. The rubric-file read is an `exec` `cat`
+  trap, as in improve-loop.
+
+**When to use it.** Turning an outline into a reviewed deck:
+the outline states the content, the rubric states the quality
+bar, the loop polishes the deck against it. Prefer it over raw
+JudgeFixLoop when the item is a deck and the deliverable is the
+deck files.
+
+**v1 limits, stated plainly.** The Slides steps are job traps
+served by the deterministic workers — they do NOT call the live
+Google Slides API. `slides-create` computes the deck locally
+and returns a deterministic deck id (`deck-<sha256[0:12] of
+title + slides>`); a live Slides adapter plugs into the same
+two specs later. The v0 judge/fix workers are deterministic
+keyword/coverage workers, not LLM judgment — the fix edits the
+deck structurally (fills empty slides, shortens long bullets,
+adds a concrete bullet, trims over-full slides) rather than
+rewriting prose, and a criterion the fix does not know (a custom
+rubric criterion outside one-idea / concise / concrete /
+complete) stays outstanding and the loop hits the cap honestly
+instead of pretending to improve.
+
+**State.** Tested. `tests/test-bra109.ts` runs it under the mock
+adapter (converging fixture: 2 loops, converged, final mean
+score 0.98; weak fixture missing all four criteria: fixed in 2
+loops; stubborn fixture with an unfixable custom criterion: 3
+loops, not converged; invalid outline and bad rubric file fail
+loudly) and the direct adapter (real worker processes, files
+actually written). Gate: `CHECK OK` (trap sites: slides-create,
+slides-render, exec, plus the JudgeFixLoop sites specialized to
+Deck / PresentationRubric).
+
+### 1.7 `library/plan-driven-work.ts` — plan-driven-work (the plan → review → execute → review template, BRA-117)
+
+**What it does.** The reusable codification of Brandon's own
+6-step loop (plan, review, execute, review, commit, push).
+Takes a request + a phase outline + a plan rubric, drafts a
+plan (`plan-draft` job trap), improves it through a
+JudgeFixLoop (max 3 loops, default rubric: covers-request,
+sequenced, jobspec, acceptance, review-points, gate-placement;
+threshold 0.8), holds at a `gate` trap for the human checkpoint
+(options approve / revise / reject; revise = one more
+JudgeFixLoop pass then a second gate, max 2 gate rounds), and
+only then executes the approved plan — frozen, byte-identical
+to the approved one (the frozen-vs-executed check is a
+journal read: the plan reconstructed from the journal after
+completion equals the result's plan, and no trap executed a
+deferred phase). **The gate only holds when the driver passes
+`--gates hold` on BOTH the submit (`run`) and the drive
+(`queue run`)** — the two commands build separate Hosts, so a
+flag passed to only one does nothing (BRA-119). The direct and
+muse adapters always hold; under the mock adapter (the default
+outside the production state dir) the gate auto-answers "yes"
+otherwise, logging `GATE AUTO-ANSWERED` and marking the journal
+events `auto: true` — and the plan executes unreviewed.
+Execution groups phases into dependency waves
+(Kahn's topological sort over `dependsOn`): phases in a wave
+run in parallel via `all([...])`, waves serially. Each executed
+phase is reviewed by the phase-review child workflow (§1.8)
+via the `run` trap (form B), one child run per executed phase.
+A review that fails to converge carries a root-cause
+diagnosis (BRA-126: work / workflow / rubric, with a reason
+and a fix routing per level) in its summary — the template
+asks the question every time instead of depending on anyone
+remembering to.
+Commit/push is a caller-supplied `exec` command, run last.
+`executeThrough` bounds the run: phases after it are recorded
+deferred, never executed (staged execution).
+
+**Contract.**
+
+- Input: `PlanDrivenWorkInput { request, phases: PhaseOutline[],
+  planRubric?, executeThrough?, commit? }` — `PhaseOutline {
+  name, kind: "agent" | "command", description, acceptance,
+  command?, dependsOn? }`; agent phases carry a jobspec +
+  testable acceptance; command phases carry a shell command.
+  The rubric is `{ criteria: string[], threshold }` (the
+  JudgeFixLoop shape); omitted rubric means the default 6
+  criteria, threshold 0.8.
+- Output: `PlanDrivenWorkResult { done, plan, planLoops,
+  planConverged, planFinalMeanScore, gateRounds, executed:
+  PhaseRecord[], deferred: string[], phaseReviews:
+  PhaseReviewResult[], committed }` — `PhaseRecord { phase,
+  kind, evidence, contentHash, priorSummary }`.
+- Entry: `export default function planDrivenWork(input:
+  PlanDrivenWorkInput): PlanDrivenWorkResult`.
+- Trap contracts: `plan-draft` (`PlanDraftInput → Plan`),
+  `plan-phase` (`PhaseExecutionInput → PhaseRecord`), the
+  JudgeFixLoop step reuses §1.1 with `Plan` / `PlanRubric`
+  and the `judge` / `aggregate` / `fix` / `rubric-update`
+  specs, `gate` (options approve / revise / reject),
+  `run` (the phase-review child, §1.8), `exec` (command
+  phases + the commit command).
+
+**When to use it.** Any multi-step job with a real human
+checkpoint in the middle: the plan is the thing reviewed, the
+gate is the decision point, execution follows the approved
+plan and nothing else. Prefer it over a hand-rolled sequence
+when the plan needs review before work starts and each phase
+needs review after it runs. Trivial tasks still skip the
+template — the loop costs a plan draft, a review loop, a gate,
+and a review per phase.
+
+**v1 limits, stated plainly.** The v0 plan-draft sequences
+and validates a caller-supplied outline — it does NOT author
+phases from prose; the caller states the phases. The v0
+plan-phase produces an execution record (validate + content
+hash + summary of prior results); real agent execution arrives
+with worker agents following the plan-phase jobspec — the
+record is honest about what ran, not a claim of agent work.
+Phases are job/exec traps only; a phase that is itself a
+sub-workflow is not supported in v1. The commit/push leg is a
+caller-supplied exec command, not a built-in. The production
+deliver half rides on BRA-110 (the template's first real
+consumer). A failed phase stops the run loudly with the real
+message (BRA-121 fixed the join slice so the failure throw
+journals a lifecycle "failed" event instead of crashing it;
+the `sleep(0)` workaround is gone). JudgeFixLoop's fix is
+append-only per BRA-44: a criterion the fix does not know
+(a custom rubric criterion outside the default six) stays
+outstanding and the loop hits the cap honestly instead of
+pretending to improve.
+
+**State.** Tested. `tests/test-bra117.ts` runs the BRA-110
+plan (6 phases: survey-outbox, record-baseline,
+summarize-baseline, submit-production-run,
+drive-and-verify-delivery, record-delivery;
+`executeThrough: "summarize-baseline"`) under the direct
+adapter: the run held at the gate, the plan loop converged
+in 2 loops at mean 0.98, after the "approve" answer the run
+completed with 3 executed / 3 deferred, all 3 phase reviews
+converged in 1 loop at 0.98, the commit wrote for real, and
+the frozen-vs-executed check passed from the journal (the
+approved plan reconstructed after completion equals the
+result's plan; exactly 1 exec trap per command phase, exactly
+1 plan-phase trap for the agent phase, 0 traps for any
+deferred phase; the gate trap precedes the phase reviews
+and the commit). The same test covers the mock adapter
+(agent-only plan: same 2-loop / 0.98 plan arc; mock phase
+reviews score 0.55 then 0.70 on the mock's base-score judges
+and hit the 2-loop cap honestly — the mock's generic judges
+are stand-ins, not the real worker's containment scoring,
+so the direct run is the convergence proof), a stubborn
+plan (3 unknown criteria: 3 loops, not converged, 1
+rubric-update, plan revised once), 6 invalid inputs that
+fail loudly, and a failing phase (`false` command: the run
+fails with the phase named and the later wave unexecuted).
+Gate: `CHECK OK` (trap sites: plan-draft, plan-phase, exec,
+gate, run, sleep, plus the JudgeFixLoop sites specialized to
+Plan / PlanRubric).
+
+### 1.8 `library/phase-review.ts` — phase-review (per-phase review child workflow, BRA-117)
+
+**What it does.** One phase's review, as a child workflow
+invoked by the template via the `run` trap (form B) — the
+child carries its own extraction, so it is a separate library
+entry, not a second JudgeFixLoop instantiation inside the
+template (two instantiations with different item types in one
+workflow would collide on the `job:judge` contract —
+one-key-one-contract). Takes the phase's evidence text and its
+acceptance criterion, runs a JudgeFixLoop over them (one
+criterion: the acceptance itself, threshold 0.8, max 2
+loops), and returns the loop outcome. When the review fails
+to converge it also diagnoses the root-cause level itself
+(BRA-126): work / workflow / rubric, possibly several at
+once, via the deterministic `diagnosePhaseReview`
+(`library/diagnosis.ts`) — work is the default (a failing
+review means the work did not satisfy the acceptance),
+workflow fires when the evidence shares no content word with
+the acceptance, rubric fires when the criterion as written
+cannot be checked (empty, single-word, or stopword-first).
+The diagnosis (levels + a reason and a fix routing per
+level) rides in the result; a converged review gets no
+diagnosis (null). The template carries it into
+`PhaseReviewSummary` (§1.7).
+
+**Contract.**
+
+- Input: `PhaseReviewInput { phase, evidence, acceptance }`.
+- Output: `PhaseReviewResult { phase, loops, converged,
+  finalMeanScore, diagnosis: Diagnosis | null }` — the
+  diagnosis (BRA-126) is null on a converged review, otherwise
+  `{ levels: ("work" | "workflow" | "rubric")[], reasons:
+  string[], fixRouting: string[] }` with the three arrays
+  parallel, in the order work, workflow, rubric.
+- Entry: `export default function phaseReview(input:
+  PhaseReviewInput): PhaseReviewResult`.
+- The shared shapes (PhaseEvidence, the rubric) are
+  deliberately re-declared in the child, NOT imported from the
+  template — importing would pull the template's trap sites
+  into the child's extraction.
+
+**When to use it.** Only as the template's per-phase review
+step. It is not a general review workflow — for anything
+other than a phase's evidence-vs-acceptance check, use
+JudgeFixLoop (§1.1) directly.
+
+**State.** Tested through `tests/test-bra117.ts` (3 child
+runs in the direct BRA-110 proof, each converging in 1 loop
+at 0.98; the mock mirror's reviews hit the cap honestly —
+see §1.7) and `tests/test-bra126.ts` (direct: a work-only
+failure, a work+workflow failure, a three-level failure
+diagnosed as all three, and a converged review with no
+diagnosis; mock: the template flow carries the diagnosis
+into `PhaseReviewSummary`). Gate: `CHECK OK` (trap sites: the JudgeFixLoop
+sites specialized to PhaseEvidence / PhaseReviewRubric).
+
+### 1.9 `library/rubric-review.ts` — rubric-review (the rubric-rubric workflow)
+
+**What it does.** Judges a rubric against the meta-rubric
+(`workflows/rubrics/meta-rubric.md` — 14 criteria with 0/5/10
+anchors, organized under four perspective headings:
+discrimination, clarity, usefulness, robustness) and improves
+it through a JudgeFixLoop. The meta-rubric judges the rubric,
+not the artifact: would this rubric, applied honestly,
+separate good work from bad work, and would it tell the fixer
+what to change?
+
+**Contract.**
+
+- Input: `RubricReviewInput { rubric: TextRubricInput,
+  threshold?, scope: ScopeDefinition, artifactKind: string,
+  referenceExamples: ReferenceExample[], metaRubric?:
+  TextRubricInput, maxLoops? }` — `TextRubricInput = string |
+  { file: string }` (a text rubric inline or as a file
+  reference — the general inline-or-file indirection for
+  instruction handoffs; resolved by `resolveTextRubric` in
+  §1.1's library, file refs read with an `exec` `cat` trap, a
+  missing or empty source failing loudly); `TextRubric {
+  text, threshold }` (the threshold stays a separate numeric
+  input alongside the text, never parsed out of the prose);
+  `ScopeDefinition { inScope, outOfScope, boundaries }`;
+  `ReferenceExample { label: "good" | "mediocre", text?,
+  file? }` — at least one of each, REQUIRED, validated before
+  any judging runs (a rubric cannot be judged in the
+  abstract). Omitted `metaRubric` means the checked-in
+  `workflows/rubrics/meta-rubric.md` (the path resolves against
+  the process cwd — run the CLI from `apps/agentts`); omitted
+  `threshold` means 0.8; omitted `maxLoops` means 3.
+- Output: `RubricReviewResult { rubric: string, loops,
+  converged, finalMeanScore, lastVerdicts: JudgeVerdict[] }`
+  — the revised rubric text, the loop outcome, and the final
+  round's verdicts: the per-criterion scores and the full
+  open-ended feedback, recorded in the run result so a human
+  can read them.
+- Entry: `export default function rubricReview(input:
+  RubricReviewInput): RubricReviewResult`.
+- The JudgeFixLoop step reuses §1.1 with `RubricText { text,
+  kind: "rubric", scope, artifactKind, references }` /
+  `TextRubric` and the `judge` / `aggregate` / `fix` /
+  `rubric-update` specs. The judges receive the rubric, the
+  scope, the artifact kind, the reference examples, and the
+  meta-rubric; each returns scored criteria (0–10,
+  interpolated, one-line reason each) PLUS open-ended
+  feedback: `scores` (per-criterion number + reason),
+  `guidedAnswers` (one per guided question), `openFeedback`
+  (free-form). The fix receives the rubric and all verdicts
+  INCLUDING all open-ended feedback. The aggregate summarizes
+  recurring open-feedback themes (`openFeedbackThemes`)
+  alongside the mean score. The five guided open-ended
+  questions (asked of every judge, every round): (1) what
+  quality dimension does this rubric miss entirely; (2)
+  construct a bad artifact that would PASS this rubric — the
+  adversarial probe, the strongest discriminator; (3) where
+  would two careful judges disagree, and what wording causes
+  it; (4) what does this rubric reward that it should not, or
+  punish that it should not; (5) free-form.
+
+**When to use it.** Before trusting any rubric: run it
+through `rubricReview` with a known-good and a known-mediocre
+reference example. The first consumer is the morning report
+rubric (trial edition = mediocre reference, recent cron
+edition = good reference); the plan template's plan rubric
+gets the same treatment when it next changes. The meta-rubric
+itself is validated separately — self-test (it must pass its
+own definition of good) plus a generalization suite (negative
+control: the current five-word briefing rubric, which must
+score low; positive control: a strong rubric; cross-kind:
+code-review, plan, and briefing rubrics) — run by Meroki
+operating this workflow, before the meta-rubric is trusted on
+anything else.
+
+**v1 limits, stated plainly.** The v0 judge/fix workers are
+deterministic keyword/coverage workers, not LLM judgment —
+the judge scores each meta-criterion 10 when the rubric names
+it and 0 when it does not, and the fix appends one addressing
+sentence per missed criterion rather than rewriting the
+rubric. The fix never appends a guided answer verbatim (a Q2
+answer quotes the criticism, and quoting it would score the
+criterion as addressed for merely being mentioned). The
+rubric-update job returns a text rubric unchanged — v0 never
+rewrites versioned prose. A rubric that fails discrimination
+needs its criteria rewritten, not its scores argued with; if
+three loops do not converge, the rubric needs a human rethink,
+not a fourth loop. The meta-rubric file is data, not process:
+perspectives, graded questions with anchors, open-ended
+questions — no steps, no sequencing in the prose.
+
+**State.** Tested. `tests/test-rubric-review.ts` runs it under
+the mock adapter (mirrored rubric workers) and the direct
+adapter (real worker processes) with the same outcomes: the
+negative control (five-word briefing rubric) scores 0 in
+round 1 and converges in loop 2 at 1.0; the meta-rubric
+itself scores 1.0 in round 1 and converges in 1 loop; a mid
+rubric naming 3 of 14 criteria scores a 0.22 round-1
+aggregate, then converges in loop 2; inline vs file
+resolution agree; missing/empty rubrics and
+reference-examples violations fail loudly; the rubric-update
+job returns a text rubric unchanged. Gate: `CHECK OK`
+(6 trap sites: the JudgeFixLoop sites specialized to
+RubricText / TextRubric, plus the `exec` resolver site).
+
+### 1.10 `library/diagnosis.ts` — diagnosis (phase-review root-cause diagnosis, BRA-126)
+
+**What it does.** The deterministic root-cause diagnosis for
+a failing phase review: given the review's recorded data (the
+evidence, the acceptance criterion, the loop outcome), it
+names the level(s) — work, workflow, rubric, possibly
+several at once — each with a reason citing the observed
+signal and a fix routing naming where the fix belongs.
+Work is the default (a failing review means the work did not
+satisfy the acceptance); workflow fires when the evidence
+shares no content word with the acceptance; rubric fires
+when the criterion as written cannot be checked (empty,
+single-word, or stopword-first). It is a plain function, not
+a job trap: the diagnosis classifies recorded data, and the
+v0 workers could only apply the same rules. A converged
+review gets no diagnosis (null). Used by phase-review (§1.8);
+the template carries the diagnosis into `PhaseReviewSummary`
+(§1.7).
+
+**Contract.**
+
+- Input: `{ evidence, acceptance, loops, converged,
+  finalMeanScore, threshold }`.
+- Output: `Diagnosis | null` — `{ levels: ("work" |
+  "workflow" | "rubric")[], reasons: string[], fixRouting:
+  string[] }` with the three arrays parallel, in the order
+  work, workflow, rubric; null when the review converged.
+
+**State.** Tested by `tests/test-bra126.ts` (direct:
+work-only, work+workflow, three-level, and converged cases;
+mock: the template flow). Gate: via §1.8 — `phase-review.ts`
+passes `agentts check`, and its extraction walks this
+module's transitive import.
+
 ## 2. Versioning and pinning
 
 **There is no version number on any library file.** No semver,
@@ -373,15 +802,15 @@ frozen closure. `collectWorkflowFiles`
 (`apps/agentts/src/extract.ts`) walks relative imports
 recursively, skipping only the agentts module (added separately
 via `resolveAgenttsModule`) and non-relative / `node_modules`
-imports — so `daily-ai-briefing.ts` importing
-`./judge-fix-loop` and `./briefing-prior-work`, and
-`workflow-bugfix-bra54.ts` importing `./judge-fix-loop`,
+imports — so `dogfood/daily-ai-briefing.ts` importing
+`../library/judge-fix-loop` and `./briefing-prior-work`, and
+`dogfood/workflow-bugfix-bra54.ts` importing `../library/judge-fix-loop`,
 freeze the whole chain. BRA-71 scenario A4 proves it
 end-to-end: editing an imported lib file mid-run does not change
 the resumed run's output; scenario B3 proves the frozen dir
 holds entry + lib + agentts module byte-identical to the
 submitted source. So: **editing a library workflow file
-(`judge-fix-loop.ts`, `improve-loop.ts`, etc.) mid-run does not
+(`library/judge-fix-loop.ts`, `library/improve-loop.ts`, etc.) mid-run does not
 change what an in-flight run executes or validates against.**
 
 **The freeze is source-only — the gap.** The frozen closure
@@ -389,16 +818,16 @@ covers workflow source (control flow + types). It does NOT
 cover the code that answers a run's job traps, which is
 resolved from the live tree at trap time:
 
-- The direct adapter resolves `workflows/worker.ts` and
-  `workflows/bugfix-worker.ts` relative to its own file
+- The direct adapter resolves `workflows/library/worker.ts` and
+  `workflows/dogfood/bugfix-worker.ts` relative to its own file
   (`plugins/direct/src/direct-adapter.ts`); the briefing
-  adapter resolves `workflows/briefing-worker.ts` the same way
+  adapter resolves `workflows/dogfood/briefing-worker.ts` the same way
   (`plugins/briefing/src/adapter.ts`); the mock adapter imports
-  `runBugfix` from the live `workflows/bugfix-worker.ts`.
+  `runBugfix` from the live `workflows/dogfood/bugfix-worker.ts`.
 - Jobspec prose (`plugins/muse/jobspecs/*.md`) is fetched live
   per job by the worker pool (re-read when its sha changes) —
   no per-run pin exists.
-- `briefing-prep.ts` runs via an exec trap against the live
+- `workflows/dogfood/briefing-prep.ts` runs via an exec trap against the live
   file; `decide` answers come from host TS source
   (`src/decision-model.ts`), which the engine version does not
   pin (it pins only the C host source + the dquickts pin).
@@ -421,16 +850,17 @@ against).
 
 **How a library workflow calls another one today: a plain
 TypeScript import + function call, inside one run, under one
-runId, in one journal.** That is the whole mechanism — there is
-no sub-workflow trap, no child-run API, no way for a workflow to
-submit or enqueue another workflow (the trap types are job /
-exec / gate / sleep / cron / decide). Two entries do it today:
+runId, in one journal.** That is the form-A mechanism — a plain
+import, no child run. (Form B, the `run` trap for child runs with
+their own runIds, is described below.) Three entries do it today:
 
-- `workflow-bugfix-bra54.ts` imports `judgeFixLoop` from
-  `./judge-fix-loop` and calls it inline as step 4 (advisory,
+- `dogfood/workflow-bugfix-bra54.ts` imports `judgeFixLoop` from
+  `../library/judge-fix-loop` and calls it inline as step 4 (advisory,
   not a gate).
-- `daily-ai-briefing.ts` imports `judgeFixLoop` the same way
+- `dogfood/daily-ai-briefing.ts` imports `judgeFixLoop` the same way
   and calls it inline as step 7 (structural polish).
+- `library/presentations.ts` imports `judgeFixLoop` the same way
+  and calls it inline as step 3 (review/polish over the deck).
 
 The called loop's trap calls extract through specialization:
 the extractor reads the concrete type arguments at the call
@@ -440,26 +870,63 @@ honestly: there is no programmatic return-value channel for a
 caller — the result is files + stdout + journal — which is the
 Q12 follow-on, not the workflow file.
 
-**What is NOT built.** Sub-workflows as child runs with their
-own runIds (the Q12 decision recorded on BRA-52) do not exist
-in code: no library workflow spawns a child run, and nothing in
-the host supports it yet. So the BRA-52 line "a bug-fix workflow
-can call the judge/improve loop as a sub-workflow" is true
-today only in the in-process sense above, not in the child-run
-sense. The child-run form is decided as the direction (BRA-52
-Q2, 2026-11-17): form A (import, same process/journal) is the
-MVP form; form B (run/call on top of trap, sub-workflow result
-= trap result) is post-MVP, filed as
-[BRA-105](https://linear.app/brandf/issue/BRA-105/sub-workflows-as-child-runs-agentts-runcall-on-top-of-trap-bra-52-q2).
-It is not built yet.
+**Form B — child runs (BRA-105).** Sub-workflows as child runs
+with their own runIds DO exist now: `run<Input, Output>({
+workflow, input })` in the agentts module calls a sub-workflow
+by file path, and the sub-workflow's result IS the trap result.
+The mechanics (settled in
+[BRA-105](https://linear.app/brandf/issue/BRA-105/sub-workflows-as-child-runs-agentts-runcall-on-top-of-trap-bra-52-q2);
+the issue's five mechanics were undecided, so the implementer
+decided them — the full rationale lives in the comment block
+above `resolveRunTrap` in `src/host.ts`):
+
+- **Trap:** a new trap type, `"run"`. The parent suspends on it
+  (ordinary rc-2 trap suspension) and rides the existing trap
+  machinery: extractor site `run:<workflow-literal>`, dispatch
+  validation against the extracted Output schema, deliver
+  resume. The host owns it (like sleep/cron); the adapter never
+  sees it. No C core change — `trap()` is generic over the type
+  string.
+- **Execution:** same process, same host instance, driven inline
+  inside the parent's dispatch (the fork-branch pattern). Own
+  runId `<trapId>/child`, deterministic from the trap execution,
+  so a re-dispatch reuses it and never double-executes the child.
+  Own journal, own frozen closure, own checkpoint chain — the
+  child does NOT extend the parent's BRA-90 chain (different
+  workflow, different heap). Parentage: the parent journal's
+  `"run-child"` event (durable) + the child registry entry's
+  `parentRunId`/`parentTrapId` (live). Cancellation propagates
+  down via `cancelTree`, which walks the parent's run-child
+  events deepest-first (BRA-40).
+- **Freeze:** the child's closure is pinned like any run (own
+  freeze at child start), AND the child file is part of the
+  parent's frozen closure (`collectClosureFiles`), so the child
+  source is pinned at parent submit — an edit after submit
+  cannot change what executes. The child path resolves against
+  the parent's FROZEN entry directory at dispatch. The extractor
+  fails loudly at first run when the literal names a missing
+  file.
+- **Return value:** the child's result (validated against the
+  child's entry Output schema) becomes the trap result, then
+  validated again against the parent's run-site Output schema —
+  two validations, both loud. A child failure throws at the call
+  site with the child's error name and message preserved
+  (catchable by the parent); a child held at a gate holds the
+  parent at the run trap (HOLD) until a later drive resumes it.
+- **Signature:** `run<Input, Output>({ workflow, input })`. The
+  path MUST be a string literal (same rule as job's spec
+  literal); relative paths resolve against the parent workflow's
+  directory, absolute paths as-is. Both type args concrete,
+  named.
 
 **Composition rule (as it works today).** Compose by importing
 the library function and calling it with explicit type
 arguments; the composed loop runs inside your run, shares your
 runId and journal, and its result is an ordinary return value
 in your workflow function. If you need isolation (own runId,
-own journal, independent retry/suspension), that does not exist
-yet — see BRA-52.
+own journal, independent retry/suspension), use `run/call`
+(form B above): the child runs under its own runId with its
+own journal, and its result arrives as the trap result.
 
 ## 4. Jobspecs — the second library
 
@@ -473,31 +940,35 @@ today:
 
 | Jobspec | Prose file | Used by | Served by |
 |---|---|---|---|
-| `judge` | `plugins/muse/jobspecs/judge.md` | JudgeFixLoop consumers (§1.1, §1.3, §1.4) | `workflows/worker.ts` (direct) + mock adapter |
-| `fix` | `plugins/muse/jobspecs/fix.md` | JudgeFixLoop consumers | `workflows/worker.ts` (direct) + mock adapter |
-| `aggregate` | `plugins/muse/jobspecs/aggregate.md` | JudgeFixLoop consumers | `workflows/worker.ts` (direct) + mock adapter |
-| `rubric-update` | `plugins/muse/jobspecs/rubric-update.md` | JudgeFixLoop consumers | `workflows/worker.ts` (direct) + mock adapter |
+| `judge` | `plugins/muse/jobspecs/judge.md` | JudgeFixLoop consumers (§1.1, §1.3, §1.4, §1.6, §1.9) | `workflows/library/worker.ts` (direct) + mock adapter |
+| `fix` | `plugins/muse/jobspecs/fix.md` | JudgeFixLoop consumers | `workflows/library/worker.ts` (direct) + mock adapter |
+| `aggregate` | `plugins/muse/jobspecs/aggregate.md` | JudgeFixLoop consumers | `workflows/library/worker.ts` (direct) + mock adapter |
+| `rubric-update` | `plugins/muse/jobspecs/rubric-update.md` | JudgeFixLoop consumers | `workflows/library/worker.ts` (direct) + mock adapter |
 | `decision` | `plugins/muse/jobspecs/decision.md` | decisionCascade job tier (§1.5) | muse worker pool |
-| `improve-judge` | `plugins/muse/jobspecs/improve-judge.md` | improve-loop (§1.2) | `workflows/worker.ts` (direct) + mock adapter |
-| `improve-aggregate` | `plugins/muse/jobspecs/improve-aggregate.md` | improve-loop (§1.2) | `workflows/worker.ts` (direct) + mock adapter |
-| `improve-decide` | `plugins/muse/jobspecs/improve-decide.md` | improve-loop (§1.2) | `workflows/worker.ts` (direct) + mock adapter |
-| `improve-fix` | `plugins/muse/jobspecs/improve-fix.md` | improve-loop (§1.2) | `workflows/worker.ts` (direct) + mock adapter |
-| `improve-write` | `plugins/muse/jobspecs/improve-write.md` | improve-loop (§1.2) | `workflows/worker.ts` (direct) + mock adapter |
-| `bugfix-reproduce` | `(none — worker only)` | bug-fix workflow (§1.4) | `workflows/bugfix-worker.ts` (direct) + mock adapter (`simulate: true`) |
-| `bugfix-diagnose` | `(none — worker only)` | bug-fix workflow (§1.4) | `workflows/bugfix-worker.ts` (direct) + mock adapter (`simulate: true`) |
-| `bugfix-fix` | `(none — worker only)` | bug-fix workflow (§1.4) | `workflows/bugfix-worker.ts` (direct) + mock adapter (`simulate: true`) |
-| `bugfix-test` | `(none — worker only)` | bug-fix workflow (§1.4) | `workflows/bugfix-worker.ts` (direct) + mock adapter (`simulate: true`) |
-| `bugfix-verify` | `(none — worker only)` | bug-fix workflow (§1.4) | `workflows/bugfix-worker.ts` (direct) + mock adapter (`simulate: true`) |
-| `briefing-discover` | `(none — worker only)` | daily-ai-briefing (§1.3) | `workflows/briefing-worker.ts` (briefing adapter) + adapter fixtures (mock) |
-| `briefing-read` | `(none — worker only)` | daily-ai-briefing (§1.3) | `workflows/briefing-worker.ts` (briefing adapter) + adapter fixtures (mock) |
-| `briefing-relate` | `(none — worker only)` | daily-ai-briefing (§1.3) | `workflows/briefing-worker.ts` (briefing adapter) + adapter fixtures (mock) |
-| `briefing-render` | `(none — worker only)` | daily-ai-briefing (§1.3) | `workflows/briefing-worker.ts` (briefing adapter) + adapter fixtures (mock) |
-| `briefing-write` | `(none — worker only)` | daily-ai-briefing (§1.3) | `workflows/briefing-worker.ts` (briefing adapter) + adapter fixtures (mock) |
+| `improve-judge` | `plugins/muse/jobspecs/improve-judge.md` | improve-loop (§1.2) | `workflows/library/worker.ts` (direct) + mock adapter |
+| `improve-aggregate` | `plugins/muse/jobspecs/improve-aggregate.md` | improve-loop (§1.2) | `workflows/library/worker.ts` (direct) + mock adapter |
+| `improve-decide` | `plugins/muse/jobspecs/improve-decide.md` | improve-loop (§1.2) | `workflows/library/worker.ts` (direct) + mock adapter |
+| `improve-fix` | `plugins/muse/jobspecs/improve-fix.md` | improve-loop (§1.2) | `workflows/library/worker.ts` (direct) + mock adapter |
+| `improve-write` | `plugins/muse/jobspecs/improve-write.md` | improve-loop (§1.2) | `workflows/library/worker.ts` (direct) + mock adapter |
+| `slides-create` | `plugins/muse/jobspecs/slides-create.md` | presentations (§1.6) | `workflows/library/worker.ts` (direct) + mock adapter |
+| `slides-render` | `plugins/muse/jobspecs/slides-render.md` | presentations (§1.6) | `workflows/library/worker.ts` (direct) + mock adapter |
+| `plan-draft` | `plugins/muse/jobspecs/plan-draft.md` | plan-driven-work (§1.7) | `workflows/library/worker.ts` (direct) + mock adapter |
+| `plan-phase` | `plugins/muse/jobspecs/plan-phase.md` | plan-driven-work (§1.7) | `workflows/library/worker.ts` (direct) + mock adapter |
+| `bugfix-reproduce` | `(none — worker only)` | bug-fix workflow (§1.4) | `workflows/dogfood/bugfix-worker.ts` (direct) + mock adapter (`simulate: true`) |
+| `bugfix-diagnose` | `(none — worker only)` | bug-fix workflow (§1.4) | `workflows/dogfood/bugfix-worker.ts` (direct) + mock adapter (`simulate: true`) |
+| `bugfix-fix` | `(none — worker only)` | bug-fix workflow (§1.4) | `workflows/dogfood/bugfix-worker.ts` (direct) + mock adapter (`simulate: true`) |
+| `bugfix-test` | `(none — worker only)` | bug-fix workflow (§1.4) | `workflows/dogfood/bugfix-worker.ts` (direct) + mock adapter (`simulate: true`) |
+| `bugfix-verify` | `(none — worker only)` | bug-fix workflow (§1.4) | `workflows/dogfood/bugfix-worker.ts` (direct) + mock adapter (`simulate: true`) |
+| `briefing-discover` | `(none — worker only)` | daily-ai-briefing (§1.3) | `workflows/dogfood/briefing-worker.ts` (briefing adapter) + adapter fixtures (mock) |
+| `briefing-read` | `(none — worker only)` | daily-ai-briefing (§1.3) | `workflows/dogfood/briefing-worker.ts` (briefing adapter) + adapter fixtures (mock) |
+| `briefing-relate` | `(none — worker only)` | daily-ai-briefing (§1.3) | `workflows/dogfood/briefing-worker.ts` (briefing adapter) + adapter fixtures (mock) |
+| `briefing-render` | `(none — worker only)` | daily-ai-briefing (§1.3) | `workflows/dogfood/briefing-worker.ts` (briefing adapter) + adapter fixtures (mock) |
+| `briefing-write` | `(none — worker only)` | daily-ai-briefing (§1.3) | `workflows/dogfood/briefing-worker.ts` (briefing adapter) + adapter fixtures (mock) |
 
 Notes on the pairing:
 
 - **The v0 workers are deterministic keyword/coverage
-  workers, not LLM judgment** (`workflows/worker.ts` header).
+  workers, not LLM judgment** (`workflows/library/worker.ts` header).
   The jobspec prose describes the real rules; the worker is a
   mechanical implementation of them. The mock adapter mirrors
   the same logic (input-dependent mock judges), so mock runs
@@ -525,18 +996,21 @@ Notes on the pairing:
 
 ## 5. Support files (not library entries)
 
-These live in `workflows/` but are not reusable control flow;
+These live under `workflows/library/` (`worker.ts`,
+`improve-loop.INTEGRATION-TEST.md`), `workflows/dogfood/` (the
+rest) and `workflows/rubrics/` (the meta-rubric) but are not reusable control flow;
 they are the other half of the entries above. Listed so the
 inventory is complete and so nobody mistakes them for entries.
 
 | File | What it is | Used by |
 |---|---|---|
-| `worker.ts` | Direct adapter's worker process: genuine computation for the `judge` / `fix` / `aggregate` / `rubric-update` specs and the five `improve-*` specs. One process per job trap; result JSON on the last stdout line. | §1.1 consumers, §1.2 (via direct adapter) |
-| `bugfix-worker.ts` | Worker process for the five `bugfix-*` specs (reproduce / diagnose / fix / test / verify), real under direct, `simulate: true` under mock (imported by the mock adapter). | §1.4 |
-| `briefing-worker.ts` | Worker process for the five `briefing-*` specs (live arXiv fetches, real scoring/extraction). | §1.3 (via briefing adapter) |
-| `briefing-prep.ts` | Scratch setup run via an exec trap: copies the live seen list + HTML builder into the run's scratch dir (read-only; the live files are never written). | §1.3 |
-| `briefing-prior-work.ts` | Data: the prior-work index (`PRIOR_WORK`) the briefing workflow passes to its relate jobs. Imported by §1.3, so it IS in the frozen closure. | §1.3 |
-| `improve-loop.INTEGRATION-TEST.md` | Manual runbook for the real-engine improve-loop run (not a workflow). | §1.2 |
+| `library/worker.ts` | Direct adapter's worker process: genuine computation for the `judge` / `fix` / `aggregate` / `rubric-update` specs and the five `improve-*` specs. One process per job trap; result JSON on the last stdout line. | §1.1 consumers, §1.2 (via direct adapter) |
+| `dogfood/bugfix-worker.ts` | Worker process for the five `bugfix-*` specs (reproduce / diagnose / fix / test / verify), real under direct, `simulate: true` under mock (imported by the mock adapter). | §1.4 |
+| `dogfood/briefing-worker.ts` | Worker process for the five `briefing-*` specs (live arXiv fetches, real scoring/extraction). | §1.3 (via briefing adapter) |
+| `dogfood/briefing-prep.ts` | Scratch setup run via an exec trap: copies the live seen list + HTML builder into the run's scratch dir (read-only; the live files are never written). | §1.3 |
+| `dogfood/briefing-prior-work.ts` | Data: the prior-work index (`PRIOR_WORK`) the briefing workflow passes to its relate jobs. Imported by §1.3, so it IS in the frozen closure. | §1.3 |
+| `library/improve-loop.INTEGRATION-TEST.md` | Manual runbook for the real-engine improve-loop run (not a workflow). | §1.2 |
+| `rubrics/meta-rubric.md` | The meta-rubric (v1.0): the 14-criterion rubric that judges rubrics, under four perspective headings. Data, not process. The default judging rubric for §1.9. | §1.9 |
 
 ## 6. Admittance — how a task maps to a library workflow
 
@@ -548,7 +1022,7 @@ layer-1 scheduler: which backlog tasks run, under a WIP limit
 1. Explicit map wins: `--map` JSON `{ taskId: workflowPath }`.
 2. Then `--workflow PATH`: one workflow for every admitted task.
 3. Then a `workflow:<name>` label on the task: a bare name
-   resolves under the workflows dir (`workflows/<name>.ts`); a
+   resolves under the library dir (`workflows/library/<name>.ts`); a
    path is used as-is.
 4. Otherwise the task is skipped with reason
    `needs-workflow` — it needs AgentTS code written for it
@@ -571,8 +1045,9 @@ as a comment (2026-11-16), not decided here unless noted:
 
 - **Q1 — which workflows belong in the library next: DECIDED
   2026-11-17.** Presentations next after the MVP push, on
-  Google Slides + JudgeFixLoop. No implementation issue filed
-  yet.
+  Google Slides + JudgeFixLoop. Implemented as
+  `workflows/library/presentations.ts` ([BRA-109](https://linear.app/brandf/issue/BRA-109/presentations-library-workflow-bra-52-q1-google-slides-judgefixloop),
+  2026-11-17).
 - **Q2 — whether sub-workflows should become child runs:
   DECIDED 2026-11-17.** Form A (import, same process/journal)
   is the MVP form and works today; form B (run/call on top of

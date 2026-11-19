@@ -103,8 +103,8 @@ function expectThrow(fn: () => unknown, needle: string, label: string): void {
 // ---------------------------------------------------------- A. converted callers extract green
 const CALLERS: { file: string; judgeInput: string }[] = [
   { file: "tests/workflows/workflow-judge-fix-loop.ts", judgeInput: "JudgeInput<WorkItem, Rubric>" },
-  { file: "workflows/workflow-bugfix-bra54.ts", judgeInput: "JudgeInput<FixItem, FixRubric>" },
-  { file: "workflows/daily-ai-briefing.ts", judgeInput: "JudgeInput<WorkItem, Rubric>" },
+  { file: "workflows/dogfood/workflow-bugfix-bra54.ts", judgeInput: "JudgeInput<FixItem, FixRubric>" },
+  { file: "workflows/dogfood/daily-ai-briefing.ts", judgeInput: "JudgeInput<WorkItem, Rubric>" },
 ];
 for (const { file, judgeInput } of CALLERS) {
   const abs = path.join(ROOT, file);

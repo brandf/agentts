@@ -1,7 +1,7 @@
 // BRA-89 test workflow (briefing adapter): an exec trap (writes a
 // marker, sleeps in the shell so the drive can be stranded
 // mid-dispatch), then a briefing-discover job served by
-// workflows/briefing-worker.ts through the briefing adapter's
+// workflows/dogfood/briefing-worker.ts through the briefing adapter's
 // DirectAdapter. The discover step does live arXiv fetches, so this
 // workflow is refusal-only in the test: the pin check fires before
 // the worker ever runs, and no control leg executes it. The test

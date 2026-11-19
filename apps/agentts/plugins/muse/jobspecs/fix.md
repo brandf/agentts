@@ -31,6 +31,29 @@ loops score higher. Do not merely rephrase.
      first word, used meaningfully.
 4. Keep the goal unchanged.
 
+## Rubric-review shape
+
+When the item is a rubric (`item.kind === "rubric"`), revise the
+rubric text from the judges' verdicts — including their open-ended
+feedback, which the verdicts carry alongside the scores:
+1. From every verdict's `notes`, collect the criteria marked
+   "missing". From every verdict's guided answers, question 1 (the
+   missed dimension) names the same set — collect any criterion it
+   names that the notes missed.
+2. For each missed criterion, append one sentence that genuinely
+   addresses it (one per criterion, in the rubric's own voice —
+   e.g. "Coverage: this rubric scores every quality dimension that
+   distinguishes good work from bad work, including the subtle
+   ones."). The sentence must name the criterion: naming it is what
+   the next round's judge checks.
+3. Never append a guided answer verbatim: a Q2 answer quotes the
+   criticism ("ignores coverage, discrimination"), and quoting it
+   would make the next round score the criterion as addressed for
+   merely being mentioned.
+4. Append a revision marker `(revised n).` as in the generic shape.
+   Keep `scope`, `artifactKind`, and `references` unchanged — the fix
+   never rewrites the rubric's scope or its reference examples.
+
 ## Output
 
 ```json

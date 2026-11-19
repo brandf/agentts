@@ -113,15 +113,15 @@ console.log("\n=== A. admittance unit ===");
   const inFlight = [{ taskId: "BRA-104", runId: "run-old", status: "linked" }];
   const r = admitTasks(backlog, inFlight, {
     wipLimit: 3,
-    workflowMap: { "BRA-101": "workflows/judge-fix-loop.ts" },
-    defaultWorkflow: "workflows/worker.ts",
+    workflowMap: { "BRA-101": "workflows/library/judge-fix-loop.ts" },
+    defaultWorkflow: "workflows/library/worker.ts",
   });
   check(r.inFlight === 1 && r.freeSlots === 2, `WIP OK: 1 in flight, 2 free slots (got ${r.inFlight}/${r.freeSlots})`);
   check(
     r.admitted.map((a) => a.task.id).join(",") === "BRA-101,BRA-105",
     `ORDER OK: urgent first, then medium (got ${r.admitted.map((a) => a.task.id).join(",")})`,
   );
-  check(r.admitted[0].workflow === "workflows/judge-fix-loop.ts", "MAP OK: explicit map wins for BRA-101");
+  check(r.admitted[0].workflow === "workflows/library/judge-fix-loop.ts", "MAP OK: explicit map wins for BRA-101");
   check(
     r.skipped.some((s) => s.task.id === "BRA-102" && /WIP limit/.test(s.reason)),
     "WIP OK: low-priority BRA-102 skipped once slots are full",
@@ -139,7 +139,7 @@ console.log("\n=== A. admittance unit ===");
   const r2 = admitTasks(
     [{ id: "BRA-104", title: "already running", status: "In Progress", priority: 1 }],
     [{ taskId: "BRA-104", runId: "run-old", status: "done" }],
-    { wipLimit: 1, defaultWorkflow: "workflows/worker.ts" },
+    { wipLimit: 1, defaultWorkflow: "workflows/library/worker.ts" },
   );
   check(
     r2.admitted.map((a) => a.task.id).join(",") === "BRA-104",
@@ -155,10 +155,10 @@ console.log("\n=== A. admittance unit ===");
   const r4 = admitTasks(
     [{ id: "BRA-107", title: "labelled", status: "Todo", priority: 2, labels: ["workflow:judge-fix-loop"] }],
     [],
-    { wipLimit: 3, workflowsDir: "workflows" },
+    { wipLimit: 3 }, // no workflowsDir: bare labels resolve under the default (workflows/library)
   );
   check(
-    r4.admitted[0]?.workflow === "workflows/judge-fix-loop.ts",
+    r4.admitted[0]?.workflow === "workflows/library/judge-fix-loop.ts",
     `LABEL OK: workflow:<name> label resolves (got ${r4.admitted[0]?.workflow ?? "?"})`,
   );
   check(resolveWorkflow({ id: "X", title: "x", status: "Todo" }, {}) === null, "RESOLVE OK: no mapping returns null");
@@ -451,7 +451,7 @@ console.log("\n=== F. CLI admit (local backend) ===");
     };
     fs.writeFileSync(path.join(STATE_DIR, "task-runs.json"), JSON.stringify(seed, null, 2));
     const mapFile = path.join(WORKDIR, "map.json");
-    fs.writeFileSync(mapFile, JSON.stringify({ "BRA-201": "workflows/judge-fix-loop.ts" }));
+    fs.writeFileSync(mapFile, JSON.stringify({ "BRA-201": "workflows/library/judge-fix-loop.ts" }));
     const cli = (args: string[]) =>
       spawnSync([BUN, path.join(ROOT, "src", "cli.ts"), ...args, "--state-dir", STATE_DIR], {
         cwd: ROOT,
@@ -463,7 +463,7 @@ console.log("\n=== F. CLI admit (local backend) ===");
     check(/ADMIT BRA-201/.test(text(dry.stdout)) && /needs-workflow/.test(text(dry.stdout)), `ADMIT-DRY OK: BRA-201 admitted, BRA-202 needs-workflow (out: ${text(dry.stdout).replace(/\n/g, " | ").slice(0, 300)})`);
     const afterDry = JSON.parse(fs.readFileSync(path.join(STATE_DIR, "task-runs.json"), "utf8"));
     check(afterDry.links.length === 1, `ADMIT-DRY OK: dry run wrote nothing (links still ${afterDry.links.length})`);
-    const real = cli(["admit", "--backend", "local", "--wip", "3", "--workflow", "workflows/judge-fix-loop.ts"]);
+    const real = cli(["admit", "--backend", "local", "--wip", "3", "--workflow", "workflows/library/judge-fix-loop.ts"]);
     check(real.exitCode === 0, `ADMIT OK: exit 0 (stderr: ${text(real.stderr).slice(0, 200)})`);
     const after = JSON.parse(fs.readFileSync(path.join(STATE_DIR, "task-runs.json"), "utf8"));
     const linked = after.links.filter((l: any) => l.taskId === "BRA-201" || l.taskId === "BRA-202");
@@ -476,7 +476,7 @@ console.log("\n=== F. CLI admit (local backend) ===");
     check(!!q202 && q202.priority === 4 && q202.status === "queued", "ADMIT OK: BRA-202 queued with priority 4");
     check(!queue.some((e: any) => e.taskId === "BRA-203"), "ADMIT OK: done BRA-203 never queued");
     // Second admit: nothing new — both are already queued/in flight.
-    const again = cli(["admit", "--backend", "local", "--wip", "3", "--workflow", "workflows/judge-fix-loop.ts"]);
+    const again = cli(["admit", "--backend", "local", "--wip", "3", "--workflow", "workflows/library/judge-fix-loop.ts"]);
     check(/in flight: 3/.test(text(again.stdout)), `ADMIT-AGAIN OK: second admit sees 3 in flight, admits nothing new (out: ${text(again.stdout).replace(/\n/g, " | ").slice(0, 200)})`);
     const queue2 = JSON.parse(fs.readFileSync(path.join(STATE_DIR, "queue.json"), "utf8"));
     check(queue2.length === queue.length, "ADMIT-AGAIN OK: no duplicate queue entries");

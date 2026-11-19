@@ -1,0 +1,30 @@
+{
+  "executeThrough": "summarize-notes",
+  "phaseOutlines": [
+    {
+      "acceptance": "notes recorded",
+      "description": "Record the plan notes for the mock run",
+      "kind": "agent",
+      "name": "draft-notes"
+    },
+    {
+      "acceptance": "notes summary recorded",
+      "dependsOn": [
+        "draft-notes"
+      ],
+      "description": "Summarize the notes record for the mock run",
+      "kind": "agent",
+      "name": "summarize-notes"
+    },
+    {
+      "acceptance": "notes filed",
+      "dependsOn": [
+        "summarize-notes"
+      ],
+      "description": "File the notes summary (deferred in the mock run)",
+      "kind": "agent",
+      "name": "file-notes"
+    }
+  ],
+  "request": "Draft and execute a small agent-only plan (mock mirror check)"
+}

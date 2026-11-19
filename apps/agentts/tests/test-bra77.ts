@@ -393,14 +393,31 @@ async function scenarioC(): Promise<void> {
   for (const l of badLines) fs.appendFileSync(journalPath(runId), l + "\n");
   const list = cli(["queue", "list", "--state-dir", STATE_DIR]);
   check(list.rc === 0, `C1 START OK: queue list exited 0 with a corrupt journal line present (got ${list.rc}) — the Host starts`);
-  const combined = `${list.out}\n${list.err}`;
+  // BRA-98: construction loads no journals, so a `queue list` — which
+  // never touches this run — does NOT report the corruption. The
+  // report comes when the run is first accessed instead (see the
+  // C1 REPORT check on `status` below).
+  const listCombined = `${list.out}\n${list.err}`;
   check(
-    combined.includes("CORRUPT JOURNAL") && combined.includes(`${runId}.journal`),
-    `C1 REPORT OK: corruption reported (CORRUPT JOURNAL + ${runId}.journal on stderr)`,
+    !listCombined.includes("CORRUPT JOURNAL"),
+    `C1 LAZY OK: queue list does not report a corruption it never read (no CORRUPT JOURNAL on stderr)`,
   );
   const res = getResult(runId);
   check(res?.exitCode === 0, `C1 RESULT OK: ${runId} result still returns the output after journal corruption (exitCode ${res?.exitCode})`);
-  const events = statusEvents(runId);
+  // BRA-98: first access of the run loads its journal and quarantines
+  // the bad lines — the CORRUPT JOURNAL report fires here, on the
+  // `status` that reads the run, not at construction.
+  const status = cli(["status", runId, "--state-dir", STATE_DIR]);
+  check(status.rc === 0, `C1 STATUS OK: status exited 0 (got ${status.rc})`);
+  const statusCombined = `${status.out}\n${status.err}`;
+  check(
+    statusCombined.includes("CORRUPT JOURNAL") && statusCombined.includes(`${runId}.journal`),
+    `C1 REPORT OK: corruption reported on first access (CORRUPT JOURNAL + ${runId}.journal on status stderr)`,
+  );
+  const events = (() => {
+    const m = status.out.match(/^events: (\d+)$/m);
+    return m ? Number(m[1]) : null;
+  })();
   check(events === goodCount, `C1 GOOD OK: status shows only the ${goodCount} good events (${events}) — the 5 bad lines are quarantined, not counted`);
   const good = readJournal(runId);
   check(good.every((e) => typeof e.event === "string"), "C1 GOOD OK: every kept journal event has a string `event` field");

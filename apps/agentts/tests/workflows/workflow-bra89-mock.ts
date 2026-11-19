@@ -1,7 +1,7 @@
 // BRA-89 test workflow (mock adapter): a gate trap first (the mock
 // adapter answers no trap slowly — its exec is canned — so the run
 // strands at a held gate instead of a sleeping exec), then a
-// bugfix-reproduce job served in-process by workflows/bugfix-worker.ts
+// bugfix-reproduce job served in-process by workflows/dogfood/bugfix-worker.ts
 // via the mock adapter's live runBugfix import. The reproduce step
 // runs simulated (a fast static check, no build), so the control run
 // completes deterministically. The test edits bugfix-worker.ts

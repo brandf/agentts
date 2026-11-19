@@ -289,6 +289,18 @@ documented **not now** (or **never**), not a task.
   do not chase. (If a script ever calls `agentts result` in a tight
   loop, use the in-process Host API instead.)
 
+  **Superseded 2026-11-17 (BRA-100).** The verdict above measured
+  correctly but assumed wrongly about who calls the CLI: the
+  production driver (the tick agent) invokes it per action, so the
+  CLI *is* a hot path for the deployed system. The production path
+  is now benched end to end (`production_path` group, 9 metrics),
+  counted (11 fresh Bun processes per unit of work), and gated —
+  see `bench/AUDIT-BRA100.md` for the measured tax (~2.3s per run
+  vs ~63ms in-process) and the evaluation of the ideal (CLI as a
+  server on the existing worker server, recommended). The original
+  verdict is kept here as history; the live position is in
+  AUDIT-BRA100.md.
+
 ## What is already cheap (do not optimize)
 
 - **Journal appends** (0.01ms) and **queue writes** (0.9–1.3ms) are

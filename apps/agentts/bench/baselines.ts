@@ -23,9 +23,24 @@
 //     anything above that (but still green) resets it to 0, and a
 //     breach (observation > threshold) resets it to 0 and fails.
 //   - When greenStreak reaches RATCHET_K = 5 consecutive observations
-//     each beating the threshold by >= 20%, the metric ratchets:
-//     newBaseline = median of those 5 observations,
+//     each beating the threshold by >= 20%, the metric ratchets —
+//     but ONLY on a decisive improvement (BRA-107): the window median
+//     must also be <= RATCHET_DECISIVE (0.80) x the old baseline.
+//     Otherwise the streak resets without moving (the metric is green
+//     but not decisively faster, so the baseline stays). This stops
+//     the ratchet chasing the quiet floor in small steps: without it
+//     a streak of observations up to 2.4x the old baseline (0.80x a
+//     3.0x threshold) could ratchet the baseline down to a median
+//     barely below the old one, and the next loaded run would breach
+//     the tightened threshold. With the decisive rule the clamp below
+//     is a safety net rather than the active rule, since a decisive
+//     median is always below the old baseline.
+//     newBaseline = min(median of those 5 observations, old baseline),
 //     newThreshold = newBaseline x multiple, greenStreak resets to 0.
+//     Tighten-only (BRA-107): the window median can exceed the old
+//     baseline, so the ratchet never moves a baseline up. When the
+//     clamp binds (median >= old baseline) nothing changes: the
+//     streak resets and the observation counts as green.
 //     The ratchet is appended to ratchet.log with before/after numbers.
 //   - Never ratchet on a single good run: one observation is noise.
 //   - Loosening is NEVER automatic. `check.ts loosen <metric>
@@ -41,6 +56,7 @@ export const RATCHET_LOG_PATH = path.join(BENCH_DIR, "ratchet.log");
 
 export const RATCHET_K = 5; // consecutive observations to trigger a ratchet
 export const RATCHET_MARGIN = 0.8; // observation must beat threshold by >=20%
+export const RATCHET_DECISIVE = 0.8; // ratchet only when the window median is <= 0.80x the OLD BASELINE (BRA-107)
 export const HISTORY_KEEP = 10; // observations retained per metric
 
 export const MULTIPLES: Record<string, number> = {
@@ -59,11 +75,20 @@ export const MULTIPLES: Record<string, number> = {
   // measurement of 35,522B / 546,502B within 3%). A 10% growth means
   // the snapshot format or the live heap changed.
   bytes: 1.1,
+  // Counts: 1.0x. A count metric (BRA-100: fresh CLI invocations per
+  // unit of work) is deterministic by construction — the bench counts
+  // the spawns it performed, and the same sequence yields the same
+  // count on every run. Any increase is a real change to the loop
+  // (a CLI call added), not noise, so the threshold equals the
+  // baseline and any increase fails the gate loudly for review. The
+  // ratchet can never fire on a count: a green observation must beat
+  // 0.80x the threshold, impossible for an exact count.
+  count: 1.0,
 };
 
 export interface BaselineEntry {
   unit: string;
-  kind: "latency" | "bytes";
+  kind: "latency" | "bytes" | "count";
   baseline: number;
   threshold: number;
   multiple: number;
@@ -77,7 +102,7 @@ export interface BaselinesFile {
   generated: string;
   codeFingerprint: Record<string, string>;
   multiples: Record<string, number>;
-  ratchet: { k: number; margin: number; historyKeep: number };
+  ratchet: { k: number; margin: number; decisive: number; historyKeep: number };
   metrics: Record<string, BaselineEntry>;
 }
 
@@ -100,7 +125,7 @@ export function writeBaselinesFile(
 ): void {
   const metrics: Record<string, BaselineEntry> = {};
   for (const r of results) {
-    const kind = r.unit === "bytes" ? "bytes" : "latency";
+    const kind = r.unit === "bytes" ? "bytes" : r.unit === "invocations" ? "count" : "latency";
     const multiple = MULTIPLES[kind];
     metrics[r.id] = {
       unit: r.unit,
@@ -118,7 +143,7 @@ export function writeBaselinesFile(
     generated: new Date().toISOString(),
     codeFingerprint,
     multiples: MULTIPLES,
-    ratchet: { k: RATCHET_K, margin: RATCHET_MARGIN, historyKeep: HISTORY_KEEP },
+    ratchet: { k: RATCHET_K, margin: RATCHET_MARGIN, decisive: RATCHET_DECISIVE, historyKeep: HISTORY_KEEP },
     metrics,
   };
   fs.writeFileSync(BASELINES_PATH, JSON.stringify(file, null, 2) + "\n");
@@ -145,7 +170,13 @@ export function logRatchet(line: string): void {
 /** Apply one observation to a metric's ratchet state. Returns
  * "breach" | "ratcheted" | "green" | "green-no-streak". Mutates the
  * entry in place (history/streak/baseline/threshold) and logs any
- * ratchet. Never loosens: a breach only fails and resets the streak. */
+ * ratchet. Never loosens: a breach only fails and resets the streak,
+ * and the ratchet itself never moves a baseline up (BRA-107):
+ * newBaseline = min(window median, old baseline); when the clamp
+ * binds the streak resets and the outcome is green, with no ratchet
+ * logged. The ratchet also fires only on a decisive improvement
+ * (BRA-107 (c)): window median <= 0.80x old baseline; otherwise the
+ * streak resets with no move and no ratchet logged. */
 export function applyObservation(
   entry: BaselineEntry,
   metricId: string,
@@ -165,9 +196,34 @@ export function applyObservation(
   }
   if (entry.greenStreak >= RATCHET_K) {
     const window = entry.history.slice(-RATCHET_K);
-    const newBaseline = Math.round(median(window) * 100) / 100;
     const oldBaseline = entry.baseline;
     const oldThreshold = entry.threshold;
+    const windowMedian = Math.round(median(window) * 100) / 100;
+    // BRA-107 (c): ratchet only on a decisive improvement. A streak
+    // of observations each <= 0.80x threshold can still have a window
+    // median barely below (or above) the old baseline; ratcheting to
+    // that median chases the quiet floor in small steps and the next
+    // loaded run breaches the tightened threshold. If the median is
+    // not decisively below the old baseline, reset the streak without
+    // moving — same outcome as the clamp binding below, no ratchet
+    // logged.
+    if (windowMedian > RATCHET_DECISIVE * oldBaseline) {
+      entry.greenStreak = 0;
+      return "green";
+    }
+    // BRA-107: tighten-only. The window median can exceed the old
+    // baseline (a streak observation only needs <= 0.80x threshold,
+    // i.e. up to 2.4x the old baseline for latency), so clamp:
+    // newBaseline = min(window median, old baseline). When the clamp
+    // binds there is nothing to tighten — reset the streak and count
+    // the observation green, with no ratchet logged. With the decisive
+    // rule above the clamp is a safety net: a decisive median is
+    // always below the old baseline, so the clamp should never bind.
+    const newBaseline = Math.min(windowMedian, oldBaseline);
+    if (newBaseline >= oldBaseline) {
+      entry.greenStreak = 0;
+      return "green";
+    }
     entry.baseline = newBaseline;
     entry.threshold = thresholdFor(newBaseline, entry.multiple);
     entry.greenStreak = 0;

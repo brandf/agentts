@@ -9,7 +9,7 @@
 //    timeout). The worker is a separate process doing genuine work
 //    over the actual input — not a canned answer. Registry: spec ->
 //    worker script path; default workers live in
-//    apps/agentts/workflows/worker.ts (judge/fix/aggregate/
+//    apps/agentts/workflows/library/worker.ts (judge/fix/aggregate/
 //    rubric-update for JudgeFixLoop). An unregistered spec is a loud
 //    error, never a canned default.
 //  - exec: run the command for real (spawnSync, in the given cwd or
@@ -30,7 +30,7 @@ import { decideLocal } from "../../../src/decision-model";
 
 export interface DirectAdapterConfig {
   /** spec -> worker script path. Defaults to the bundled
-   * workflows/worker.ts for the JudgeFixLoop specs. */
+   * workflows/library/worker.ts for the JudgeFixLoop specs. */
   workers?: Record<string, string>;
   /** Worker timeout in ms (default 120_000). */
   workerTimeoutMs?: number;
@@ -38,8 +38,8 @@ export interface DirectAdapterConfig {
   cwd?: string;
 }
 
-const DEFAULT_WORKER = path.resolve(import.meta.dir, "..", "..", "..", "workflows", "worker.ts");
-const DEFAULT_BUGFIX_WORKER = path.resolve(import.meta.dir, "..", "..", "..", "workflows", "bugfix-worker.ts");
+const DEFAULT_WORKER = path.resolve(import.meta.dir, "..", "..", "..", "workflows", "library", "worker.ts");
+const DEFAULT_BUGFIX_WORKER = path.resolve(import.meta.dir, "..", "..", "..", "workflows", "dogfood", "bugfix-worker.ts");
 
 export class DirectAdapter implements Adapter {
   readonly name = "direct";
@@ -64,12 +64,20 @@ export class DirectAdapter implements Adapter {
       "bugfix-verify": DEFAULT_BUGFIX_WORKER,
       // Improve-loop workflow (standard library): the same worker
       // script serves the improve-* specs (genuine computation over
-      // the actual item + rubric — see workflows/worker.ts).
+      // the actual item + rubric — see workflows/library/worker.ts).
       "improve-judge": DEFAULT_WORKER,
       "improve-aggregate": DEFAULT_WORKER,
       "improve-decide": DEFAULT_WORKER,
       "improve-fix": DEFAULT_WORKER,
       "improve-write": DEFAULT_WORKER,
+      // Presentations workflow (BRA-109): the same worker script
+      // serves the slides-* specs (deck build + render).
+      "slides-create": DEFAULT_WORKER,
+      "slides-render": DEFAULT_WORKER,
+      // Plan-driven-work template (BRA-117): the same worker script
+      // serves the plan-* specs (plan draft + phase execution).
+      "plan-draft": DEFAULT_WORKER,
+      "plan-phase": DEFAULT_WORKER,
       ...(config.workers ?? {}),
     };
     // Suite-running workers need longer than the old 120s default:

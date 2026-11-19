@@ -6,6 +6,15 @@
  *           [--adapter mock|direct] [--clock virtual|real] [--state-dir DIR]
  *           [--task TASK] [--gates auto|hold] [--workers-config workers.json]
  *           [--mock-answers answers.json]
+ *   agentts run - [--input-file FILE | --input JSON] [--wait] [...]
+ *           (BRA-112: "-" reads the workflow source from stdin and
+ *           materializes it, content-addressed, to
+ *           .agentts-scratch/inline/<sha256[0:16]>.ts under the cwd;
+ *           the frozen copy is the durable record and nothing is
+ *           ever deleted. Relative imports resolve against
+ *           .agentts-scratch/inline/ — prefix ../../ to reach the
+ *           repo tree, e.g. ../../workflows/library/judge-fix-loop from
+ *           apps/agentts. Empty stdin is a loud error.)
  *   agentts result <runId> [--state-dir DIR]
  *   agentts check <workflow> [--state-dir DIR] [--json]
  *           (first-run gate + extraction + M2 checker, no run:
@@ -75,8 +84,9 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
-import { Host, HostRefusalError, type RepairReport } from "./host";
+import { Host, HostRefusalError, defaultAdapterName, flushNotifications, loadWorkersConfig, type RepairReport } from "./host";
 import { MockAdapter } from "../plugins/mock/src/mock-adapter";
 import { DirectAdapter } from "../plugins/direct/src/direct-adapter";
 import {
@@ -106,7 +116,9 @@ import {
 function usage(): never {
   console.error(`usage:
   agentts run <workflow> [--run-id ID] [--input-file FILE | --input JSON] [--wait] [--adapter mock|direct] [--clock virtual|real] [--state-dir DIR] [--task TASK] [--gates auto|hold] [--workers-config workers.json] [--mock-answers answers.json]
+  agentts run - [--input-file FILE | --input JSON] [--wait] [...] (BRA-112: "-" reads the workflow source from stdin; materialized content-addressed to .agentts-scratch/inline/<hash>.ts under the cwd; relative imports resolve against .agentts-scratch/inline/)
   (--adapter default: direct on the production state dir ~/workspace/agentts-state, mock elsewhere)
+  (--gates default auto: the mock adapter answers gates "yes" at once and logs GATE AUTO-ANSWERED; a real human checkpoint needs --gates hold on BOTH run/submit and queue run — run and queue run build separate Hosts (BRA-119). The direct and muse adapters always hold.)
   agentts result <runId> [--state-dir DIR]
   agentts check <workflow> [--state-dir DIR] [--json]
   agentts check --layering [dirs...] [--json]
@@ -123,7 +135,8 @@ function usage(): never {
   agentts admit [--state-dir DIR] [--backend linear|local] [--wip N] [--map FILE] [--workflow PATH] [--dry-run]
   agentts cost-model [--state-dir DIR]
   agentts profile <runId> [--state-dir DIR] [--format text|html] [--journal FILE] [--out FILE]
-  agentts worker serve [--port N] [--state-dir DIR] [--lease-ms N] [--max-attempts N] [--affinity-hold-ms N] [--affinity-ttl-ms N] [--max-pool-size N] [--max-cpu-slots N] [--max-decisions-per-sec N] [--max-tokens-per-hour N] [--dispatch-aging-ms N]
+  agentts worker serve [--port N] [--state-dir DIR] [--lease-ms N] [--max-attempts N] [--affinity-hold-ms N] [--affinity-ttl-ms N] [--max-pool-size N] [--max-cpu-slots N] [--max-decisions-per-sec N] [--max-tokens-per-hour N] [--dispatch-aging-ms N] [--workers-config FILE]
+  (BRA-111: --workers-config / AGENTTS_WORKERS_CONFIG on the server registers worker scripts on the driver Host's DirectAdapters, so runs submitted with --adapter direct + a workers-config keep their workers through the queue drive; a missing/bad file fails the drive loudly with 500.)
   agentts worker status [--server URL]
   agentts worker cancel <jobId> [--reason R] [--server URL]
   agentts worker get-job --worker-id W [--server URL]
@@ -176,11 +189,11 @@ async function makeHost(args: string[]): Promise<Host> {
   // silently fake success, so a production submit that forgets
   // --adapter must not fake it. Tests and scratch state dirs keep the
   // mock default. An explicit --adapter always wins over this default.
-  const PROD_STATE_DIR = path.join(os.homedir(), "workspace", "agentts-state");
-  const isProdStateDir =
-    path.resolve(stateDir(args)) === path.resolve(PROD_STATE_DIR);
+  // The default adapter is one rule, shared with the worker server's
+  // driver endpoints (defaultAdapterName, src/host.ts) — direct on
+  // the production state dir, mock elsewhere.
   const adapterName =
-    flag(args, "--adapter") ?? (isProdStateDir ? "direct" : "mock");
+    flag(args, "--adapter") ?? defaultAdapterName(stateDir(args));
   const clock = (flag(args, "--clock") ?? "virtual") as "virtual" | "real";
   if (clock !== "virtual" && clock !== "real") {
     console.error(`unknown clock mode "${clock}" (virtual|real)`);
@@ -200,24 +213,24 @@ async function makeHost(args: string[]): Promise<Host> {
   // --mock-answers { spec: value } as canned job answers on the mock
   // adapter. A missing file or bad JSON is a loud error, never a
   // silent skip — an unregistered spec must still fail loudly.
+  // BRA-111: the config is parsed once (loadWorkersConfig, shared
+  // with the worker server's driver host) and carried on the Host,
+  // which applies it to its own adapter AND to every fresh
+  // DirectAdapter it loads for a queued entry — so a run submitted
+  // with --adapter direct + a workers-config keeps its workers no
+  // matter which process drives it.
   const workersConfigPath = flag(args, "--workers-config") ?? process.env.AGENTTS_WORKERS_CONFIG;
+  let workersConfig: Record<string, string> | undefined;
   if (workersConfigPath) {
     if (!(adapter instanceof DirectAdapter)) {
       console.error(`--workers-config applies to the direct adapter, not "${adapterName}"`);
       process.exit(1);
     }
-    const cfg = readJsonConfig(workersConfigPath, "workers config");
-    for (const [spec, script] of Object.entries(cfg)) {
-      if (typeof script !== "string") {
-        console.error(`workers config: spec "${spec}" has a non-string script path`);
-        process.exit(1);
-      }
-      const resolved = path.isAbsolute(script) ? script : path.resolve(script);
-      if (!fs.existsSync(resolved)) {
-        console.error(`workers config: script for spec "${spec}" not found: ${resolved}`);
-        process.exit(1);
-      }
-      adapter.registerWorker(spec, resolved);
+    try {
+      workersConfig = loadWorkersConfig(workersConfigPath);
+    } catch (e) {
+      console.error(e instanceof Error ? e.message : String(e));
+      process.exit(1);
     }
   }
   const mockAnswersPath = flag(args, "--mock-answers") ?? process.env.AGENTTS_MOCK_ANSWERS;
@@ -242,7 +255,28 @@ async function makeHost(args: string[]): Promise<Host> {
   if (adapter instanceof MockAdapter) {
     adapter.setCanned("decide", (_type, arg) => ({ value: decideLocal(arg.question, arg.options) }));
   }
-  return new Host({ stateDir: stateDir(args), adapter, clock });
+  return new Host({ stateDir: stateDir(args), adapter, clock, workersConfig });
+}
+
+/** BRA-112: materialize a stdin workflow source under the cwd so its
+ * relative imports resolve from a real file path. Content-addressed
+ * (.agentts-scratch/inline/<sha256[0:16]>.ts): an identical re-submit
+ * reuses the same file, and nothing is ever deleted — the file
+ * persists in scratch (ephemeral by convention) and the frozen copy
+ * is the durable, auditable record. The file lives under the cwd
+ * (NOT the state dir) because the file's directory is the
+ * import-resolution base. Note the base is the materialized file's
+ * directory, .agentts-scratch/inline/ — not the cwd root — so a
+ * one-shot reaching the repo tree writes ../../workflows/... . */
+function materializeInlineWorkflow(source: string): string {
+  const hash = createHash("sha256").update(source).digest("hex").slice(0, 16);
+  const dir = path.resolve(".agentts-scratch", "inline");
+  fs.mkdirSync(dir, { recursive: true });
+  const file = path.join(dir, `${hash}.ts`);
+  if (!fs.existsSync(file) || fs.readFileSync(file, "utf8") !== source) {
+    fs.writeFileSync(file, source);
+  }
+  return file;
 }
 
 /** Submit a workflow + input: gate + extract + validate the input,
@@ -252,9 +286,31 @@ async function makeHost(args: string[]): Promise<Host> {
  * anymore. Input comes from --input-file (a JSON file) or --input
  * (inline JSON); giving both is refused. */
 async function cmdRun(args: string[]): Promise<number> {
-  const workflow = args[0];
+  let workflow = args[0];
   if (!workflow) usage();
-  const runId = flag(args, "--run-id") ?? `run-${path.basename(workflow, ".ts")}-${Date.now()}`;
+  // BRA-112: "-" reads the workflow source from stdin (Unix
+  // convention). A TTY with no piped input is a loud error, not a
+  // silent block waiting for EOF; empty stdin is a loud error too.
+  let runId = flag(args, "--run-id");
+  if (workflow === "-") {
+    if (process.stdin.isTTY) {
+      console.error(`agentts run - reads the workflow from stdin: pipe the source in (heredoc or here-string), do not run it on a terminal`);
+      return 1;
+    }
+    const source = await Bun.stdin.text();
+    if (!source.trim()) {
+      console.error(`agentts run -: no workflow source on stdin (empty input)`);
+      return 1;
+    }
+    try {
+      workflow = materializeInlineWorkflow(source);
+    } catch (e) {
+      console.error(`agentts run -: could not materialize the stdin workflow: ${e instanceof Error ? e.message : String(e)}`);
+      return 1;
+    }
+    runId ??= `run-inline-${Date.now()}`;
+  }
+  runId ??= `run-${path.basename(workflow, ".ts")}-${Date.now()}`;
   const taskId = flag(args, "--task");
   const host = await makeHost(args);
   const inputFile = flag(args, "--input-file");
@@ -703,7 +759,7 @@ async function cmdAdmit(args: string[]): Promise<number> {
       }
     }
   }
-  const workflowsDir = path.resolve("workflows");
+  const workflowsDir = path.resolve("workflows", "library");
   const result = admitTasks(
     backlog,
     inFlight,
@@ -891,6 +947,15 @@ async function main(): Promise<number> {
     }
     console.error(`ERROR: ${e instanceof Error ? e.message : String(e)}`);
     return 1;
+  } finally {
+    // BRA-96: notifyEvent POSTs are fire-and-forget fetches — an
+    // explicit process.exit() abandons them, so flush every
+    // in-flight notification before the process exits. Without
+    // this, a submit's run-submitted event is lost and the tick
+    // agent never wakes to drive the run (BRA-110). All
+    // process.exit(1) calls in this file happen before any Host
+    // exists, so there is nothing to flush on those paths.
+    await flushNotifications();
   }
 }
 

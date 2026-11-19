@@ -222,7 +222,7 @@ function resolveHostPath(): string {
 // plugins/mock/src/mock-adapter.ts and plugins/mock/src/mock-plugin.ts.
 // The swap test requires identical answers, so this block is
 // inserted verbatim into both files; keep them in sync. It mirrors
-// workflows/worker.ts's improve-* implementations exactly (same
+// workflows/library/worker.ts's improve-* implementations exactly (same
 // criterion checks, same dedupe/filter rules, same fix sentences),
 // except improve-write, which computes the same paths + bytes
 // WITHOUT writing files (a mock never writes).

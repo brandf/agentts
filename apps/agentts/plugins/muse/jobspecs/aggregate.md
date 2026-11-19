@@ -32,12 +32,21 @@ INPUT shape, not by guessing:
 - `failed` = the input's `failed` count (NOT verdicts.length -
   approved — the caller already counted branch failures).
 - `summary` = `"<approved> approved, <failed> failed, mean <meanScore>"`.
+- `openFeedbackThemes` = when the verdicts carry open-ended feedback
+  (`guidedAnswers` / `openFeedback`, the rubric-review shape), the
+  recurring themes alongside the mean: the question-2 adversarial
+  probe answers plus the free-form feedback, deduped first-seen, at
+  most 6. Verdicts without open-ended feedback contribute no themes.
 
 ## Output
 
 ```json
-{ "approved": 0, "failed": 0, "meanScore": 0.55, "summary": "0 approved, 0 failed, mean 0.55" }
+{ "approved": 0, "failed": 0, "meanScore": 0.55, "summary": "0 approved, 0 failed, mean 0.55", "openFeedbackThemes": ["A rubric that checks only structure and ignores coverage would pass ..."] }
 ```
+
+`openFeedbackThemes` is present on the JudgeVerdict shape (empty when
+no verdict carried open-ended feedback); the Outcome shape (`{ok}`)
+carries no meanScore and no themes.
 
 ## Notes (learnings from workers — append, don't rewrite)
 

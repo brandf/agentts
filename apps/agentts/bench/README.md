@@ -28,12 +28,21 @@ This directory is the first.
 - `baselines.ts` — the baseline format, threshold multiples, the ratchet
   rule, and the manual-loosen path. One file owns the format so `run.ts`
   and `check.ts` cannot drift apart.
-- `baselines.json` — measured medians + thresholds (43 metrics).
+- `baselines.json` — measured medians + thresholds (52 metrics).
 - `check.ts` / `check.sh` — the alarm check (below).
 - `results/` — dated raw results files (`results-2026-11-16.json` is the
   run the baselines were taken from).
 - `AUDIT.md` — the ranked audit with measured numbers, the idealized
   devil's advocate per metric, price tags, and verdicts.
+- `AUDIT-BRA100.md` — the production-path audit (BRA-100, 2026-11-17):
+  the fresh-CLI tax measured end to end, the 11-invocation count, and
+  the evaluation of the ideal (CLI-as-server on the worker server,
+  recommended) — overturns the AUDIT.md §11 NEVER verdict.
+- `AUDIT-BRA116.md` — the driver-endpoints audit (BRA-116, 2026-11-18):
+  the BRA-100 option A built — six driver endpoints, tick/beat/drive/
+  deliver/list over HTTP, the count 11 → 1, e2e 2255 → 699ms — and the
+  self-notify deadlock the bench caught (2s per server drive, event
+  lost) and the in-process `onEvent` fix for it.
 - `ratchet.log` — append-only audit log of every ratchet and loosen
   (created on first ratchet/loosen; absent until then).
 
@@ -51,12 +60,15 @@ bun bench/run.ts [--reps N] [--metrics id,...] [--out FILE] [--write-baselines] 
 - `--write-baselines` rewrites `baselines.json` from the run's medians.
   Only do this after reviewing the numbers — a baseline is a claim
   about what the code does, not an auto-generated artifact.
-- `check.sh` runs the suite (default 3 reps), compares each metric's
+- `check.sh` runs the suite (default 5 reps), compares each metric's
   median against its threshold, and exits 0 (all green) or 1 (any
   breach, missing metric, or suite failure). A breach never changes a
-  baseline.
+  baseline. A breach is confirmed before it fails the check: the suite
+  is re-run once and only the breaching metric(s) are re-checked
+  (BRA-107 confirm-before-fail) — a single-observation flake passes
+  on the re-measure and is discarded, not recorded.
 
-## Metrics (43)
+## Metrics (52)
 
 | Group | Metrics | What it measures |
 |---|---|---|
@@ -78,6 +90,10 @@ bun bench/run.ts [--reps N] [--metrics id,...] [--out FILE] [--write-baselines] 
 | `fsync_ms.500kb.plain/atomic` | 2 | Plain write+rename vs write_file_atomic (2 fsyncs) for a 500KB file |
 | `blob_recipe_ms.500kb` | 1 | The storeBlob recipe: copy + sha256 of source, tmp, dest |
 | `notify_ms.local_server/dead_port` | 2 | notifyEvent POST via curl spawn to a live loopback server / a dead port |
+| `prod_tick_ms`, `prod_tick_beat_ms` | 2 | The tick call (`--timeout-ms 0`, no 60s wait) and the beat, each a curl spawn against a throwaway worker server (BRA-116: was a fresh `bun plugins/muse/tick.ts`) |
+| `prod_submit_ms`, `prod_queue_run_ms`, `prod_deliver_result_ms`, `prod_queue_list_ms`, `prod_deliveries_ms` | 5 | Each production step as the tick agent invokes it — submit stays a fresh `bun src/cli.ts ...` (warm extract cache, scratch state dir); the other four are curl calls to the worker server's driver endpoints (BRA-116) |
+| `prod_e2e_ms` | 1 | The whole tick-agent sequence per unit of work (submit → tick → beat → queue run → beat → tick → beat → deliver-result → beat → deliveries → queue list), submit CLI + the rest over HTTP |
+| `prod_invocations_per_run` | 1 | Fresh Bun processes per unit of work (count kind, 1.0x threshold — any change is a real change to the tick-agent loop; BRA-116: 1, the submit spawn — curl calls are not Bun processes) |
 
 Notes on the measurements:
 
@@ -115,28 +131,29 @@ multiple is a human decision, recorded in `ratchet.log` like a loosen.
   increments the streak; anything above that (but still green) resets
   it to 0; a breach resets it to 0 and fails the check.
 - When `greenStreak` reaches **K = 5** consecutive observations each
-  beating the threshold by >= 20%, the metric ratchets: new baseline =
-  median of those 5 observations, new threshold = new baseline x
-  multiple, streak resets to 0. The ratchet is appended to
-  `ratchet.log` with before/after numbers.
+  beating the threshold by >= 20%, the metric ratchets — but only on a
+  **decisive improvement (BRA-107 (c))**: the window median must also
+  be <= 0.80x the old baseline. Otherwise the streak resets without
+  moving (green, but not decisively faster). This stops the ratchet
+  chasing the quiet floor in small steps. When it does ratchet: new
+  baseline = min(median of those 5 observations, old baseline), new
+  threshold = new baseline x multiple, streak resets to 0. The ratchet
+  is appended to `ratchet.log` with before/after numbers.
 - Never ratchet on a single good run: one observation is noise.
-- **The ratchet can move a baseline UP, not only down.** A streak
-  observation only has to be <= 0.80 x threshold — for a latency
-  metric (threshold = baseline x 3.0) that is up to 2.4x the old
-  baseline — and the new baseline is the window median, which can
-  exceed the old baseline. Observed 2026-11-17 (`ratchet.log`):
-  `notify_ms.local_server` 8.44 -> 11.2 ms (window [13.19, 12.46,
-  7.51, 7.51, 11.2]) and `slice_spawn_ms` 19.61 -> 22.85 ms (window
-  [22.85, 36.75, 18.87, 24.56, 19.02]). This contradicts the BRA-93
-  "auto-tighten only / loosening is never automatic" rule as
-  stated — the rule describes the intent, the code ratchets to the
-  window median in either direction. **Open decision (BRA-107
-  adjacent):** either clamp the ratchet to tighten-only (new
-  baseline = min(window median, old baseline)) or restate the rule
-  as "the ratchet tracks the loaded-machine median" and drop the
-  auto-tighten-only claim. Do not reword this section to hide the
-  discrepancy until the decision lands — the mechanism change is
-  code, not docs.
+- **Tighten-only (BRA-107, decided and implemented).** The ratchet
+  never moves a baseline up: new baseline = min(median of those 5
+  observations, old baseline). Before the clamp, a streak observation
+  only had to be <= 0.80 x threshold — for a latency metric up to
+  2.4x the old baseline — and the new baseline was the window median,
+  which could exceed the old baseline. Observed 2026-11-17
+  (`ratchet.log`): `notify_ms.local_server` 8.44 -> 11.2 ms (window
+  [13.19, 12.46, 7.51, 7.51, 11.2]) and `slice_spawn_ms` 19.61 ->
+  22.85 ms (window [22.85, 36.75, 18.87, 24.56, 19.02]). Those upward
+  moves are what the clamp removes; the BRA-93 "auto-tighten only /
+  loosening is never automatic" rule now holds in the code, not just
+  as intent. When the clamp binds (window median >= old baseline)
+  nothing changes: the streak resets and the observation counts as
+  green, with no ratchet logged.
 - The **manual** loosen path is separate and unchanged:
   `./bench/check.sh loosen <metric> <newBaseline> --reason "..."`,
   which sets the baseline, recomputes the threshold from the multiple,
@@ -172,13 +189,15 @@ Wired at `run.sh:263-265`:
 # BRA-93: benchmark regression alarms (bench/check.sh runs the suite
 # itself; --no-ratchet keeps a suite run from recording history —
 # use the plain form in CI so green runs count toward the ratchet).
-./bench/check.sh --reps 3 || exit 1
+./bench/check.sh --reps 5 || exit 1
 ```
 
-The check takes ~80s at 3 reps. It exits non-zero on any breach, so
-`run.sh` fails loudly the same way it does for a test failure. Note
-the gate's flakiness: it has failed on a different marginal timing
-metric in roughly every other run during BRA-106 verification, while
-the same metrics go green on re-run (BRA-107, post-MVP) — a red gate
-is not yet evidence of a regression, and the thresholds were
-ratcheted under loaded-machine runs. See the variance note above.
+The check takes ~2 min at 5 reps. It exits non-zero on any breach, so
+`run.sh` fails loudly the same way it does for a test failure. The
+gate's flakiness (BRA-107) is now handled in the gate itself: reps
+are 5 instead of 3, a breach is re-measured once before it fails
+(confirm-before-fail), and the ratchet only moves on a decisive
+improvement — so a red gate now means the same metric breached twice
+in a row, which is evidence of a regression, not load luck. The
+thresholds were ratcheted under loaded-machine runs; see the variance
+note above.

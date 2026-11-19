@@ -498,7 +498,7 @@ async function main(): Promise<number> {
     return 1;
   }
   // Workers config: the JFL specs + fixtures, all real scripts.
-  const workerScript = path.join(ROOT, "workflows", "worker.ts");
+  const workerScript = path.join(ROOT, "workflows", "library", "worker.ts");
   const fixtures = path.join(ROOT, "tests", "fixtures");
   fs.writeFileSync(
     WORKERS_JSON,

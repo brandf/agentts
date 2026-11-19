@@ -104,10 +104,10 @@ Workers config format (`--workers-config`, also `--workers-config`
 on `agentts run` for the direct adapter — the BRA-56 fix):
 
 ```json
-{ "judge": "/abs/path/workflows/worker.ts",
-  "fix": "/abs/path/workflows/worker.ts",
-  "aggregate": "/abs/path/workflows/worker.ts",
-  "rubric-update": "/abs/path/workflows/worker.ts" }
+{ "judge": "/abs/path/workflows/library/worker.ts",
+  "fix": "/abs/path/workflows/library/worker.ts",
+  "aggregate": "/abs/path/workflows/library/worker.ts",
+  "rubric-update": "/abs/path/workflows/library/worker.ts" }
 ```
 
 ## Proof

@@ -257,12 +257,66 @@ echo "--- durablets-dir suite (BRA-103: \$AGENTTS_DURABLETS_DIR export pins the 
 echo "--- generic-specialization suite (BRA-106: extractor specializes generic trap contracts per instantiation; JudgeFixLoop calls traps directly) ---"
 BRA106_WORKDIR="$SCRATCH/bra106" /opt/hatch-image/bin/bun "$HOSTSRC/tests/test-bra106.ts" || exit 1
 
+echo "--- stdin one-shot suite (BRA-112: agentts run - reads the workflow from stdin, materialized content-addressed to .agentts-scratch/inline/) ---"
+BRA112_WORKDIR="$SCRATCH/bra112" /opt/hatch-image/bin/bun "$HOSTSRC/tests/test-bra112.ts" || exit 1
+
+echo "--- incremental snapshots suite (BRA-90: hash-linked snapshot chain — keyframe + delta per checkpoint, interval/ratio rebase, torn/corrupt/wrong-hash/missing fault injection, shared-keyframe fork, measured write amplification, legacy migration, full-only interval 0) ---"
+BRA90_WORKDIR="$SCRATCH/bra90" /opt/hatch-image/bin/bun "$HOSTSRC/tests/test-bra90.ts" || exit 1
+
+echo "--- run/call suite (BRA-105: sub-workflows as child runs — value through the trap, sleep suspend/resume, loud throw, nested run/call, cancellation down the tree, freeze pinning, loud refusal, fresh-process gate resume) ---"
+BRA105_WORKDIR="$SCRATCH/bra105" /opt/hatch-image/bin/bun "$HOSTSRC/tests/test-bra105.ts" || exit 1
+
+echo "--- presentations suite (BRA-109: Google Slides + JudgeFixLoop — deck build, review loop improves the deck, stubborn cap, invalid inputs fail loudly, real workers) ---"
+BRA109_WORKDIR="$SCRATCH/bra109" /opt/hatch-image/bin/bun "$HOSTSRC/tests/test-bra109.ts" || exit 1
+
+echo "--- driver endpoints suite (BRA-116: tick agent drives over HTTP — endpoint behaviour + error cases, lock refusal both directions, restart-mid-drive repair, deliver-gate end to end) ---"
+BRA116_WORKDIR="$SCRATCH/bra116" /opt/hatch-image/bin/bun "$HOSTSRC/tests/test-bra116.ts" || exit 1
+
+echo "--- plan-driven-work suite (BRA-117: plan → review → execute → review template — direct BRA-110 plan proof with a held gate and frozen==executed, mock mirror, stubborn cap, invalid inputs fail loudly, failing phase stops the run) ---"
+BRA117_WORKDIR="$SCRATCH/bra117" /opt/hatch-image/bin/bun "$HOSTSRC/tests/test-bra117.ts" || exit 1
+
+echo "--- production deliver proof suite (BRA-110: tick-loop drive + deliver on the direct adapter with a real exec, double-delivery guard, failed-run delivery, deliver refusals, coordinator read-back) ---"
+BRA110_WORKDIR="$SCRATCH/bra110" /opt/hatch-image/bin/bun "$HOSTSRC/tests/test-bra110.ts" || exit 1
+
+echo "--- briefing live cutover suite (BRA-111: direct adapter fails loudly without a workers-config, drives briefing jobs with one through the queue, bad configs fail loudly, checked-in config maps all five specs) ---"
+BRA111_WORKDIR="$SCRATCH/bra111" /opt/hatch-image/bin/bun "$HOSTSRC/tests/test-bra111.ts" || exit 1
+
+echo "--- join-slice failure reporting suite (BRA-121: a throw after an all()/any()/race() join fails cleanly with the real error journaled — no join-slice crash, no 3x retry; caught-after-join happy path still completes) ---"
+BRA121_WORKDIR="$SCRATCH/bra121" /opt/hatch-image/bin/bun "$HOSTSRC/tests/test-bra121.ts" || exit 1
+
+echo "--- cancelled-run failure reporting suite (BRA-125: a run that fails on cancel journals its lifecycle failed event with the real error — the cancel handler prints the exception before emitting, like run/resume) ---"
+BRA125_WORKDIR="$SCRATCH/bra125" /opt/hatch-image/bin/bun "$HOSTSRC/tests/test-bra125.ts" || exit 1
+
+echo "--- host-result failure derivation suite (BRA-131: result() for a stepwise-driven failure reports failed with the journal's real error — same host and fresh host — for a cancel-failure and a first-slice throw; a suspended run still reports running, an unknown runId still pending) ---"
+BRA131_WORKDIR="$SCRATCH/bra131" /opt/hatch-image/bin/bun "$HOSTSRC/tests/test-bra131.ts" || exit 1
+
+echo "--- driver-bundle cache suite (BRA-94: a second run of the same frozen workflow + input reuses the cached bundle — same bytes, one cache entry — while a changed input or workflow rebuilds; child runs share the cache; a fresh Host hits the disk cache) ---"
+BRA94_WORKDIR="$SCRATCH/bra94" /opt/hatch-image/bin/bun "$HOSTSRC/tests/test-bra94.ts" || exit 1
+
+echo "--- blob-recipe suite (BRA-95: the storeBlob recipe hashed src twice — the duplicate computation is gone, the tmp/dst checks stay; a stranded delta checkpoint's manifest hashes match the bytes on disk, the run resumes with the right result, and a truncated delta or keyframe still fails loudly) ---"
+BRA95_WORKDIR="$SCRATCH/bra95" /opt/hatch-image/bin/bun "$HOSTSRC/tests/test-bra95.ts" || exit 1
+
+echo "--- notifyEvent suite (BRA-96: notifyEvent POSTs via a fire-and-forget in-process fetch instead of a blocking curl spawn — same payload, dead port and slow server never block the drive, a child that notifies and exits immediately still delivers, onEvent sink still takes precedence) ---"
+BRA96_WORKDIR="$SCRATCH/bra96" /opt/hatch-image/bin/bun "$HOSTSRC/tests/test-bra96.ts" || exit 1
+
+echo "--- gate auto-answer suite (BRA-119: the mock adapter's silent auto-\"yes\" is now loud — GATE AUTO-ANSWERED on stderr naming the run and trap, trap-dispatched and trap-result carry auto:true — while --gates hold on BOTH run and queue run holds until deliver-gate, and queued answers stay unmarked) ---"
+BRA119_WORKDIR="$SCRATCH/bra119" /opt/hatch-image/bin/bun "$HOSTSRC/tests/test-bra119.ts" || exit 1
+
+echo "--- phase-review diagnosis suite (BRA-126: a failing phase review diagnoses its root-cause level itself — work / workflow / rubric, possibly several at once — with a reason and a fix routing per level, carried into the template result; a three-level failure is named as all three; a converged review gets no diagnosis) ---"
+BRA126_WORKDIR="$SCRATCH/bra126" /opt/hatch-image/bin/bun "$HOSTSRC/tests/test-bra126.ts" || exit 1
+
+echo "--- lazy journal loading suite (BRA-98: construction loads no journals — a corrupt line is not discovered until the run is first accessed, first access loads + quarantines, append works for loaded and unloaded runs, underscore run ids load correctly) ---"
+BRA98_WORKDIR="$SCRATCH/bra98" /opt/hatch-image/bin/bun "$HOSTSRC/tests/test-bra98.ts" || exit 1
+
+echo "--- rubric-review suite (rubric-rubric: rubricReview library workflow — TextRubric inline/file resolution, three-judge + fix loop carrying open-ended feedback, reference-examples enforcement, negative-control weak rubric scores 0 then converges, meta-rubric self-scores 1.0) ---"
+RUBRIC_REVIEW_WORKDIR="$SCRATCH/rubric-review" /opt/hatch-image/bin/bun "$HOSTSRC/tests/test-rubric-review.ts" || exit 1
+
 # BRA-93: benchmark regression alarms (bench/check.sh runs the suite
 # itself; --no-ratchet keeps a suite run from recording history —
 # use the plain form in CI so green runs count toward the ratchet).
 # (|| exit 1 added: run.sh has no set -e, so a bare call would NOT
 # fail the run on a breach — every other suite line carries it.)
-./bench/check.sh --reps 3 || exit 1
+./bench/check.sh --reps 5 || exit 1
 
 echo
-echo "PASS host end to end (reference suite green, mock suite green, host suite green, profiler green, checker green, layering import lint green, swap test green, worker pool green, scheduling green, tick driver green — incl. disconnect unregisters the waiter — bra61 stuck-worker green, bra75 crash-recovery green, bra72 queue/driver integrity green, bra77 corrupt-state resilience green, bra71 run-integrity green, bra74 crash-resume green, bra76 smaller-robustness-gaps green, bra67 fault-injection coverage green, bra73 journal-schema green, bra47 decision-cascade green, bra52 workflow-library manifest green, bra82 enqueue-race green, bra83 atomic C snapshot writes green, bra84 torn run-entry recovery green, bra85 state-dir relocation green, bra88 verbatim-copy drift green, and bra89 trap-code pin green, bra101 HOLD-identity green, bra103 durablets-dir green, and bra106 generic specialization green, benchmark regression alarms green)"
+echo "PASS host end to end (reference suite green, mock suite green, host suite green, profiler green, checker green, layering import lint green, swap test green, worker pool green, scheduling green, tick driver green — incl. disconnect unregisters the waiter — bra61 stuck-worker green, bra75 crash-recovery green, bra72 queue/driver integrity green, bra77 corrupt-state resilience green, bra71 run-integrity green, bra74 crash-resume green, bra76 smaller-robustness-gaps green, bra67 fault-injection coverage green, bra73 journal-schema green, bra47 decision-cascade green, bra52 workflow-library manifest green, bra82 enqueue-race green, bra83 atomic C snapshot writes green, bra84 torn run-entry recovery green, bra85 state-dir relocation green, bra88 verbatim-copy drift green, and bra89 trap-code pin green, bra101 HOLD-identity green, bra103 durablets-dir green, and bra106 generic specialization green, bra112 stdin one-shot green, bra90 incremental snapshots green, bra105 run/call child runs green, bra109 presentations workflow green, bra116 driver endpoints green, bra117 plan-driven-work green, bra110 production deliver proof green, bra111 briefing live cutover green, bra121 join-slice failure reporting green, bra125 cancelled-run failure reporting green, bra131 host-result failure derivation green, bra94 driver-bundle cache green, bra95 blob recipe green, bra96 notifyEvent without curl green, bra119 gate auto-answer loud + marked green, bra126 phase-review diagnosis green, bra98 lazy journal loading green, rubric-review rubricReview green, benchmark regression alarms green — incl. bra100 production-path bench green)"

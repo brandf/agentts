@@ -33,10 +33,17 @@ src/
   cli.ts             `agentts` CLI: run / deliver-gate / status / queue /
                      sync-task / version / check (M2 checker, BRA-29)
 workflows/
-  judge-fix-loop.ts  generic JudgeFixLoop<X, R> library (loop logic; the
-                     trap-calling steps are caller-supplied — see below)
-  worker.ts          the direct adapter's worker process (genuine rubric
+  library/           the standard library (reusable, supported)
+    judge-fix-loop.ts  generic JudgeFixLoop<X, R> library (loop logic; the
+                       trap-calling steps are caller-supplied — see below)
+    improve-loop.ts  the improve-loop standard-library workflow
+    hello.ts         the hello quickstart (canonical minimal workflow)
+    worker.ts        the direct adapter's worker process (genuine rubric
                      scoring / fixing / aggregating over the real input)
+  dogfood/           real consumers proving the engine (not reusable library)
+    daily-ai-briefing.ts, workflow-bugfix-bra54.ts — the consumers
+    briefing-worker.ts, briefing-prep.ts, briefing-prior-work.ts,
+    bugfix-worker.ts — their worker + helper scripts
 tests/
   run-host-suite.ts  the host suite (ported core suite + host-only tests)
   swap-test-host.ts  byte-identical comparison: reference vs mock vs host
@@ -185,8 +192,11 @@ Exit codes: 0 done, 2 held at a gate, 1 error / refusal. State
 defaults to `./.agentts-state` (or `$AGENTTS_STATE_DIR`).
 
 State layout: `slices/` (transient .snap/.out/.log), `blobs/` (disk
-blob store), `journals/` (JSONL, source of truth), `runs/` (persisted
-run entries), `cache/` (schema cache), `queue.json`, `task-runs.json`.
+blob store: latest keyframe copy + latest delta + checkpoint
+manifest per run, keyframes content-addressed under
+`blobs/keyframes/` — BRA-90), `journals/` (JSONL, source of truth),
+`runs/` (persisted run entries), `cache/` (schema cache),
+`queue.json`, `task-runs.json`.
 
 ```sh
 bun src/cli.ts profile <runId> [--state-dir DIR] [--format text|html] [--journal FILE] [--out FILE]
@@ -305,7 +315,7 @@ renders from a `file://` open. See `src/profiler.ts` and
   Decision shape is `Decision` in the `agentts` module (BRA-47).
 - **Real subagent judges are NOT in this build.** The direct adapter's
   job path spawns real worker PROCESSES (genuine computation over the
-  real input — see `workflows/worker.ts`), not canned answers. True
+  real input — see `workflows/library/worker.ts`), not canned answers. True
   Muse-subagent judges need a caller that can spawn subagents (this
   build runs at depth 2 and cannot); the worker API is the seam they
   plug into (BRA-48/49 worker pool). The mock run proves the loop;

@@ -10,10 +10,10 @@
 // (the built-in mock returns a generic {score:0.5} for unknown specs,
 // which fails validation against the briefing's concrete types).
 //
-//   direct (real): bun src/cli.ts run workflows/daily-ai-briefing.ts \
+//   direct (real): bun src/cli.ts run workflows/dogfood/daily-ai-briefing.ts \
 //       --adapter briefing --state-dir <scratch>
 //   mock (fixtures): AGENTTS_BRIEFING_MOCK=1 bun src/cli.ts run \
-//       workflows/daily-ai-briefing.ts --adapter briefing \
+//       workflows/dogfood/daily-ai-briefing.ts --adapter briefing \
 //       --state-dir <scratch>
 //
 // The worker script is resolved relative to this file (staged tree),
@@ -37,8 +37,8 @@ const BRIEFING_SPECS = [
 function briefingWorkerPath(): string {
   const here = import.meta.dir;
   const candidates = [
-    path.resolve(here, "..", "..", "..", "workflows", "briefing-worker.ts"),
-    path.resolve(here, "..", "..", "..", "..", "..", "agentts-host", "workflows", "briefing-worker.ts"),
+    path.resolve(here, "..", "..", "..", "workflows", "dogfood", "briefing-worker.ts"),
+    path.resolve(here, "..", "..", "..", "..", "..", "agentts-host", "workflows", "dogfood", "briefing-worker.ts"),
   ];
   for (const c of candidates) {
     if (fs.existsSync(c)) return c;

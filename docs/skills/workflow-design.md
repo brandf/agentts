@@ -62,7 +62,7 @@ Three mechanisms enforce it, and each is in the code:
 - **The numbers a decision branches on.** The JudgeFixLoop decide
   questions carry `mean score X threshold Y` and `misses: N …
   if misses >= M` inline in the question string
-  (`workflows/judge-fix-loop.ts`, `workflows/daily-ai-briefing.ts`).
+  (`workflows/library/judge-fix-loop.ts`, `workflows/dogfood/daily-ai-briefing.ts`).
   That is not decoration: the local decision model
   (`src/decision-model.ts`) can only parse signals that are in the
   question text. A decide question without its numbers inline is a
@@ -71,8 +71,8 @@ Three mechanisms enforce it, and each is in the code:
   §2.1).
 - **Small verdicts and scorecards the workflow reduces.** The
   aggregate steps take `verdicts: JudgeVerdict[]` / `scorecards:
-  Scorecard[]` inline (`workflows/judge-fix-loop.ts`,
-  `workflows/improve-loop.ts`) because the workflow itself counts,
+  Scorecard[]` inline (`workflows/library/judge-fix-loop.ts`,
+  `workflows/library/improve-loop.ts`) because the workflow itself counts,
   averages, and dedupes them. The aggregate input is bounded (3
   judges, 2 scorecards) and structured — exactly the shape inline
   is for.
@@ -102,7 +102,7 @@ Two built examples:
   judging against a rubric that is not there. The workflow reads
   the referenced content once, at the point of use, and carries the
   small parsed rubric inline from then on.
-- **Seen list by copy.** The briefing workflow (`workflows/
+- **Seen list by copy.** The briefing workflow (`workflows/dogfood/
   daily-ai-briefing.ts`) dedupes against a **copy** of the seen list
   in scratch (`SEEN_COPY = ${SCRATCH}/seen-copy.md`, made by the
   prep exec step) — not the live list. The copy is the version pin:
@@ -467,9 +467,9 @@ attempt history) so the result reads the same way:
 - §1: `packages/durablets/src/agentts.ts` (`toJsonValue`,
   JSON boundary rule), `apps/agentts/src/host.ts` (journal
   events, full trap arg), `apps/agentts/src/profiler.ts`
-  (`summarizeArg`, `summarizeResult`), `workflows/judge-fix-loop.ts`,
-  `workflows/improve-loop.ts` (`resolveRubric`),
-  `workflows/daily-ai-briefing.ts` (seen-copy), `docs/audits/
+  (`summarizeArg`, `summarizeResult`), `workflows/library/judge-fix-loop.ts`,
+  `workflows/library/improve-loop.ts` (`resolveRubric`),
+  `workflows/dogfood/daily-ai-briefing.ts` (seen-copy), `docs/audits/
   robustness-2026-11-16.md` (G9), `apps/agentts/tests/test-bra71.ts`
   (G9 closed by BRA-71).
 - §2: `apps/agentts/plugins/muse/jobspecs/_template.md`,
@@ -478,16 +478,16 @@ attempt history) so the result reads the same way:
   `apps/agentts/src/worker-protocol.ts` (`specPath`/`specHash`),
   `apps/agentts/plugins/muse/worker-loop.ts` (`ensureSpec`),
   `apps/agentts/plugins/muse/WORKER.md` (hash-change reads,
-  institutional learnings), `workflows/worker.ts`
+  institutional learnings), `workflows/library/worker.ts`
   (improve-* implementations mirroring the jobspecs).
 - §3: `apps/agentts/src/decision-model.ts`,
   `packages/durablets/src/agentts.ts` (the `Decision` shape +
   `decisionCascade`, BRA-47 — implemented 2026-11-16),
   `apps/agentts/tests/test-bra47.ts` (10 scenarios, green in
   `run.sh`), Linear BRA-47 (implemented — cascade built behavior,
-  §3.3), `workflows/daily-ai-briefing.ts` (must-read ratification),
-  `workflows/workflow-bugfix-bra54.ts` (advisory JFL),
-  `workflows/improve-loop.ts` (decide-as-job, advisory threshold),
+  §3.3), `workflows/dogfood/daily-ai-briefing.ts` (must-read ratification),
+  `workflows/dogfood/workflow-bugfix-bra54.ts` (advisory JFL),
+  `workflows/library/improve-loop.ts` (decide-as-job, advisory threshold),
   `apps/agentts/src/host.ts` (`recordDelivery`,
   `needsAttention`).
 

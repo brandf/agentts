@@ -6,7 +6,7 @@ about any host, or about how a trap is executed. Execution lives below
 the plugin, behind the environment adapter (`plugin/adapter.ts`).
 
 ```ts
-import { job, exec, gate, sleep, cron, decide } from "agentts";
+import { job, exec, gate, sleep, cron, decide, run } from "agentts";
 
 interface ScoreInput { value: number; }
 interface ScoreResult { score: number; label: string; }
@@ -67,6 +67,33 @@ There is deliberately no default result type here. The cascade's
 decide tier uses `DecideTierResult` (the canonical Decision shape,
 BRA-47, in this module); other decide calls name their own result
 type.
+
+### `run<Input, Output>(spec: RunSpec<Input>): Output` (BRA-105)
+
+Call a sub-workflow by file path — form B sub-workflow
+composition (BRA-52 Q2). The sub-workflow's result IS the trap
+result: the parent suspends on the run trap while the child
+runs, and resumes with the child's validated result.
+
+```ts
+export interface RunSpec<Input> {
+  workflow: string; // path to the sub-workflow file, string literal
+  input: Input;
+}
+```
+
+Supply BOTH type arguments explicitly, as concrete named types
+(same rule as `job`). The path MUST be a string literal;
+relative paths resolve against the parent workflow's directory,
+absolute paths as-is. The child runs under its own runId
+(`<trapId>/child`) with its own journal, frozen closure, and
+checkpoint chain; the child file is pinned in the parent's
+frozen closure at parent submit, so an edit after submit cannot
+change what executes. A child failure throws at the call site
+with the child's error name and message preserved (catchable by
+the parent); a child held at a gate holds the parent at the run
+trap until a later drive resumes it. Full mechanics: the comment
+block above `resolveRunTrap` in `apps/agentts/src/host.ts`.
 
 ### Combinators: `all`, `any`, `race`
 

@@ -23,6 +23,11 @@ change.
 3. Keep every existing criterion, in order. Keep the threshold
    unchanged.
 
+Text rubrics: when the rubric carries `text` (a markdown blob, e.g.
+the meta-rubric), return it unchanged — v0 never rewrites versioned
+human-owned prose. The loop records the update round and needs two
+more loops before convergence.
+
 ## Output
 
 ```json

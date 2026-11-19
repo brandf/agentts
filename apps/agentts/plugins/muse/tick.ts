@@ -2,6 +2,13 @@
 /**
  * tick — the tick agent's two calls (BRA-65).
  *
+ * NOTE (BRA-116): the tick agent itself calls the server with curl
+ * now (see plugins/muse/TICK-AGENT.md) — this script is the
+ * operator/human wrapper for the same two calls, kept because its
+ * exit codes (1 on 409 / transport failure) and its client-side
+ * abort bound are handy outside the agent loop. The bench measures
+ * the curl path, not this script.
+ *
  *   bun plugins/muse/tick.ts --server <URL> [--timeout-ms N]
  *       # the tick call: blocks until a system event arrives or the
  *       # timeout fires (default 60000ms, max 120000ms). Prints the

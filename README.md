@@ -69,7 +69,7 @@ bun src/cli.ts version
 
 A hello workflow — a default-exported function, one JSON-capable
 input in, one JSON-capable output out — ships at
-`apps/agentts/workflows/hello.ts`:
+`apps/agentts/workflows/library/hello.ts`:
 
 ```ts
 import { sleep } from "../src/agentts";
@@ -90,13 +90,13 @@ export default function hello(input: HelloInput): HelloResult {
 
 ```sh
 # 3. Check it (first-run gate: type-check + extraction + M2 checker)
-bun src/cli.ts check workflows/hello.ts --state-dir /tmp/agentts-quickstart/state
-# CHECK OK workflows/hello.ts: 1 trap site(s), entry hello(HelloInput): HelloResult,
+bun src/cli.ts check workflows/library/hello.ts --state-dir /tmp/agentts-quickstart/state
+# CHECK OK workflows/library/hello.ts: 1 trap site(s), entry hello(HelloInput): HelloResult,
 # gate + checker passed (typescript 5.9.3, checker bra29.3)
 
 # 4. Run it: submit, drive the queue, fetch the result
 echo '{"name":"world"}' > /tmp/hello-input.json
-bun src/cli.ts run workflows/hello.ts --run-id run-hello \
+bun src/cli.ts run workflows/library/hello.ts --run-id run-hello \
   --input-file /tmp/hello-input.json --wait \
   --state-dir /tmp/agentts-quickstart/state
 # {
@@ -135,6 +135,13 @@ transcript, including the journal it left behind, is in
   for inline JSON; giving both is refused) **submits** and
   returns a run ID immediately (`RUN <id>`). It does not execute the
   workflow inline; there is no in-process drive mode.
+- `agentts run - ...` (BRA-112) reads the workflow source from stdin
+  (heredoc or here-string) and materializes it, content-addressed, to
+  `.agentts-scratch/inline/<hash>.ts` under the cwd — no file to write,
+  nothing deleted; the frozen copy is the durable record. Relative
+  imports resolve against `.agentts-scratch/inline/`, so reach the repo
+  tree with `../../`, e.g. `../../workflows/library/judge-fix-loop` from
+  `apps/agentts`. Default run ID `run-inline-<timestamp>`.
 - `agentts queue run` **drives** the queue: each queued run is driven
   to completion, a gate hold, or failure, in priority order.
 - `run --wait` is the same path (submit, then `queue run`, then

@@ -1,6 +1,6 @@
 // BRA-89 test workflow (direct adapter): an exec trap (writes a
 // marker, sleeps in the shell so the drive can be stranded
-// mid-dispatch), then a JFL judge job served by workflows/worker.ts,
+// mid-dispatch), then a JFL judge job served by workflows/library/worker.ts,
 // then a decide served by src/decision-model.ts. The item text
 // addresses NONE of the rubric criteria (33 words, so not concise;
 // no vivid word; no number or concrete noun), so the original

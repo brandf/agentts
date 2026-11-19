@@ -14,20 +14,34 @@ Meroki does not turn the machine. You do.
 
 You have the worker queue server (default `http://127.0.0.1:18741`;
 the coordinator gives you the real URL and the state dir — use the
-same state dir every session). All paths below take `--state-dir`.
+same state dir every session). You talk to it with `curl` (BRA-116:
+the driver calls are HTTP, not fresh `bun src/cli.ts` processes —
+each CLI spawn cost ~400ms of module-graph loading, 11 spawns and
+~2.3s per unit of work; the HTTP calls are ~ms each). All calls
+below use `-f` so a non-2xx status exits 22 instead of printing a
+body as success — read the JSON body on success, the exit code on
+failure. Submit stays CLI (the submitter is the coordinator, not
+you — see below).
 
 ```sh
 # 1. tick — the blocking long-poll (your main call)
-bun plugins/muse/tick.ts --server <URL> [--timeout-ms 60000]
+curl -s -f "<URL>/tick?timeoutMs=60000" --max-time 70
 # -> {"events": [{"type": "run-submitted", "at": "...", "runId": "...", ...}], "timedOut": false, "at": "..."}
 # -> {"events": [], "timedOut": true, "at": "..."}   (nothing happened within the timeout — tick again)
+# Exit 22 means a 409: a tick call is already pending (another tick
+# agent may be running — wait 5s and retry; see "Staying alive").
 
 # 2. tick-beat — liveness heartbeat (see "Staying alive" below)
-bun plugins/muse/tick.ts --server <URL> --beat
+curl -s -f -X POST "<URL>/tick-beat"
 
 # 3. drive the queue
-bun src/cli.ts queue run --state-dir <DIR>
-bun src/cli.ts queue list --state-dir <DIR>
+curl -s -f -X POST "<URL>/queue/run"
+# -> {"entries": [{"runId": "...", "status": "done"|"failed"|"held"|..., ...}], "repair": {"inspected": N, "actions": [...]}, "failed": false}
+# Exit 22 means a 409: another driver holds the driver lock — that
+# is the lock working, not a failure; tick again (the other driver
+# will finish and the catch-up sweep will see the result).
+curl -s -f "<URL>/queue/list"
+# -> {"entries": [...]}
 
 # Production adapter default (Nov 16, 2026): runs submitted to this
 # state dir default to the direct adapter, so exec runs execute for
@@ -37,24 +51,35 @@ bun src/cli.ts queue list --state-dir <DIR>
 
 # 3b. repair stranded entries (operator command — you normally do
 #     not need it: `queue run` repairs them itself, see below)
+#     `curl -s -f -X POST <URL>/queue/run` IS the repair: the drive
+#     repairs stranded entries first and reports them in "repair".
+#     A standalone repair is still a CLI operator command:
 bun src/cli.ts queue repair --state-dir <DIR>
 # NEVER use --force. It breaks a held lock and only a human who has
 # confirmed the holder pid is dead may use it.
 
 # 4. deliver a completed output
-bun src/cli.ts deliver-result <runId> --state-dir <DIR>
-bun src/cli.ts deliveries --state-dir <DIR>
+curl -s -f -X POST "<URL>/deliver-result" -H 'content-type: application/json' -d '{"runId": "<runId>"}'
+curl -s -f "<URL>/deliveries"
 
 # 5. escalate something stuck
-bun src/cli.ts escalate '{"kind": "gate-held" | "stuck-running" | "other", "runId": "...", "reason": "...", "detail": ...}' --state-dir <DIR>
+curl -s -f -X POST "<URL>/escalate" -H 'content-type: application/json' -d '{"kind": "gate-held" | "stuck-running" | "other", "runId": "...", "reason": "...", "detail": ...}'
 
 # 6. gate answers (only when the coordinator/human has given you one)
-bun src/cli.ts deliver-gate <runId> '<answer-json>' --state-dir <DIR>
+curl -s -f -X POST "<URL>/deliver-gate" -H 'content-type: application/json' -d '{"runId": "<runId>", "answer": {...}}'
 ```
 
-(`curl` equivalents: `GET /tick?timeoutMs=60000`,
-`POST /tick-beat`, `POST /event` is host-only — never post events
-yourself.)
+Submit is NOT yours: the coordinator submits runs with
+`bun src/cli.ts run <workflow> --state-dir <DIR>` (the submit path
+stays CLI — a `/submit` endpoint was deliberately not built, BRA-116).
+Your job starts when a run is submitted (the `run-submitted` event).
+
+Rollout note (BRA-116): these curl commands need a server running
+the driver endpoints (POST /queue/run and friends). If a call 404s
+with "unknown route", the server is still the old build — do NOT
+fall back to the CLI driver commands; escalate (`other`: "worker
+server predates the driver endpoints — restart it") and keep
+ticking. The server restart is the coordinator's job.
 
 ## The loop
 
@@ -66,7 +91,7 @@ yourself.)
    **catch-up sweep** before your first tick (events may have
    arrived while no tick agent was running — a restart after a VM
    replacement is exactly this case):
-   - `queue list`: any `queued` runs — drive the queue now.
+   - `queue/list`: any `queued` runs — drive the queue now.
    - Any `done`/`failed` runs with no delivery in `deliveries` —
      deliver them (`deliver-result`). A `failed` delivery carries
      `needsAttention: true`; that IS the escalation for a terminal
@@ -119,14 +144,14 @@ jobs), and while it runs you are not ticking. So:
 
 - **Before a long action, start a background heartbeat:**
   ```sh
-  while true; do bun plugins/muse/tick.ts --server <URL> --beat >/dev/null 2>&1; sleep 20; done &
+  while true; do curl -s -f -X POST <URL>/tick-beat >/dev/null 2>&1; sleep 20; done &
   BEAT_PID=$!
   ```
   Run the action, then `kill $BEAT_PID`.
 - **Beat once before and once after every action**, even a short
   one. It costs one curl.
-- If a `tick` call returns **409** ("a tick call is already
-  pending"), another tick agent may be running. Wait 5s and retry.
+- If a `tick` call returns **409** (curl exits 22 on `-f`), another
+  tick agent may be running. Wait 5s and retry.
   If the 409 persists for more than 2 minutes, escalate (`other`:
   "tick 409 persists — two tick agents may be running") and stop
   ticking until the coordinator answers — two drivers on one queue
@@ -145,13 +170,18 @@ in doubt, deliver again rather than leaving a run undelivered.
 Check `deliveries` after a drive to confirm every `done`/`failed`
 run has a record.
 
-**Not yet proven in production.** The outbox mechanism is
-exercised by the host suite, but as of 2026-11-17 no `deliveries/`
-directory exists in the production state dir
-(`~/workspace/agentts-state/`) — no real completed run has been
-delivered end-to-end and read by the coordinator from the
-production outbox yet. Do not describe delivery as proven until
-that first production delivery lands.
+**Proven on the production path (BRA-110).** The tick-loop
+drive + deliver is proven end to end by `tests/test-bra110.ts`:
+the standin (your scripted mechanism) drives a direct-adapter
+run with a real exec trap over HTTP and delivers it, the outbox
+record carries the validated result, a second delivery leaves
+exactly one record file (the BRA-61 idempotency guard), and a
+failed run delivers with `needsAttention: true`. Honest limit:
+that proof runs against a scratch server on the production code,
+not the live server — the live production outbox
+(`~/workspace/agentts-state/deliveries/`) still has no deliveries
+directory until you deliver a real run there. Do not describe a
+live production delivery as landed until it is.
 
 ## Escalation
 
@@ -199,18 +229,20 @@ created after the tick driver was verified and is live now:
   it cannot prove from inside the VM is that the runtime actually
   fires the watchdog cron after a real replacement — that is a
   platform behavior, to be verified by observing a real deployment.
-- **Two drivers / the driver lock (BRA-72).** There is exactly one
-  tick agent, and `queue run` now holds the driver lock
-  (`<stateDir>/driver.lock/`) for the whole drive. A second
-  `queue run` — a stale session after a restart, a manual drive
-  while you drive — fails loudly with "driver already running".
+- **Two drivers / the driver lock (BRA-72, BRA-116).** There is exactly one
+  tick agent, and the drive (POST `/queue/run`) holds the driver lock
+  (`<stateDir>/driver.lock/`) for the whole drive. A second drive —
+  a stale session after a restart, a manual `queue run` while you
+  drive, or a second POST `/queue/run` — fails loudly: the CLI
+  prints "driver already running", the HTTP call answers 409.
   That is the lock working, not a failure: do not retry it in a
   loop, just tick again (the other driver will finish and the
-  catch-up sweep will see the result). A `queue run` also repairs
-  stranded `running` entries itself at the start of a drive (a
-  previous driver crashed mid-drive) and prints `REPAIR ...` lines
-  — a crashed driver self-heals on your next tick, so a `running`
-  entry you see in `queue list` is not by itself a stuck run worth
-  escalating; drive the queue and read the REPAIR lines. `queue
-  repair` is the same repair without driving, for the operator.
-  NEVER use `--force`.
+  catch-up sweep will see the result). A drive also repairs
+  stranded `running` entries itself at the start (a previous driver
+  crashed mid-drive) and reports them in the response's `repair`
+  field (the CLI prints `REPAIR ...` lines for an operator drive) —
+  a crashed driver self-heals on your next tick, so a `running`
+  entry you see in `queue/list` is not by itself a stuck run worth
+  escalating; drive the queue and read the repair report.
+  `queue repair` is the same repair without driving, for the
+  operator. NEVER use `--force`.
