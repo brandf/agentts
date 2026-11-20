@@ -67,6 +67,7 @@ import {
 import { MockAdapter } from "../plugins/mock/src/mock-adapter";
 import { decideLocal } from "./decision-model";
 import { appendTrapActual } from "./cost-model";
+import { recordRunLedger } from "./run-ledger";
 import { QuotaTracker } from "./quotas";
 import { workerServerUrl, type SystemEvent, type SystemEventType } from "./worker-protocol";
 import { atomicWriteFile, CorruptionLog, type CorruptionRecord } from "./corruption";
@@ -2883,6 +2884,21 @@ export class Host {
         } else if (entry.status === "held") {
           this.notifyEvent("gate-held", { runId: entry.runId });
         }
+        // BRA-165: a terminal run leaves one ledger record (wall
+        // clock + trap/job counts + tokens, explicit unknown when
+        // none reported). recordRunLedger never throws, so a ledger
+        // failure cannot fail the run it measures. Held runs get no
+        // entry — they are not terminal; the entry lands when the
+        // resumed run completes.
+        if (entry.status === "done" || entry.status === "failed") {
+          recordRunLedger(this.stateDir, {
+            runId: entry.runId,
+            workflow: entry.workflowPath,
+            status: entry.status,
+            adapter: entry.adapter,
+            ...(entry.error ? { error: entry.error } : {}),
+          });
+        }
       }
       // BRA-82: return the current queue, not this drive's
       // snapshot — a concurrent submit's entry is in it.
@@ -3969,6 +3985,26 @@ export class Host {
     }
   }
 
+  /** BRA-174: Bun/Node spawnSync caps captured stdout at ~1MB by
+   * default (maxBuffer); anything larger fails the spawn with ENOBUFS.
+   * The C host's stdout is workflow console output plus one
+   * `branch <i> outcome: <json>` line per fork branch (durablets.c
+   * write_outcome prints the FULL branch outcome), so a branch
+   * returning a large value — or a chatty slice — can exceed 1MB and
+   * kill the run with a confusing spawn error. 16MB is ~10x the
+   * largest known payload (~1.7MB arXiv list page), far below anything
+   * that would threaten memory on this VM. Keep in sync with the
+   * sibling sites: workflows/dogfood/briefing-worker.ts fetchText,
+   * plugins/mock/src/mock-plugin.ts runHost,
+   * plugins/muse/src/muse-adapter.ts exec + runExec,
+   * plugins/direct/src/direct-adapter.ts exec, src/worker-http.ts
+   * httpSync, src/cli.ts worker get-job/complete-job spawn,
+   * src/task-backend.ts linearCall. (The engine probe and bundleSync
+   * spawns in this file are NOT raised: the probe bundle prints
+   * nothing to stdout, and bun build prints a short summary while
+   * the bundle bytes go to a file.) */
+  private static readonly SPAWN_STDOUT_MAX_BYTES = 16 * 1024 * 1024;
+
   private runHost(
     args: string[],
     outPath: string,
@@ -3978,7 +4014,7 @@ export class Host {
     const env = { ...process.env, ...envExtra } as Record<string, string>;
     fs.appendFileSync(outPath, "");
     fs.appendFileSync(logPath, "");
-    const r = spawnSync(this.hostPath, args, { env, encoding: "utf8" });
+    const r = spawnSync(this.hostPath, args, { env, encoding: "utf8", maxBuffer: Host.SPAWN_STDOUT_MAX_BYTES });
     this.lastHostSignal = r.signal ?? null;
     if (r.stdout) fs.appendFileSync(outPath, r.stdout);
     if (r.stderr) fs.appendFileSync(logPath, r.stderr);

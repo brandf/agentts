@@ -712,6 +712,18 @@ export class MockPlugin {
     }
   }
 
+  /** BRA-174: Bun/Node spawnSync caps captured stdout at ~1MB by
+   * default (maxBuffer); anything larger fails the spawn with ENOBUFS.
+   * The C host's stdout is workflow console output plus one
+   * `branch <i> outcome: <json>` line per fork branch (durablets.c
+   * write_outcome prints the FULL branch outcome), so a branch
+   * returning a large value — or a chatty slice — can exceed 1MB and
+   * kill the run with a confusing spawn error. 16MB is ~10x the
+   * largest known payload (~1.7MB arXiv list page), far below anything
+   * that would threaten memory on this VM. Verbatim twin of
+   * src/host.ts runHost (BRA-88) — keep the two in sync. */
+  private static readonly SPAWN_STDOUT_MAX_BYTES = 16 * 1024 * 1024;
+
   private runHost(
     args: string[],
     outPath: string,
@@ -721,7 +733,7 @@ export class MockPlugin {
     const env = { ...process.env, ...envExtra } as Record<string, string>;
     fs.appendFileSync(outPath, "");
     fs.appendFileSync(logPath, "");
-    const r = spawnSync(this.hostPath, args, { env, encoding: "utf8" });
+    const r = spawnSync(this.hostPath, args, { env, encoding: "utf8", maxBuffer: MockPlugin.SPAWN_STDOUT_MAX_BYTES });
     if (r.stdout) fs.appendFileSync(outPath, r.stdout);
     if (r.stderr) fs.appendFileSync(logPath, r.stderr);
     if (r.error) throw new Error(`host spawn failed: ${r.error}`);

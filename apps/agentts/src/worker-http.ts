@@ -50,6 +50,23 @@ function parseBody(text: string): any {
  * large job E2BIGs here before the worker spawn is even reached.) */
 const HTTP_BODY_INLINE_MAX_BYTES = 64 * 1024;
 
+/** BRA-174: Bun/Node spawnSync caps captured stdout at ~1MB by
+ * default (maxBuffer); anything larger fails the spawn with ENOBUFS.
+ * The responses here are loopback JSON, but /get-job carries a whole
+ * job input — and job inputs have no protocol-level cap (BRA-179
+ * already showed 145KB inputs, and a judge job carrying full-page
+ * references grows from there) — while the /jobs listing grows with
+ * queue depth. A response past the cap would surface as a misleading
+ * "is the worker server running?" transport failure. 16MB is ~10x
+ * the largest known payload (~1.7MB arXiv list page), far below
+ * anything that would threaten memory on this VM. Keep in sync with
+ * the sibling sites: workflows/dogfood/briefing-worker.ts fetchText,
+ * src/host.ts runHost, plugins/mock/src/mock-plugin.ts runHost,
+ * plugins/muse/src/muse-adapter.ts exec + runExec,
+ * plugins/direct/src/direct-adapter.ts exec, src/cli.ts worker
+ * get-job/complete-job spawn, src/task-backend.ts linearCall. */
+const HTTP_SYNC_MAX_BUFFER_BYTES = 16 * 1024 * 1024;
+
 /** Synchronous POST/GET over curl. Throws on transport failure. */
 export function httpSync(method: "GET" | "POST", url: string, body?: unknown, timeoutMs = 10_000): HttpResult {
   const args = ["-sS", "--max-time", String(Math.max(1, Math.ceil(timeoutMs / 1000))), "-w", "\n%{http_code}"];
@@ -67,7 +84,7 @@ export function httpSync(method: "GET" | "POST", url: string, body?: unknown, ti
   args.push(url);
   let r: SpawnSyncReturns<string>;
   try {
-    r = spawnSync("/usr/bin/curl", args, { encoding: "utf8" });
+    r = spawnSync("/usr/bin/curl", args, { encoding: "utf8", maxBuffer: HTTP_SYNC_MAX_BUFFER_BYTES });
   } finally {
     if (bodyFile !== null) {
       try {

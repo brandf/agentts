@@ -60,7 +60,23 @@ function linearCall(tool: string, args: Record<string, unknown>): any {
   const r = spawnSync(
     LINEAR_BIN,
     ["call-tool", "--name", tool, "--arguments-json", JSON.stringify(args)],
-    { encoding: "utf8", timeout: 60_000 },
+    {
+      encoding: "utf8",
+      timeout: 60_000,
+      // BRA-174: Bun/Node spawnSync caps captured stdout at ~1MB by
+      // default (maxBuffer); anything larger fails the spawn with
+      // ENOBUFS. listTasks caps at 200 issues but issue descriptions
+      // are unbounded, so a large backlog with long descriptions can
+      // cross 1MB. 16MB is ~10x the largest known payload, far below
+      // anything that would threaten memory on this VM. Keep in sync
+      // with the sibling sites: workflows/dogfood/briefing-worker.ts
+      // fetchText, src/host.ts runHost,
+      // plugins/mock/src/mock-plugin.ts runHost,
+      // plugins/muse/src/muse-adapter.ts exec + runExec,
+      // plugins/direct/src/direct-adapter.ts exec, src/worker-http.ts
+      // httpSync, src/cli.ts worker get-job/complete-job spawn.
+      maxBuffer: 16 * 1024 * 1024,
+    },
   );
   if (r.error) throw new Error(`linear CLI failed: ${String(r.error)}`);
   if (r.status !== 0) {

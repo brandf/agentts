@@ -18,6 +18,74 @@ submitted with in the frozen closure plus the engine version
 (the MVP) and r1. The CLI reports `agentts-host 0.1.0` (v0) — that is the
 host's own version string, not a release version.
 
+## r2
+
+Work landed since r1 (2026-11-19), shipping in the r2 release.
+
+### Added
+
+**Workflow run ledger
+([BRA-165](https://linear.app/brandf/issue/BRA-165/workflow-run-ledger-record-tokens-wall-clock-per-run-efficiency-measurement)).**
+Every terminal run now leaves one record in
+`<stateDir>/ledger/run-ledger.jsonl` with wall clock, trap/job
+counts, and tokens as reported by workers — the per-run efficiency
+numbers the dynamic scheduler and the audit build on. Tokens are
+explicit unknown (`null`) when no trap reports any: the
+complete-job payload carries no token counts and no adapter
+reports them today, so the ledger never invents a number. The
+scheduler can rank queued work by ledger cost
+(`rankQueueByLedgerCost`); run ordering itself is unchanged.
+Migration: none — the ledger is append-only and best-effort; a
+ledger write failure never fails the run it measures.
+
+**Workflow efficiency audit
+([BRA-166](https://linear.app/brandf/issue/BRA-166/workflow-efficiency-audit-ratchet-per-workflow-baselines-tighten-only)).**
+The bench's ratchet discipline now exists for workflows: `bun
+src/workflow-audit.ts --state-dir <dir>` reads the run ledger and
+checks each workflow's median active wall time and tokens per run
+against its baseline, flags a confirmed regression with numbers, and
+tightens baselines automatically on sustained improvement. Baselines
+live with the ledger under `<stateDir>/ledger/` (wall time is
+machine-dependent, so they are per state dir, not in the repo);
+loosening needs a human decision with a recorded reason
+(`workflow-audit.ts loosen <metric> <baseline> --reason "..."`).
+Tokens stay explicit unknown until an adapter reports them — a
+workflow with no token-reporting runs is reported UNKNOWN, never
+scored as zero. Migration: none — the first audit seeds baselines
+from the ledger's recorded runs.
+
+### Fixed
+
+**Big arXiv list pages fetch over curl again
+([BRA-174](https://linear.app/brandf/issue/BRA-174/bun-spawnsync-caps-stdout-at-1-mb-enobufs-big-arxiv-list-pages-always)).**
+Bun's `spawnSync` caps captured stdout at ~1MB by default, so the
+three big arXiv list pages (~1.58–1.7MB) always failed the
+curl-first fetch with `ENOBUFS` and every discover relied on the Bun
+fetch fallback — no redundancy on those pages, and two failed curl
+attempts of latency each time. The spawn sites that can realistically
+exceed the cap now pass `maxBuffer` 16MB: the briefing fetcher, the
+host's run loop (workflow output plus fork-branch outcomes), both
+exec adapters, the worker-queue sync client, the worker CLI spawn,
+and the Linear client. The audit also recorded the sites that stay
+uncapped because their output is bounded by construction (the engine
+probe, the bundle build, the direct adapter's one-line worker
+result, the bugfix worker's small command output).
+Migration: none — discover's curl-first path works again for the
+three biggest categories.
+
+**Mock-mode briefing runs no longer need a judgments file
+([BRA-162](https://linear.app/brandf/issue/BRA-162/mock-mode-briefing-run-without-judgmentspath-fails-at-the-judge-step)).**
+The workflow passed `judgmentsPath` into the judge job even when no
+verdicts file existed, and the trap JSON boundary rejects
+`undefined` — so a mock run with no judgments file died at the judge
+step. The judge job now omits the key when there is no path (the
+conditional spread, as in the trial runner), and the mock adapter's
+neutral-5 fixture carries the run. The direct-adapter path is
+unchanged: with no verdicts at all the judge still fails loudly, and
+a trial run that supplies recorded verdicts still uses them.
+Migration: none — mock runs drop the fabricated judgments file;
+trial runs are unaffected.
+
 ## r1
 
 Work landed since r0 (2026-11-17), shipping in the r1 release. The r1 blockers tracked in

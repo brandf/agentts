@@ -252,6 +252,11 @@ export interface BriefingInput {
   /** Trial-only: path to recorded LLM consequence verdicts (see
    * JudgeInput). Production runs omit it — the pool judges live. */
   judgmentsPath?: string;
+  /** Trial-only: path to the seen list the trial dedupes against.
+   * Production runs omit it — prep defaults to the live seen list.
+   * BRA-111 trials pass a frozen pre-cron snapshot here, so the trial
+   * dedupes against the frozen state without touching the live file. */
+  seenSourcePath?: string;
 }
 
 export interface BriefingResult {
@@ -338,7 +343,16 @@ export default function dailyAiBriefing(input: BriefingInput): BriefingResult {
 
   // ---------------------------------------------------------------- run
   // 1. Scratch setup (exec): copy the seen list + builder into scratch.
-  const prep = exec({ cmd: "bun", args: ["workflows/dogfood/briefing-prep.ts", SCRATCH] });
+  // BRA-111: a trial passes its frozen seen file via seenSourcePath;
+  // the cron path omits it and prep defaults to the live seen list.
+  const prep = exec({
+    cmd: "bun",
+    args: [
+      "workflows/dogfood/briefing-prep.ts",
+      SCRATCH,
+      ...(input.seenSourcePath ? [input.seenSourcePath] : []),
+    ],
+  });
   print("prep:", JSON.stringify(prep));
   if (prep.exitCode !== 0) {
     throw new Error(`briefing prep failed: ${(prep.stderr ?? "").slice(0, 300)}`);
@@ -399,7 +413,13 @@ export default function dailyAiBriefing(input: BriefingInput): BriefingResult {
     spec: "briefing-judge-consequence",
     input: {
       papers: judgePapers,
-      judgmentsPath: input.judgmentsPath,
+      // Omit the key when there is no path: passing `undefined`
+      // across a trap boundary is a JsonBoundaryError, which would
+      // mask the handler's designed loud failure ("no LLM judge
+      // available — pass judgments or judgmentsPath, or run through
+      // the worker pool"). The handler treats an absent key the same
+      // as a non-string one.
+      ...(input.judgmentsPath ? { judgmentsPath: input.judgmentsPath } : {}),
     },
   });
   if (!judged.ok) {

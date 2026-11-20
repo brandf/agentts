@@ -96,6 +96,22 @@ export interface JobHandle {
   runId?: string;
   trapId?: string;
 }
+/** BRA-174: Bun/Node spawnSync caps captured stdout at ~1MB by
+ * default (maxBuffer); anything larger fails the spawn with ENOBUFS.
+ * Both exec sites run real user commands whose output is unbounded
+ * (cat a big file, a test suite's logs) — BRA-171 moved large trap
+ * RESULTS to files, but that covers delivery, not this capture: an
+ * exec printing >1MB came back as a failed exec (exitCode 1,
+ * ENOBUFS in stderr) instead of its output. 16MB is ~10x the largest
+ * known payload (~1.7MB arXiv list page), far below anything that
+ * would threaten memory on this VM. Keep in sync with the sibling
+ * sites: workflows/dogfood/briefing-worker.ts fetchText,
+ * src/host.ts runHost, plugins/mock/src/mock-plugin.ts runHost,
+ * plugins/direct/src/direct-adapter.ts exec, src/worker-http.ts
+ * httpSync, src/cli.ts worker get-job/complete-job spawn,
+ * src/task-backend.ts linearCall. */
+const SPAWN_STDOUT_MAX_BYTES = 16 * 1024 * 1024;
+
 /** A mid-flight pool transition the host journals into the run
  * journal as it happens (BRA-61) — the journal is the profiler's
  * source of truth, and these events are invisible there today (they
@@ -510,7 +526,7 @@ export class MuseAdapter implements Adapter {
         }
         const args: string[] = Array.isArray(arg?.args) ? arg.args : [];
         const cwd = typeof arg?.cwd === "string" ? arg.cwd : this.cwd;
-        const r = spawnSync(cmd, args, { encoding: "utf8", cwd, shell: false });
+        const r = spawnSync(cmd, args, { encoding: "utf8", cwd, shell: false, maxBuffer: SPAWN_STDOUT_MAX_BYTES });
         if (r.error) {
           return { value: { stdout: "", stderr: String(r.error), exitCode: 1 } };
         }
@@ -614,7 +630,7 @@ export class MuseAdapter implements Adapter {
   }
 
   async runExec(command: string, args: string[], cwd: string): Promise<ExecResult> {
-    const r = spawnSync(command, args, { encoding: "utf8", cwd: cwd || this.cwd, shell: false });
+    const r = spawnSync(command, args, { encoding: "utf8", cwd: cwd || this.cwd, shell: false, maxBuffer: SPAWN_STDOUT_MAX_BYTES });
     if (r.error) return { stdout: "", stderr: String(r.error), exitCode: 1 };
     return { stdout: r.stdout ?? "", stderr: r.stderr ?? "", exitCode: r.status ?? 1 };
   }

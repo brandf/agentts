@@ -679,7 +679,22 @@ async function cmdWorker(args: string[]): Promise<number> {
     }
     const rest = args.slice(1);
     if (!rest.includes("--server")) rest.push("--server", serverUrl);
-    const r = spawnSync("/opt/hatch-image/bin/bun", [script, ...rest], { encoding: "utf8" });
+    const r = spawnSync("/opt/hatch-image/bin/bun", [script, ...rest], {
+      encoding: "utf8",
+      // BRA-174: Bun/Node spawnSync caps captured stdout at ~1MB by
+      // default (maxBuffer); anything larger fails the spawn with
+      // ENOBUFS. get-job prints one job record including its whole
+      // input — and job inputs have no protocol-level cap (BRA-179
+      // already showed 145KB inputs). 16MB is ~10x the largest known
+      // payload, far below anything that would threaten memory on
+      // this VM. Keep in sync with the sibling sites:
+      // workflows/dogfood/briefing-worker.ts fetchText, src/host.ts
+      // runHost, plugins/mock/src/mock-plugin.ts runHost,
+      // plugins/muse/src/muse-adapter.ts exec + runExec,
+      // plugins/direct/src/direct-adapter.ts exec, src/worker-http.ts
+      // httpSync, src/task-backend.ts linearCall.
+      maxBuffer: 16 * 1024 * 1024,
+    });
     if (r.stdout) process.stdout.write(r.stdout);
     if (r.stderr) process.stderr.write(r.stderr);
     return r.status ?? 1;

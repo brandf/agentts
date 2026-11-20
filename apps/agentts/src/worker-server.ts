@@ -1263,7 +1263,18 @@ export class WorkerServer {
     );
     const cliPath = path.join(path.dirname(new URL(import.meta.url).pathname), "cli.ts");
     const args = [cliPath, "queue", "run", "--state-dir", this.config.stateDir, "--repair-report", reportPath];
-    if (this.config.workersConfigPath) args.push("--workers-config", this.config.workersConfigPath);
+    // BRA-111 (trial runner, Nov 19): the driver child needs a direct
+    // adapter to CARRY the workers-config — makeHost refuses a
+    // workers-config on any other adapter, and without --adapter the
+    // child defaults to mock on a scratch state dir, so the drive
+    // died before runQueue ever ran ("--workers-config applies to
+    // the direct adapter, not \"mock\""). The driver's own adapter is
+    // only the carrier: per-entry adapters are still loaded fresh
+    // from each queue entry, so mock/muse entries are unaffected.
+    // (BRA-175's child-process drive regressed this path — the old
+    // in-process driverHost() carried the config without re-parsing
+    // CLI args, so no trial had exercised it since.)
+    if (this.config.workersConfigPath) args.push("--workers-config", this.config.workersConfigPath, "--adapter", "direct");
     const proc = Bun.spawn([BUN, ...args], {
       stdout: "pipe",
       stderr: "pipe",

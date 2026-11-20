@@ -416,6 +416,12 @@
    "label": "queue-drive self-deadlock suite (BRA-175)"
   },
   {
+   "slug": "bra180",
+   "tier": 1,
+   "estSeconds": 60,
+   "label": "workers-config queue-drive suite (BRA-180)"
+  },
+  {
    "slug": "bra171",
    "tier": 1,
    "estSeconds": 60,
@@ -426,6 +432,36 @@
    "tier": 1,
    "estSeconds": 60,
    "label": "E2BIG job-input spawn suite (BRA-179)"
+  },
+  {
+   "slug": "bra174",
+   "tier": 1,
+   "estSeconds": 60,
+   "label": "spawnSync stdout cap suite (BRA-174)"
+  },
+  {
+   "slug": "bra111-runner",
+   "tier": 1,
+   "estSeconds": 30,
+   "label": "trial-runner seen-state suite (BRA-111)"
+  },
+  {
+   "slug": "bra166",
+   "tier": 1,
+   "estSeconds": 120,
+   "label": "workflow efficiency audit suite (BRA-166)"
+  },
+  {
+   "slug": "bra162",
+   "tier": 1,
+   "estSeconds": 60,
+   "label": "mock-mode briefing without judgmentsPath suite (BRA-162)"
+  },
+  {
+   "slug": "bra165",
+   "tier": 1,
+   "estSeconds": 60,
+   "label": "workflow run ledger suite (BRA-165)"
   },
   {
    "slug": "bra126",

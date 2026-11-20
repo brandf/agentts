@@ -46,16 +46,13 @@
  *      htmlPath exists on disk.
  *
  * Notes, stated plainly:
- * - The mock run needs a judgmentsPath: the workflow passes
- *   `judgmentsPath: input.judgmentsPath` into the judge job, and the
- *   trap JSON boundary rejects `undefined` — so a mock run with no
- *   judgments file fails at the judge step with
- *   "JsonBoundaryError: $.input.judgmentsPath is undefined". That is
- *   a PRE-EXISTING issue (found during verification, not fixed here —
- *   it belongs to the judge step, not htmlPath); the test supplies a
- *   small neutral-5 judgments file matching the mock fixture's own
- *   verdicts. The mock adapter ignores the file and answers with its
- *   fixture.
+ * - The mock run no longer supplies a judgments file (BRA-162): the
+ *   workflow omits judgmentsPath from the judge job input when it is
+ *   absent, so a mock run with no judgments file reaches the mock
+ *   adapter's neutral-5 fixture instead of dying at the trap
+ *   boundary with "JsonBoundaryError: $.input.judgmentsPath is
+ *   undefined". test-bra162.ts pins the no-judgments run and the
+ *   with-judgments trial run.
  * - The workflow's `print` calls do not surface in the CLI --wait
  *   output (verified: stdout is the result JSON only), so the print
  *   line is asserted at the source level in A (one shared const) —
@@ -130,22 +127,9 @@ if (!DURABLETS_HOST) {
   console.log("\ntest-bra123: 1 FAILURE(S)");
   process.exit(1);
 }
-// Neutral-5 verdicts for the mock discovery fixture's 7 papers
-// (2611.90001-2611.90007) — the mock judge fixture returns neutral 5
-// for every paper and ignores this file, but the workflow's judge job
-// input must not carry an undefined judgmentsPath (see the header).
-const judgmentsPath = path.join(WORKDIR, "judgments.json");
-fs.writeFileSync(
-  judgmentsPath,
-  JSON.stringify({
-    scores: [1, 2, 3, 4, 5, 6, 7].map((n) => ({
-      id: `2611.9000${n}`,
-      consequence: 5,
-      reasons: "Mock fixture: neutral consequence 5.",
-      evidence: "",
-    })),
-  }),
-);
+// No judgmentsPath (BRA-162): the mock run needs none — the mock
+// judge fixture answers neutral 5 for every paper, and the workflow
+// omits the key from the judge job input when it is absent.
 const inputPath = path.join(WORKDIR, "input.json");
 fs.writeFileSync(
   inputPath,
@@ -158,7 +142,6 @@ fs.writeFileSync(
     selectCount: 5,
     venvPython: VENV_PYTHON,
     windowDays: 7,
-    judgmentsPath,
   }),
 );
 const cliRun = spawnSync(

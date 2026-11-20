@@ -68,11 +68,14 @@
  *   fullText false. The regression holds under either fullText
  *   assignment (KRC combined 96 vs LoopZip 61) — the derivation
  *   only pins the old-score reproduction (163 vs 213) exactly.
- * - The mock run needs a judgmentsPath (BRA-162: the workflow
- *   passes `judgmentsPath: input.judgmentsPath` into the judge job
- *   and the trap JSON boundary rejects `undefined`). The test
- *   supplies a small neutral-5 judgments file matching the mock
- *   fixture's own verdicts; the mock adapter ignores the file.
+ * - The mock run no longer supplies a judgments file (BRA-162): the
+ *   workflow omits judgmentsPath from the judge job input when it is
+ *   absent, so a mock run with no judgments file reaches the mock
+ *   adapter's neutral-5 fixture instead of dying at the trap
+ *   boundary with "JsonBoundaryError: $.input.judgmentsPath is
+ *   undefined". test-bra162.ts pins the no-judgments run and the
+ *   with-judgments trial run. (Section B's real judgments fixture is
+ *   unrelated — it is the ranking logic's fixture, not a workaround.)
  *
  *   DURABLETS_HOST=<built C host> bun tests/test-bra130.ts
  *   (run.sh sets DURABLETS_HOST and AGENTTS_DURABLETS_DIR and runs
@@ -240,18 +243,9 @@ if (!DURABLETS_HOST) {
   process.exit(1);
 }
 const SCRATCH = path.join(WORKDIR, "scratch");
-const judgmentsPath = path.join(WORKDIR, "judgments.json");
-fs.writeFileSync(
-  judgmentsPath,
-  JSON.stringify({
-    scores: [1, 2, 3, 4, 5, 6, 7].map((n) => ({
-      id: `2611.9000${n}`,
-      consequence: 5,
-      reasons: "Mock fixture: neutral consequence 5.",
-      evidence: "",
-    })),
-  }),
-);
+// No judgmentsPath (BRA-162): the mock run needs none — the mock
+// judge fixture answers neutral 5 for every paper, and the workflow
+// omits the key from the judge job input when it is absent.
 const inputPath = path.join(WORKDIR, "input.json");
 fs.writeFileSync(
   inputPath,
@@ -264,7 +258,6 @@ fs.writeFileSync(
     selectCount: 5,
     venvPython: VENV_PYTHON,
     windowDays: 7,
-    judgmentsPath,
   }),
 );
 const cliRun = spawnSync(

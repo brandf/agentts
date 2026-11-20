@@ -40,6 +40,26 @@ export interface DirectAdapterConfig {
   cwd?: string;
 }
 
+/** BRA-174: Bun/Node spawnSync caps captured stdout at ~1MB by
+ * default (maxBuffer); anything larger fails the spawn with ENOBUFS.
+ * The exec trap runs real user commands whose output is unbounded
+ * (cat a big file, a test suite's logs) — BRA-171 moved large trap
+ * RESULTS to files, but that covers delivery, not this capture: an
+ * exec printing >1MB came back as a failed exec (exitCode 1, ENOBUFS
+ * in stderr) instead of its output. 16MB is ~10x the largest known
+ * payload (~1.7MB arXiv list page), far below anything that would
+ * threaten memory on this VM. (The runJob spawn just above is
+ * deliberately NOT raised: its stdout is exactly one JSON line —
+ * worker.ts prints only the final result, all logging is
+ * console.error — and every current worker spec returns KB-scale
+ * results.) Keep in sync with the sibling sites:
+ * workflows/dogfood/briefing-worker.ts fetchText, src/host.ts
+ * runHost, plugins/mock/src/mock-plugin.ts runHost,
+ * plugins/muse/src/muse-adapter.ts exec + runExec,
+ * src/worker-http.ts httpSync, src/cli.ts worker get-job/complete-job
+ * spawn, src/task-backend.ts linearCall. */
+const SPAWN_STDOUT_MAX_BYTES = 16 * 1024 * 1024;
+
 const DEFAULT_WORKER = path.resolve(import.meta.dir, "..", "..", "..", "workflows", "library", "worker.ts");
 const DEFAULT_BUGFIX_WORKER = path.resolve(import.meta.dir, "..", "..", "..", "workflows", "dogfood", "bugfix-worker.ts");
 
@@ -211,7 +231,7 @@ export class DirectAdapter implements Adapter {
         }
         const args: string[] = Array.isArray(arg?.args) ? arg.args : [];
         const cwd = typeof arg?.cwd === "string" ? arg.cwd : this.cwd;
-        const r = spawnSync(cmd, args, { encoding: "utf8", cwd, shell: false });
+        const r = spawnSync(cmd, args, { encoding: "utf8", cwd, shell: false, maxBuffer: SPAWN_STDOUT_MAX_BYTES });
         if (r.error) {
           return { value: { stdout: "", stderr: String(r.error), exitCode: 1 } };
         }

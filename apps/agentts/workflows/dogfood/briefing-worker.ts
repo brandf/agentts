@@ -77,14 +77,28 @@ const UA = "AgentTS-briefing-dogfood/0.1 (mailto:research-test@example.invalid)"
 // export.arxiv.org via Bun fetch times out / 429s on the shared IP,
 // while curl to arxiv.org answers in ~1s), Bun fetch as fallback.
 // curl follows redirects (-L: ar5iv 301s) and has a hard --max-time.
-async function fetchText(url: string, timeoutMs: number): Promise<{ ok: boolean; status: number; text: string }> {
+/** BRA-174: Bun/Node spawnSync caps captured stdout at ~1MB by
+ * default (maxBuffer); anything larger fails the spawn with ENOBUFS.
+ * The three big arXiv list pages are ~1.58-1.7MB, so the curl-first
+ * path always failed them and every discover relied on the Bun fetch
+ * fallback. 16MB is ~10x the largest known page, far below anything
+ * that would threaten memory on this VM; a runaway response still
+ * fails loudly instead of OOMing the host. Keep in sync with the
+ * sibling sites: src/host.ts runHost, plugins/mock/src/mock-plugin.ts
+ * runHost, plugins/muse/src/muse-adapter.ts exec + runExec,
+ * plugins/direct/src/direct-adapter.ts exec, src/worker-http.ts
+ * httpSync, src/cli.ts worker get-job/complete-job spawn,
+ * src/task-backend.ts linearCall. Exported for tests/test-bra174.ts. */
+export const FETCH_TEXT_MAX_BUFFER_BYTES = 16 * 1024 * 1024;
+
+export async function fetchText(url: string, timeoutMs: number): Promise<{ ok: boolean; status: number; text: string }> {
   // Two curl attempts (transient proxy failures happen), then Bun fetch.
   for (let attempt = 0; attempt < 2; attempt++) {
     try {
       const r = spawnSync(
         "curl",
         ["-s", "-L", "--max-time", String(Math.max(5, Math.ceil(timeoutMs / 1000))), "-A", UA, "-w", "\n%{http_code}", url],
-        { encoding: "utf8", timeout: timeoutMs + 5000 },
+        { encoding: "utf8", timeout: timeoutMs + 5000, maxBuffer: FETCH_TEXT_MAX_BUFFER_BYTES },
       );
       if (r.status === 0 && typeof r.stdout === "string" && r.stdout.length > 0) {
         const m = r.stdout.match(/\n(\d{3})\s*$/);
@@ -952,33 +966,42 @@ async function write(): Promise<any> {
 }
 
 // ------------------------------------------------------------ dispatch
-let result: unknown;
-try {
-  switch (spec) {
-    case "briefing-discover":
-      result = await discover();
-      break;
-    case "briefing-judge-consequence":
-      result = await judgeConsequence();
-      break;
-    case "briefing-read":
-      result = await read();
-      break;
-    case "briefing-relate":
-      result = await relate();
-      break;
-    case "briefing-render":
-      result = render();
-      break;
-    case "briefing-write":
-      result = await write();
-      break;
-    default:
-      console.error(`briefing-worker: unknown spec "${spec}"`);
-      process.exit(2);
+// BRA-174: guarded by import.meta.main (same shape as
+// bugfix-worker.ts) so tests can import fetchText without running the
+// worker dispatch — when spawned as `bun briefing-worker.ts '<json>'`
+// this is the entry point; when imported, the module only defines
+// functions. (The payload parse above stays at module top: it only
+// parses argv[2] or "{}", and the handlers below read the
+// module-level `input`.)
+if (import.meta.main) {
+  let result: unknown;
+  try {
+    switch (spec) {
+      case "briefing-discover":
+        result = await discover();
+        break;
+      case "briefing-judge-consequence":
+        result = await judgeConsequence();
+        break;
+      case "briefing-read":
+        result = await read();
+        break;
+      case "briefing-relate":
+        result = await relate();
+        break;
+      case "briefing-render":
+        result = render();
+        break;
+      case "briefing-write":
+        result = await write();
+        break;
+      default:
+        console.error(`briefing-worker: unknown spec "${spec}"`);
+        process.exit(2);
+    }
+  } catch (e) {
+    console.error(`briefing-worker: ${spec} threw:`, e);
+    process.exit(2);
   }
-} catch (e) {
-  console.error(`briefing-worker: ${spec} threw:`, e);
-  process.exit(2);
+  console.log(JSON.stringify(result));
 }
-console.log(JSON.stringify(result));
