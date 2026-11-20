@@ -1100,12 +1100,26 @@ export class MockAdapter implements Adapter {
             return { value: { stdout: "", stderr: e?.message ?? String(e), exitCode: 1 } };
           }
         }
-        return {
-          value:
-            arg?.cmd === "echo hi"
-              ? { stdout: "hi\n", exitCode: 0 }
-              : { stdout: "", exitCode: 0 },
-        };
+        // `echo hi` is the mock's one canned literal that behaves
+        // like a real command — it stays silent, like cat.
+        if (arg?.cmd === "echo hi") {
+          return { value: { stdout: "hi\n", exitCode: 0 } };
+        }
+        // BRA-120: everything else is canned — the command was NOT
+        // run, and the mock used to return the simulated success
+        // silently, so a real workflow under mock passed vacuously.
+        // Say so loudly, naming the command, and mark the answer
+        // so the host journals it. The mock still never runs the
+        // command (Brandon, Nov 18) — this is a signal, not a
+        // behavior change. A queued exec answer never reaches here
+        // (deliberate, answered above), so it is never marked.
+        const display = [arg?.cmd, ...(Array.isArray(arg?.args) ? arg.args : [])]
+          .filter((x) => typeof x === "string")
+          .join(" ");
+        console.error(
+          `[mock] CANNED EXEC: command "${display}" was NOT run — returning simulated {stdout: "", exitCode: 0}. Only cat and echo hi execute for real under --adapter mock.`,
+        );
+        return { value: { stdout: "", exitCode: 0 }, canned: true };
       }
       case "gate": {
         if (this.gateQueue.length) return { value: this.gateQueue.shift() };

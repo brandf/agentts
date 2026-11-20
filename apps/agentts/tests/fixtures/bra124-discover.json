@@ -1,0 +1,287 @@
+{
+ "provenance": "Nov 18, 2026 discover topic scores (title-only, arxiv.org list pages) for the 40-paper pre-judge pool of the BRA-124 judge trial. SOURCE: ~/workspace/bra124-judgments-2026-11-18.json \"combinedRanking\" (topic field) \u2014 the trial recorded topic = combined - consequence*10 for each pool paper; cross-checked 40/40 by recomputing topicScore(title) with the TOPICS table in workflows/dogfood/briefing-worker.ts (all match). The original /tmp/bra124-discover.json is gone (BRA-173: /tmp is wiped on VM replacement); this committed fixture replaces it. Do NOT edit the scores by hand \u2014 regenerate from the judgments fixture.",
+ "editionDate": "2026-11-18",
+ "source": "~/workspace/bra124-judgments-2026-11-18.json combinedRanking[].topic",
+ "candidates": [
+  {
+   "id": "2611.22947",
+   "score": 8,
+   "title": "The Kernel Reality Check: Benchmarking and Distilling Efficient Attention at Scale",
+   "consequence": 8,
+   "combined": 88
+  },
+  {
+   "id": "2611.21917",
+   "score": 7,
+   "title": "Lost in a Few Heads: Diagnosing and Repairing Block Selection in Sparse Attention",
+   "consequence": 8,
+   "combined": 87
+  },
+  {
+   "id": "2611.17339",
+   "score": 5,
+   "title": "Does the Ranking Hold? A Practitioner-Facing Audit of Hallucination Detectors on Small, Quantized, On-Device LLMs",
+   "consequence": 8,
+   "combined": 85
+  },
+  {
+   "id": "2611.18680",
+   "score": 8,
+   "title": "Spread Too Thin: How Higher Resolution Dilutes a Vision Transformer's Attention, and a Training-Free Rescaling",
+   "consequence": 7,
+   "combined": 78
+  },
+  {
+   "id": "2611.22241",
+   "score": 6,
+   "title": "Where Does Hindsight Enter Clinical Agent Benchmarks? An Audit of Simulators and Case Construction",
+   "consequence": 7,
+   "combined": 76
+  },
+  {
+   "id": "2611.22612",
+   "score": 6,
+   "title": "Right Diagnosis, Unsafe Route: Auditing Clinical AI Decision Trajectories and Corrective Oversight for Validity and Potential Harm",
+   "consequence": 7,
+   "combined": 76
+  },
+  {
+   "id": "2611.22853",
+   "score": 6,
+   "title": "Keeping Parts Honest: Isolated Part Graphs for Faithful Vision Transformer Explanations",
+   "consequence": 7,
+   "combined": 76
+  },
+  {
+   "id": "2611.22186",
+   "score": 4,
+   "title": "Is 4-Bit Quantization More Than Noise to a Chat Model's Safety Behaviour? Attributing Behavioural Shifts with Matched Perturbations",
+   "consequence": 7,
+   "combined": 74
+  },
+  {
+   "id": "2611.17680",
+   "score": 8,
+   "title": "Aligned, Conflicting, or Unspecified? A Diagnostic Benchmark for Multimodal Time Series Forecasting",
+   "consequence": 6,
+   "combined": 68
+  },
+  {
+   "id": "2611.22343",
+   "score": 8,
+   "title": "PURE: A Diagnostic Benchmark for Multi-Granularity Multimodal Identity Matching",
+   "consequence": 6,
+   "combined": 68
+  },
+  {
+   "id": "2611.18053",
+   "score": 7,
+   "title": "InfiHall-Bench: A Benchmark for Hallucination Evaluation in Autoregressive Text-to-Image Generation",
+   "consequence": 6,
+   "combined": 67
+  },
+  {
+   "id": "2611.18880",
+   "score": 7,
+   "title": "RAVEN-Bench: A Paired EO-IR Video QA Benchmark for Aerial Multimodal Understanding",
+   "consequence": 6,
+   "combined": 67
+  },
+  {
+   "id": "2611.20381",
+   "score": 6,
+   "title": "Trait Collapse in Text-to-Image Generation: Evaluating and Mitigating Personality Inconsistency in Visual Storytelling",
+   "consequence": 6,
+   "combined": 66
+  },
+  {
+   "id": "2611.21485",
+   "score": 6,
+   "title": "Lost in the Hallway: Benchmarking Persistent Spatial Memory Across Revisits",
+   "consequence": 6,
+   "combined": 66
+  },
+  {
+   "id": "2611.22434",
+   "score": 6,
+   "title": "Encoding, Decodability, and Use: A Five-Layer Framework for Benchmark Measurement Audits with Evidence from UAV Intent Recognition",
+   "consequence": 6,
+   "combined": 66
+  },
+  {
+   "id": "2611.18981",
+   "score": 5,
+   "title": "GPBam: A Retrieval-Aware German Public Law Exam Benchmark",
+   "consequence": 6,
+   "combined": 65
+  },
+  {
+   "id": "2611.22426",
+   "score": 5,
+   "title": "InfuseLoop: Cross-Trajectory Latent Injection for Scalable Parallel Looped Transformers",
+   "consequence": 6,
+   "combined": 65
+  },
+  {
+   "id": "2611.22296",
+   "score": 4,
+   "title": "SpecSearch: Towards Hardware-Aware Efficient Speculative Decoding",
+   "consequence": 6,
+   "combined": 64
+  },
+  {
+   "id": "2611.21839",
+   "score": 10,
+   "title": "VisHead-Spec: Head-Routed Visual Attention for Multimodal Speculative Decoding",
+   "consequence": 5,
+   "combined": 60
+  },
+  {
+   "id": "2611.17955",
+   "score": 8,
+   "title": "WebArena-Pro: A Heterogeneous, Multimodal, Reproducible Benchmark for Web Agents",
+   "consequence": 5,
+   "combined": 58
+  },
+  {
+   "id": "2611.21105",
+   "score": 7,
+   "title": "CivilBench: Benchmarking Vision-Language Models for Multimodal Information Integration in Civil Engineering",
+   "consequence": 5,
+   "combined": 57
+  },
+  {
+   "id": "2611.22652",
+   "score": 6,
+   "title": "OmniTongue: A Comprehensive MLLM Benchmark for Automated Tongue Diagnosis in Traditional Chinese Medicine",
+   "consequence": 5,
+   "combined": 56
+  },
+  {
+   "id": "2611.19446",
+   "score": 5,
+   "title": "Architectures and KV Replay for Depth-Recurrent Language Models",
+   "consequence": 5,
+   "combined": 55
+  },
+  {
+   "id": "2611.22728",
+   "score": 7,
+   "title": "LoopZip: Visual Token Compression for Efficient Looped Vision-Language Models",
+   "consequence": 4,
+   "combined": 47
+  },
+  {
+   "id": "2611.22757",
+   "score": 7,
+   "title": "LoopPrune: Recurrent Pruning for Looped Diffusion Transformers",
+   "consequence": 4,
+   "combined": 47
+  },
+  {
+   "id": "2611.19116",
+   "score": 6,
+   "title": "A Hybrid State Space-Attention Architecture for Forecasting the Trajectories of Battery Degradation",
+   "consequence": 4,
+   "combined": 46
+  },
+  {
+   "id": "2611.19440",
+   "score": 6,
+   "title": "Few-Shot Visual Concept Extraction for Steering Diffusion Transformers",
+   "consequence": 4,
+   "combined": 46
+  },
+  {
+   "id": "2611.20307",
+   "score": 6,
+   "title": "PoCoAttn: Position-Content Collaborative Sparse Attention for Fast and High-Fidelity Video Generation",
+   "consequence": 4,
+   "combined": 46
+  },
+  {
+   "id": "2611.20704",
+   "score": 6,
+   "title": "QASK-Edit: Adaptive Sparse Attention Across Queries and Key Sources for Efficient Video Editing",
+   "consequence": 4,
+   "combined": 46
+  },
+  {
+   "id": "2611.21038",
+   "score": 6,
+   "title": "ScoutCache: Efficient Few-Step Autoregressive Video Diffusion via Conditional Readout and Selective Caching",
+   "consequence": 4,
+   "combined": 46
+  },
+  {
+   "id": "2611.21300",
+   "score": 6,
+   "title": "LATTE-WordSeg-Lite: Multi-Granularity Thai Word Segmentation on a CPU, with a Reproducible Benchmark",
+   "consequence": 4,
+   "combined": 46
+  },
+  {
+   "id": "2611.22191",
+   "score": 6,
+   "title": "RISA: Recoverable Sparse Attention for Block-Diffusion Language Models",
+   "consequence": 4,
+   "combined": 46
+  },
+  {
+   "id": "2611.22666",
+   "score": 6,
+   "title": "VSpark: Speculative Decoding for Autoregressive Vision-Language-Action Models",
+   "consequence": 4,
+   "combined": 46
+  },
+  {
+   "id": "2611.22962",
+   "score": 6,
+   "title": "Hierarchical Diffusion Transformer for End-to-End Image Generation",
+   "consequence": 4,
+   "combined": 46
+  },
+  {
+   "id": "2611.18963",
+   "score": 4,
+   "title": "SpecRelay: Amortize or Avoid the Round Trip in Edge-Cloud Speculative Decoding",
+   "consequence": 4,
+   "combined": 44
+  },
+  {
+   "id": "2611.18771",
+   "score": 6,
+   "title": "Agri-MRAG: Parameter-Enhanced Multimodal Retrieval-Augmented Generation for Agricultural Visual Question Answering",
+   "consequence": 3,
+   "combined": 36
+  },
+  {
+   "id": "2611.19748",
+   "score": 6,
+   "title": "SEAT: Sign-Type Evidence-Audited Transport for Multi-Label Tongue Diagnosis",
+   "consequence": 3,
+   "combined": 36
+  },
+  {
+   "id": "2611.19956",
+   "score": 6,
+   "title": "FinVision: Multimodal AI for Visualizing Financial Narratives",
+   "consequence": 3,
+   "combined": 36
+  },
+  {
+   "id": "2611.21029",
+   "score": 6,
+   "title": "Sparse Attention for Visual Generation: Toward Algorithm-System Co-Design",
+   "consequence": 3,
+   "combined": 36
+  },
+  {
+   "id": "2611.22131",
+   "score": 4,
+   "title": "LoCaR: Localized Canvas Retrieval With Frozen Vision-Language Model",
+   "consequence": 3,
+   "combined": 34
+  }
+ ]
+}

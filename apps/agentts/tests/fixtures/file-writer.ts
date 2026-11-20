@@ -9,7 +9,21 @@
  */
 import * as fs from "node:fs";
 
-const payload = JSON.parse(process.argv[2] ?? "{}");
+/** BRA-179: same marker-aware payload read as the real worker
+ * scripts — a job payload over the inline argv cap arrives as
+ * `agentts-file:<path>` (Linux caps any single argv string at
+ * 128KB); a missing file fails loudly with the path named. */
+function readPayloadArg(raw: string | undefined): any {
+  const text = raw ?? "{}";
+  if (!text.startsWith("agentts-file:")) return JSON.parse(text);
+  const filePath = text.slice("agentts-file:".length);
+  try {
+    return JSON.parse(fs.readFileSync(filePath, "utf8"));
+  } catch (e) {
+    throw new Error(`file-writer: cannot read job payload file ${filePath}: ${e instanceof Error ? e.message : String(e)}`);
+  }
+}
+const payload = readPayloadArg(process.argv[2]);
 const input: any = payload.input ?? {};
 const text = typeof input.text === "string" ? input.text : "hello from the worker";
 fs.writeFileSync("note.txt", text + "\n");

@@ -1,0 +1,455 @@
+{
+ "version": 1,
+ "sections": [
+  {
+   "slug": "ref",
+   "tier": 2,
+   "estSeconds": 10,
+   "label": "reference suite (core plugin/driver.ts)"
+  },
+  {
+   "slug": "mock",
+   "tier": 1,
+   "estSeconds": 65,
+   "label": "mock suite"
+  },
+  {
+   "slug": "host",
+   "tier": 2,
+   "estSeconds": null,
+   "label": "host suite"
+  },
+  {
+   "slug": "improve",
+   "tier": 2,
+   "estSeconds": 30,
+   "label": "improve-loop tests"
+  },
+  {
+   "slug": "profiler",
+   "tier": 1,
+   "estSeconds": 3,
+   "label": "profiler tests (BRA-30)"
+  },
+  {
+   "slug": "checker",
+   "tier": 1,
+   "estSeconds": 56,
+   "label": "checker tests (BRA-29)"
+  },
+  {
+   "slug": "layering",
+   "tier": 1,
+   "estSeconds": 3,
+   "label": "layering import lint (BRA-68)"
+  },
+  {
+   "slug": "swap",
+   "tier": 2,
+   "estSeconds": null,
+   "label": "swap test (reference vs mock vs host)"
+  },
+  {
+   "slug": "workerpool",
+   "tier": 2,
+   "estSeconds": null,
+   "label": "worker pool suite (BRA-48)"
+  },
+  {
+   "slug": "scheduling",
+   "tier": 2,
+   "estSeconds": null,
+   "label": "scheduling suite (BRA-49)"
+  },
+  {
+   "slug": "tick",
+   "tier": 2,
+   "estSeconds": null,
+   "label": "tick driver suite (BRA-65/66)"
+  },
+  {
+   "slug": "bra61",
+   "tier": 2,
+   "estSeconds": null,
+   "label": "stuck-worker suite (BRA-61)"
+  },
+  {
+   "slug": "bra75",
+   "tier": 2,
+   "estSeconds": null,
+   "label": "crash-recovery suite (BRA-75)"
+  },
+  {
+   "slug": "bra72",
+   "tier": 2,
+   "estSeconds": null,
+   "label": "queue/driver integrity suite (BRA-72)"
+  },
+  {
+   "slug": "bra77",
+   "tier": 2,
+   "estSeconds": null,
+   "label": "corrupt-state resilience suite (BRA-77)"
+  },
+  {
+   "slug": "bra71",
+   "tier": 2,
+   "estSeconds": null,
+   "label": "run-integrity suite (BRA-71)"
+  },
+  {
+   "slug": "bra74",
+   "tier": 2,
+   "estSeconds": null,
+   "label": "crash-resume suite (BRA-74)"
+  },
+  {
+   "slug": "bra76",
+   "tier": 2,
+   "estSeconds": null,
+   "label": "smaller-robustness-gaps suite (BRA-76)"
+  },
+  {
+   "slug": "bra67",
+   "tier": 2,
+   "estSeconds": null,
+   "label": "fault-injection coverage suite (BRA-67)"
+  },
+  {
+   "slug": "bra73",
+   "tier": 2,
+   "estSeconds": null,
+   "label": "journal-schema suite (BRA-73)"
+  },
+  {
+   "slug": "bra47",
+   "tier": 2,
+   "estSeconds": null,
+   "label": "decision-cascade suite (BRA-47)"
+  },
+  {
+   "slug": "bra52",
+   "tier": 2,
+   "estSeconds": 84,
+   "label": "workflow-library manifest suite (BRA-52)"
+  },
+  {
+   "slug": "bra82",
+   "tier": 2,
+   "estSeconds": null,
+   "label": "enqueue-race suite (BRA-82)"
+  },
+  {
+   "slug": "bra83",
+   "tier": 2,
+   "estSeconds": null,
+   "label": "atomic C snapshot writes suite (BRA-83)"
+  },
+  {
+   "slug": "bra84",
+   "tier": 2,
+   "estSeconds": null,
+   "label": "torn run-entry recovery suite (BRA-84)"
+  },
+  {
+   "slug": "bra85",
+   "tier": 2,
+   "estSeconds": null,
+   "label": "state-dir relocation suite (BRA-85)"
+  },
+  {
+   "slug": "bra88",
+   "tier": 1,
+   "estSeconds": 13,
+   "label": "verbatim-copy drift suite (BRA-88)"
+  },
+  {
+   "slug": "bra89",
+   "tier": 2,
+   "estSeconds": 58,
+   "label": "trap-code pin suite (BRA-89)"
+  },
+  {
+   "slug": "bra101",
+   "tier": 1,
+   "estSeconds": 0,
+   "label": "HOLD-identity suite (BRA-101)"
+  },
+  {
+   "slug": "bra103",
+   "tier": 1,
+   "estSeconds": 1,
+   "label": "durablets-dir suite (BRA-103)"
+  },
+  {
+   "slug": "bra106",
+   "tier": 2,
+   "estSeconds": null,
+   "label": "generic-specialization suite (BRA-106)"
+  },
+  {
+   "slug": "bra112",
+   "tier": 1,
+   "estSeconds": 26,
+   "label": "stdin one-shot suite (BRA-112)"
+  },
+  {
+   "slug": "bra90",
+   "tier": 2,
+   "estSeconds": null,
+   "label": "incremental snapshots suite (BRA-90)"
+  },
+  {
+   "slug": "bra105",
+   "tier": 2,
+   "estSeconds": 30,
+   "label": "run/call suite (BRA-105)"
+  },
+  {
+   "slug": "bra109",
+   "tier": 2,
+   "estSeconds": 77,
+   "label": "presentations suite (BRA-109)"
+  },
+  {
+   "slug": "bra116",
+   "tier": 2,
+   "estSeconds": 36,
+   "label": "driver endpoints suite (BRA-116)"
+  },
+  {
+   "slug": "bra117",
+   "tier": 2,
+   "estSeconds": 66,
+   "label": "plan-driven-work suite (BRA-117)"
+  },
+  {
+   "slug": "bra110",
+   "tier": 1,
+   "estSeconds": 12,
+   "label": "production deliver proof suite (BRA-110)"
+  },
+  {
+   "slug": "bra111",
+   "tier": 2,
+   "estSeconds": 24,
+   "label": "briefing live cutover suite (BRA-111)"
+  },
+  {
+   "slug": "bra124",
+   "tier": 2,
+   "estSeconds": 1,
+   "label": "briefing judge suite (BRA-124)"
+  },
+  {
+   "slug": "bra124pool",
+   "tier": 1,
+   "estSeconds": 5,
+   "label": "briefing pooling-supplement suite (BRA-124 remaining)"
+  },
+  {
+   "slug": "bra121",
+   "tier": 1,
+   "estSeconds": 5,
+   "label": "join-slice failure reporting suite (BRA-121)"
+  },
+  {
+   "slug": "bra125",
+   "tier": 1,
+   "estSeconds": 5,
+   "label": "cancelled-run failure reporting suite (BRA-125)"
+  },
+  {
+   "slug": "bra131",
+   "tier": 1,
+   "estSeconds": 7,
+   "label": "host-result failure derivation suite (BRA-131)"
+  },
+  {
+   "slug": "bra94",
+   "tier": 1,
+   "estSeconds": 8,
+   "label": "driver-bundle cache suite (BRA-94)"
+  },
+  {
+   "slug": "bra95",
+   "tier": 2,
+   "estSeconds": 25,
+   "label": "blob-recipe suite (BRA-95)"
+  },
+  {
+   "slug": "bra96",
+   "tier": 1,
+   "estSeconds": 3,
+   "label": "notifyEvent suite (BRA-96)"
+  },
+  {
+   "slug": "bra119",
+   "tier": 1,
+   "estSeconds": 14,
+   "label": "gate auto-answer suite (BRA-119)"
+  },
+  {
+   "slug": "bra120",
+   "tier": 1,
+   "estSeconds": 7,
+   "label": "mock exec canned warning suite (BRA-120)"
+  },
+  {
+   "slug": "bra118",
+   "tier": 1,
+   "estSeconds": 13,
+   "label": "bundle validator string-literal suite (BRA-118)"
+  },
+  {
+   "slug": "bra129",
+   "tier": 1,
+   "estSeconds": 35,
+   "label": "traps in native callbacks suite (BRA-129)"
+  },
+  {
+   "slug": "bra122",
+   "tier": 1,
+   "estSeconds": 25,
+   "label": "failed phase stdout suite (BRA-122)"
+  },
+  {
+   "slug": "bra123",
+   "tier": 1,
+   "estSeconds": 12,
+   "label": "briefing htmlPath week-Monday suite (BRA-123)"
+  },
+  {
+   "slug": "bra133",
+   "tier": 1,
+   "estSeconds": 10,
+   "label": "foreign event rejection suite (BRA-133)"
+  },
+  {
+   "slug": "bra142",
+   "tier": 1,
+   "estSeconds": 5,
+   "label": "workflow-library pure-function unit suite (BRA-142)"
+  },
+  {
+   "slug": "bra138",
+   "tier": 1,
+   "estSeconds": 70,
+   "label": "plan-driven-work CLI e2e suite (BRA-138)"
+  },
+  {
+   "slug": "bra139",
+   "tier": 1,
+   "estSeconds": 75,
+   "label": "run/call CLI+direct e2e suite (BRA-139)"
+  },
+  {
+   "slug": "bra140",
+   "tier": 1,
+   "estSeconds": 30,
+   "label": "improve-loop CLI+direct e2e suite (BRA-140)"
+  },
+  {
+   "slug": "bra141",
+   "tier": 1,
+   "estSeconds": 25,
+   "label": "rubricReview CLI+direct e2e suite (BRA-141)"
+  },
+  {
+   "slug": "bra143",
+   "tier": 1,
+   "estSeconds": 135,
+   "label": "bugfix worker direct suite (BRA-143)"
+  },
+  {
+   "slug": "bra144",
+   "tier": 1,
+   "estSeconds": 30,
+   "label": "any/race CLI+direct suite (BRA-144)"
+  },
+  {
+   "slug": "bra145",
+   "tier": 1,
+   "estSeconds": 30,
+   "label": "validation refusal CLI+direct suite (BRA-145)"
+  },
+  {
+   "slug": "bra146",
+   "tier": 1,
+   "estSeconds": 40,
+   "label": "unextractable generic CLI refusal suite (BRA-146)"
+  },
+  {
+   "slug": "bra147",
+   "tier": 1,
+   "estSeconds": 15,
+   "label": "bundle cache CLI suite (BRA-147)"
+  },
+  {
+   "slug": "bra164",
+   "tier": 1,
+   "estSeconds": 15,
+   "label": "run-tests workflow driver suite (BRA-164)"
+  },
+  {
+   "slug": "bra130",
+   "tier": 1,
+   "estSeconds": 15,
+   "label": "briefing must-read consequence-led suite (BRA-130)"
+  },
+  {
+   "slug": "bra132",
+   "tier": 1,
+   "estSeconds": 75,
+   "label": "snapshot format identity gate suite (BRA-132)"
+  },
+  {
+   "slug": "bra158",
+   "tier": 1,
+   "estSeconds": 60,
+   "label": "fix verification workflow suite (BRA-158)"
+  },
+  {
+   "slug": "bra175",
+   "tier": 1,
+   "estSeconds": 60,
+   "label": "queue-drive self-deadlock suite (BRA-175)"
+  },
+  {
+   "slug": "bra171",
+   "tier": 1,
+   "estSeconds": 60,
+   "label": "E2BIG trap-result delivery suite (BRA-171)"
+  },
+  {
+   "slug": "bra179",
+   "tier": 1,
+   "estSeconds": 60,
+   "label": "E2BIG job-input spawn suite (BRA-179)"
+  },
+  {
+   "slug": "bra126",
+   "tier": 2,
+   "estSeconds": 27,
+   "label": "phase-review diagnosis suite (BRA-126)"
+  },
+  {
+   "slug": "bra98",
+   "tier": 1,
+   "estSeconds": 0,
+   "label": "lazy journal loading suite (BRA-98)"
+  },
+  {
+   "slug": "rubric",
+   "tier": 2,
+   "estSeconds": 61,
+   "label": "rubric-review suite"
+  },
+  {
+   "slug": "bench",
+   "tier": 3,
+   "estSeconds": null,
+   "label": "benchmark regression alarms (BRA-93)"
+  }
+ ]
+}

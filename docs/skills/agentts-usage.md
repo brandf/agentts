@@ -828,9 +828,19 @@ relative imports plus the agentts module — into
 validates against the frozen copy, never the live file: editing (or
 deleting) the workflow mid-run cannot change what the run executes.
 Each run also records an engine version,
-`dquickts-<pin12>+durablets-<hash16>`; a resume under a different
-engine build is refused loudly. Runs recorded before BRA-71 carry no
-version and proceed unchecked.
+`dquickts-<pin12>+durablets-<hash16>` (provenance), and a snapshot
+format identity, `snapfmt-<sig8hex>:<pin>:<native names>` — the
+build signature from the snapshot blob's header, the dquickts pin,
+and the ordered host native names — stamped after each suspension.
+A resume under a different format identity is refused loudly
+(`engine-version-mismatch` journal event; the blob stays on disk
+so restoring the matching engine and re-queueing can still resume
+it). A release that changed only durablets.c logic resumes parked
+runs; a dquickts pin change, a native add, or a native rename
+still refuses. Runs recorded before BRA-71 carry no version and
+proceed unchecked; runs recorded before BRA-132 carry no format
+identity and are gated on the blob-header signature plus the
+recorded pin.
 
 **How to read a journal.** One JSONL file per run,
 `stateDir/journals/<run>.journal` (branch runs get
@@ -959,6 +969,101 @@ re-run for this skill.
 - §8: `ARCHITECTURE.md` §3/§7/§9, `apps/agentts/src/profiler.ts`
   (`summarizeArg`/`summarizeResult`), `apps/agentts/src/host.ts`
   (journal events, frozen copy, drive cap, crash recovery).
+- §10: `apps/agentts/run.sh` (header comment, authoritative),
+  `~/workspace/tmp/tier-measure/timings.tsv` (Nov 19 section
+  timings), `apps/agentts/bench/heartbeat.sh`.
+
+## 10. Test tiers: `run.sh` (BRA-137)
+
+A 30-minute suite on every change is a terrible design, so
+`apps/agentts/run.sh` runs in tiers (BRA-137, Nov 19). The
+script's header comment is authoritative; `./run.sh --list`
+prints the current section inventory with tiers and measured
+times. Run it from `apps/agentts/` (staged tree — host and mock
+sources are copied to scratch and deps installed there) or from
+the working dir `~/workspace/agentts-host` (runs in place).
+Set `DQUICKTS=$HOME/workspace/dquickts-build-minimal` in both
+cases. The script never writes into the tree it runs from.
+
+| Tier | Invocation | When | Contents |
+| --- | --- | --- | --- |
+| 1 (default) | `./run.sh` | Every change | Fast unit tests + the most important integration test + a small e2e subset. Measured 228 s wall (221 s of sections + setup), Nov 19. |
+| 2 | `./run.sh --tier 2` | Complex/risky changes | Tier 1 + broader integration + more e2e. Everything except the bench alarms. |
+| 3 / full | `./run.sh --full` | Before a release or ~once a day, NOT on every change | Everything, including the bench regression alarms (BRA-93). |
+
+**A tier-1 PASS is not a full PASS.** The final line names the
+tier and what was skipped (`PASS tier 1 (quick) — … skipped N by
+tier/selection`). Never report a tier-1 PASS as a full pass.
+
+**The 10–15 minute budget (Brandon, Nov 19).** Most minor bug
+fixes should land in main in 10–15 min from pickup: implement
+(~5 min) + targeted test (~1 min) + tier 1 (228 s wall measured
+Nov 19) + Meroki re-run (~1 min) + close + push (~2–3 min
+mechanical). That totals ~12.8–13.8 min — it fits with ~1.5–2 min
+of slack. The mock suite alone is 65 s uncontended and is the
+cost: it is the integration anchor (284 checks across every trap
+type plus the first-run gate pipeline), so it stays in tier 1 by
+design, and the 3-minute tier-1 target is not reachable with it
+included. (A contended run took 128 s for the mock suite alone —
+the shared 1.5 CPUs punish parallel suite runs; do not run two
+suites at once.)
+What else breaks the budget: engine changes (tier 2 by design),
+slow issue tests that wait real time (bra67's cron wait, bra83's
+big sleep), and the GitHub approval card for the push
+(human-gated — landing waits on the card, not on the harness).
+
+**Targeted tests — what to run for what you changed** (before
+tier 1, or with `--only`). Obvious from the change; no guessing:
+
+| Changed | Run |
+| --- | --- |
+| Fix for issue BRA-NNN | `tests/test-braNNN.ts`, then tier 1 |
+| `workflows/library/<x>.ts` | Its test (improve-loop / bra117 / bra126 / rubric-review), then tier 1 |
+| `src/host.ts`, `cli.ts`, `src/adapter.ts` | Tier 1 + the issue test (tier 1's sampled integration is the coverage) |
+| `src/checker.ts`, `extract.ts`, `src/gate.ts` | Tier 1 + `test-checker.ts` (the gate) |
+| `workflows/README.md`, `workflows/library/` | `test-bra52.ts` (manifest, 84 s — slow and narrow, so targeted, not tier 1) |
+| Worker/jobspec/decision-model/adapter/exec-script | `test-bra89.ts` (trap-code pin, 58 s — targeted, not tier 1) |
+| `packages/durablets/src/durablets.c` | Tier 2 — an engine change is risky by definition, NOT a 10–15 min fix |
+| `run.sh`, `bench/` | Tier 2 + one full pass |
+| New workflow file | Its new test + tier 1 |
+
+**Resume (BRA-137).** Long runs get SIGTERM-killed by runtime
+VM replacement (~117-min cycle; a 30-min run has ~26% kill odds),
+so a run must survive being killed. Each section writes a marker
+on success (`$RESUME_DIR/.done/<slug>`, with its OK count) and
+progress appends to `$RESUME_DIR/progress.jsonl`, so re-invoking
+`./run.sh` skips completed sections automatically. The default
+resume dir is `~/workspace/tmp/agentts-run-resume/<tree-fingerprint>/`.
+`--resume-dir <dir>` reuses an explicit dir but **refuses to
+resume if the tree changed** — resuming across a tree change
+would mix results from two trees, and unexplained concurrent
+modification (BRA-136) is live. `--only <section,…>` runs exactly
+the named sections (forcing re-run) — for the unproven tail after
+a kill, or one area. The C host build is cached under the resume
+base keyed by `sha256(durablets.c)` + the dquickts pin, so a warm
+run pays no build (~1.5 s cold). The bench section runs with
+`--no-ratchet` on a resumed run (observations from a resumed pass
+mix two process lifetimes and must not ratchet baselines); a fresh
+full run records history so green runs count toward the ratchet.
+Per-section logs live in `$RESUME_DIR/logs/<slug>.log`.
+
+**Per-attempt logs + exit-code capture.** Never write two attempts
+to the same path: `braXXX-<tier>-attemptN-YYYYMMDD-HHMM.log`. After
+each `run.sh` invocation the driver records `$?` (143 = SIGTERM,
+137 = SIGKILL — this settles the signal question) and the boot ID
+(`stat -c %Y /proc/1`) into the resume dir's `progress.jsonl`.
+A run killed by a signal records its kill before exiting (the
+TERM/INT trap records it; the EXIT trap alone never runs when the
+shell is killed by a signal).
+
+**Heartbeat logger (diagnostic instrument).**
+`apps/agentts/bench/heartbeat.sh` writes a 1-minute line
+(timestamp + kernel boot_id + PID 1 start epoch + load) to
+`~/workspace/agentts-runs/heartbeat.log`, so the next kill's last
+heartbeat vs. the next boot time gives the replacement correlation
+with zero ambiguity. It is NOT started durably — durable operation
+needs a cron or a supervised process, and no such cron was
+invented for this. Start it that way when the mechanism exists.
 
 ## Known disagreements (code wins)
 

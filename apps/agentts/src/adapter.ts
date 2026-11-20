@@ -39,10 +39,16 @@ export const HOLD = Symbol("adapter-hold");
  * a gate by itself — the mock adapter's auto-"yes" — so the host
  * can log it loudly and mark the journal event. A delivered
  * (human) answer and a queued (deliberate) answer never carry
- * it. Like worker/tokens it never crosses into the engine. */
+ * it. Like worker/tokens it never crosses into the engine. `canned`
+ * (BRA-120) marks an exec answer the mock adapter simulated: the
+ * command was not run — the mock returned its default `{stdout: "",
+ * exitCode: 0}` — so the host can mark the journal event and the
+ * operator can see the result is simulated. A `cat` read, an
+ * `echo hi`, and a queued (deliberate) answer never carry it. Like
+ * auto it never crosses into the engine. */
 export type TrapAnswer =
-  | { value: unknown; worker?: string; tokens?: number; auto?: boolean }
-  | { throw: unknown; worker?: string; tokens?: number; auto?: boolean };
+  | { value: unknown; worker?: string; tokens?: number; auto?: boolean; canned?: boolean }
+  | { throw: unknown; worker?: string; tokens?: number; auto?: boolean; canned?: boolean };
 
 /** What the host passes to the adapter for one trap. */
 export interface TrapContext {

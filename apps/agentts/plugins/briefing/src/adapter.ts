@@ -28,6 +28,7 @@ import { MockAdapter } from "../../mock/src/mock-adapter";
 
 const BRIEFING_SPECS = [
   "briefing-discover",
+  "briefing-judge-consequence",
   "briefing-read",
   "briefing-relate",
   "briefing-render",
@@ -91,6 +92,22 @@ function mockBriefingJob(arg: any): unknown {
         earliestScanned: "2026-11-09",
       };
     }
+    case "briefing-judge-consequence": {
+      // Mock fixture: neutral consequence 5 for every paper, clearly
+      // labeled — the mock proves the gate + trap flow, it does not
+      // pretend to judge. A real run scores through the pool judge.
+      const papers: any[] = Array.isArray(input.papers) ? input.papers : [];
+      return {
+        ok: true,
+        error: "",
+        scores: papers.map((p: any) => ({
+          id: p.id,
+          consequence: 5,
+          reasons: "Mock fixture: neutral consequence 5 — the mock does not judge.",
+          evidence: "",
+        })),
+      };
+    }
     case "briefing-read": {
       const p: any = input.paper ?? {};
       return {
@@ -106,6 +123,12 @@ function mockBriefingJob(arg: any): unknown {
         caveats: ["Mock limitation: nothing was tested at scale."],
         topics: Array.isArray(p.topics) ? p.topics : ["quantization"],
         score: typeof p.score === "number" ? p.score : 5,
+        // BRA-130: pass the judge's consequence through, like the
+        // real read worker (briefing-worker.ts) — the workflow ranks
+        // reads consequence-led and throws loudly on an unjudged
+        // read, so a mock that dropped consequence would fail the
+        // ranking step instead of exercising the true path.
+        consequence: typeof p.consequence === "number" ? p.consequence : undefined,
         fullText: true,
         readChars: 500,
         absUrl: `https://arxiv.org/abs/${p.id ?? "2611.90001"}`,

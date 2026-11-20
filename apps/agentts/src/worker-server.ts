@@ -104,10 +104,11 @@
 // AGENTTS_JOBSPEC_DIR, AGENTTS_STATE_DIR (default ./.agentts-state).
 
 import * as fs from "node:fs";
+import * as os from "node:os";
 import * as path from "node:path";
 import * as crypto from "node:crypto";
 import { atomicWriteFile, CorruptionLog, type CorruptionRecord } from "./corruption";
-import { Host, HostRefusalError, makeDriverHost } from "./host";
+import { Host, makeDriverHost } from "./host";
 import { LocalTaskBackend, syncRunToTask } from "./task-backend";
 import { DEFAULT_DISPATCH_AGING_MS, DispatchScheduler } from "./scheduler";
 import { CostModel } from "./cost-model";
@@ -1225,21 +1226,87 @@ export class WorkerServer {
     });
   }
 
-  /** Drive the queue, mirroring `agentts queue run` (src/cli.ts
-   * cmdQueue "run") exactly: runQueue — which repairs stranded
-   * entries under the driver lock (the report is lastRepairReport)
-   * — then the --task sync for terminal runs. A live driver holding
-   * the lock is a 409 (HostRefusalError): the same refusal the CLI
-   * prints, as an HTTP status. */
+  /** Drive the queue in a CHILD process (`agentts queue run`),
+   * mirroring cmdQueue "run" exactly: runQueue — which repairs
+   * stranded entries under the driver lock — then the --task sync
+   * for terminal runs. A live driver holding the lock is a 409.
+   *
+   * BRA-175: the drive used to run in a Host inside this process
+   * (driverHost), and that deadlocked on any muse-adapter run:
+   * driveToCompletion is fully synchronous, so the server's event
+   * loop is blocked for the whole drive — and the muse adapter's
+   * sync calls to this server (/health in ensureServer, /enqueue,
+   * /job-status polling) are synchronous curl spawns against that
+   * blocked loop, so they all time out (ensureServer throws after
+   * 2s). A child driver leaves this process's loop free, so the
+   * pool path works exactly as the CLI path does. The other
+   * driverHost() call sites (deliver-result, queue list,
+   * deliveries, escalate, deliver-gate) only read state or write
+   * records — they never dispatch a job, so they stay in-process
+   * and keep the BRA-116 in-process event delivery.
+   *
+   * The child's repair report comes back via --repair-report (a
+   * JSON file the child writes after runQueue returns); the entries
+   * are re-read from queue.json after the child exits, and the
+   * --task sync runs here against a fresh driver Host (for journal
+   * reads) — the child already syncs too, and syncRunToTask is
+   * idempotent (it rewrites the same derived status). The CLI
+   * exits 1 both for "a live driver holds the lock" and for "some
+   * run failed", so the exit code alone cannot tell them apart: a
+   * REFUSED: line on the child's stderr means the lock (409).
+   * A missing repair file means the child died before runQueue
+   * returned — the drive never completed (500). */
   private async driveQueue(): Promise<{ status: number; body: unknown }> {
-    const host = await this.driverHost();
-    let q;
-    try {
-      q = await host.runQueue();
-    } catch (e) {
-      if (e instanceof HostRefusalError) return { status: 409, body: { error: e.message } };
-      throw e;
+    const reportPath = path.join(
+      process.env.TMPDIR ?? os.tmpdir(),
+      `agentts-driver-repair-${process.pid}-${crypto.randomUUID()}.json`,
+    );
+    const cliPath = path.join(path.dirname(new URL(import.meta.url).pathname), "cli.ts");
+    const args = [cliPath, "queue", "run", "--state-dir", this.config.stateDir, "--repair-report", reportPath];
+    if (this.config.workersConfigPath) args.push("--workers-config", this.config.workersConfigPath);
+    const proc = Bun.spawn([BUN, ...args], {
+      stdout: "pipe",
+      stderr: "pipe",
+      env: { ...process.env },
+    });
+    // Drain both pipes while the child runs: an unread pipe can
+    // block the child once it fills (its per-entry lines are small,
+    // but never trust that).
+    const stdoutP = new Response(proc.stdout).text().catch(() => "");
+    const stderrP = new Response(proc.stderr).text().catch(() => "");
+    const exitCode = await proc.exited;
+    const stderr = await stderrP;
+    await stdoutP;
+    if (stderr.includes("REFUSED:")) {
+      try {
+        fs.unlinkSync(reportPath);
+      } catch {
+        /* never written */
+      }
+      return { status: 409, body: { error: stderr.trim().slice(0, 500) } };
     }
+    let repair: unknown = null;
+    try {
+      repair = JSON.parse(fs.readFileSync(reportPath, "utf8"));
+    } catch {
+      repair = null;
+    }
+    try {
+      fs.unlinkSync(reportPath);
+    } catch {
+      /* never written */
+    }
+    if (repair === null || typeof repair !== "object" || !Array.isArray((repair as any).actions)) {
+      return {
+        status: 500,
+        body: { error: `queue drive failed (child exit ${exitCode}): ${(stderr.trim() || "no repair report and no stderr").slice(0, 500)}` },
+      };
+    }
+    // Re-read the queue from disk: the child drove it, this process
+    // only reads the result. A fresh driver Host loads current disk
+    // state (its construction dispatches nothing).
+    const host = await this.driverHost();
+    const q = host.readQueue();
     // --task sync, as cmdQueue "run" does it: a terminal run with a
     // taskId syncs to the task backend, or the task never learns the
     // run completed.
@@ -1254,10 +1321,24 @@ export class WorkerServer {
       status: 200,
       body: {
         entries: q,
-        repair: host.lastRepairReport,
+        repair,
         failed: q.some((e) => e.status === "failed"),
       },
     };
+  }
+
+  /** A run exists in this state dir when it has a queue entry, a
+   * registry entry, or a journal. Shared by deliverResult and
+   * ingestEvent (BRA-133) — one check and one 404 text, so the two
+   * sites cannot drift. A journal alone counts: a run whose queue
+   * entry is gone (delivered, repaired) still has its journal on
+   * disk, so only a run this state dir has never seen fails. */
+  private runExists(host: Host, runId: string): boolean {
+    return (
+      host.readQueue().some((e) => e.runId === runId) ||
+      host.registryHas(runId) ||
+      host.journal(runId).length > 0
+    );
   }
 
   /** Deliver one run's result, mirroring `agentts deliver-result`:
@@ -1272,11 +1353,7 @@ export class WorkerServer {
       return { status: 400, body: { error: "deliver-result requires a runId" } };
     }
     const host = await this.driverHost();
-    const exists =
-      host.readQueue().some((e) => e.runId === runId) ||
-      host.registryHas(runId) ||
-      host.journal(runId).length > 0;
-    if (!exists) return { status: 404, body: { error: `no run ${runId} in ${host.stateDir}` } };
+    if (!this.runExists(host, runId)) return { status: 404, body: { error: `no run ${runId} in ${host.stateDir}` } };
     try {
       const record = host.recordDelivery(
         runId,
@@ -1410,13 +1487,27 @@ export class WorkerServer {
    * workflow-completed/failed, gate-held/answered, timer-fired).
    * The body is a SystemEvent minus `at` (stamped here). Unknown
    * event types are a 400 — a typo'd event must not silently
-   * vanish. Best-effort by design: the caller swallows failures,
-   * and the tick agent's timeout + catch-up sweep bound the damage
-   * of a dropped event. */
-  private ingestEvent(body: any): { status: number; body: unknown } {
+   * vanish. An event naming a run this state dir has never seen is
+   * a 404 (BRA-133) — a host posting to the wrong server URL — and
+   * is rejected before emitting, so it cannot wake the tick loop
+   * and trigger drives for runs that are not here. Same check and
+   * same 404 text as deliver-result. The poster is fire-and-forget
+   * (host.notifyEvent swallows failures), so a 404 cannot break the
+   * posting host's run; it is the diagnosable signal. Events with
+   * no runId pass through as before. Best-effort by design: the
+   * caller swallows failures, and the tick agent's timeout +
+   * catch-up sweep bound the damage of a dropped event. */
+  private async ingestEvent(body: any): Promise<{ status: number; body: unknown }> {
     const type = body?.type;
     if (typeof type !== "string" || !(SYSTEM_EVENT_TYPES as string[]).includes(type)) {
       return { status: 400, body: { error: `unknown event type ${JSON.stringify(type)} (expected one of ${SYSTEM_EVENT_TYPES.join(", ")})` } };
+    }
+    const runId = body?.runId;
+    if (typeof runId === "string" && runId) {
+      const host = await this.driverHost();
+      if (!this.runExists(host, runId)) {
+        return { status: 404, body: { error: `no run ${runId} in ${host.stateDir}` } };
+      }
     }
     this.emitEvent(type as SystemEventType, {
       ...(typeof body?.runId === "string" ? { runId: body.runId } : {}),
@@ -1535,7 +1626,7 @@ export class WorkerServer {
         if (req.method === "POST" && url.pathname === "/event") {
           const body = await this.readJson(req);
           if (body === null) return json({ error: "event body must be JSON" }, 400);
-          const r = this.ingestEvent(body);
+          const r = await this.ingestEvent(body);
           return json(r.body, r.status);
         }
         if (req.method === "POST" && url.pathname === "/complete-job") {

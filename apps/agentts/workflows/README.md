@@ -58,6 +58,8 @@ backticked file paths and the `Gate` column.)
 | plan-driven-work | `library/plan-driven-work.ts` | workflow | `planDrivenWork` | check |
 | phase-review | `library/phase-review.ts` | workflow | `phaseReview` | check |
 | rubric-review | `library/rubric-review.ts` | workflow | `rubricReview` | check |
+| run-tests | `library/run-tests.ts` | workflow | `runTests` | check |
+| verify-fix | `library/verify-fix.ts` | workflow | `verifyFix` | check |
 | daily-ai-briefing | `dogfood/daily-ai-briefing.ts` | workflow | `dailyAiBriefing` | check |
 | workflow-bugfix-bra54 | `dogfood/workflow-bugfix-bra54.ts` | workflow | `bugfixBra54` | check |
 | decisionCascade | `../src/agentts.ts` | helper | `decisionCascade` | via `tests/workflows/workflow-bra47-cascade.ts` |
@@ -216,10 +218,10 @@ documents the real-engine end-to-end run. Gate: `CHECK OK`
 engine: arXiv discovery (reads arxiv.org/list past-week pages —
 the API 429s on the shared egress IP), parallel full-text reads
 (`all`), dedupe against a copy of the seen list, computed
-prior-work relations, a must-read selection by `decide` trap,
-rendered markdown + meta.json, a JudgeFixLoop structural polish
-over the draft, and the weekly HTML page via the existing
-builder — all into scratch.
+prior-work relations, a deterministic must-read selection (top of
+the consequence-led ranking, BRA-130), rendered markdown +
+meta.json, a JudgeFixLoop structural polish over the draft, and the
+weekly HTML page via the existing builder — all into scratch.
 
 **Morning-report rubric (v0.2).** Step 0 reads
 `workflows/rubrics/morning-report-rubric.md` (the reviewed rubric,
@@ -254,12 +256,13 @@ missing or empty file fails the run loudly at step 0.
 
 **When to use it.** As the worked example of a full
 production-style workflow: fan-out reads, computed ranking, a
-decide trap that ratifies a score-ordered leader (the ranking is
-the real decision; the v0 decision model cannot reason over
-paper IDs), and library reuse (JudgeFixLoop as a structural
-check, not a semantic judge — its fix step can only append
-revision markers). No `gate`: no step here needs a human
-decision.
+deterministic must-read pick — the top of the consequence-led
+ranking (BRA-130: the decide trap that used to ratify the leader
+was removed — the v0 decision model cannot judge consequence, so
+the trap was a fake step; the ranking IS the decision), and
+library reuse (JudgeFixLoop as a structural check, not a semantic
+judge — its fix step can only append revision markers). No `gate`:
+no step here needs a human decision.
 
 **State.** Proof run only, not the live briefing. The edition
 it produces is dated 2026-11-16 and marked TEST in its scope
@@ -774,6 +777,135 @@ mock: the template flow). Gate: via §1.8 — `phase-review.ts`
 passes `agentts check`, and its extraction walks this
 module's transitive import.
 
+### 1.11 `library/run-tests.ts` — run-tests (the test-suite runner, BRA-164)
+
+**What it does.** Drives the AgentTS test suite from a workflow
+run instead of the bash loop in `run.sh`: given a tier (or an
+explicit section list) it runs each section by invoking
+`run.sh --bash --only <slug>` through an `exec` trap, counts the ` OK:`
+lines the same way the bash loop does, and reports per-section
+results. The engine owns the loop, retry, report, and resume;
+`run.sh` keeps only the leaf. A section is retried only when it
+did not execute — no verdict in its output (no ` OK:` line, no
+`PASS ` line, no `FAIL` line); a section whose tests ran and
+failed is recorded failed, never retried. Every attempt lands in
+the report; a section passing only after retry is flagged
+`flaky` — file it, a flaky test is a real defect. The driver in
+`run.sh` splits a tier into chunks of at most 32 sections per
+workflow run (the drive cap is 50 suspensions; worst case per
+chunk is 32 sections + 10 retries + 1 inventory read = 43
+rounds) with deterministic runIds (`run-tests-t<T>-c<i>`), so a
+re-invocation re-drives a suspended run instead of submitting a
+fresh one. One shared `--resume-dir` per tier for the leaf calls.
+Unlike the bash loop it runs ALL sections then reports (no
+fail-fast). `run.sh --bash` forces the bash loop (the escape
+hatch when the engine itself is down).
+
+**Contract.**
+
+- Input: `RunTestsInput` — `{ tier, sections?, inventoryPath?,
+  repoRoot, runSh?, resumeDir, maxAttempts?, maxRetriesPerChunk?,
+  chunkIndex?, chunkCount? }`. `sections` is the hermetic path:
+  the driver supplies `[{slug, label}]` from
+  `suite-inventory.json`; without it the workflow reads the
+  inventory itself (one `cat` exec, filtered by tier). `runSh`
+  defaults to `<repoRoot>/apps/agentts/run.sh`.
+- Output: `RunTestsResult` — `{ tier, chunkIndex, chunkCount,
+  sections, ran, passed, failed, totalOk, flaky, failedSlugs,
+  elapsedMs }`, where `sections` is one `SectionResult` per
+  section (`{ slug, label, passed, ok, attempts, elapsedMs,
+  flaky }`) and `attempts` is that section's attempt history
+  (`SectionAttempt[]`, including retries). A section is failed
+  iff `!passed` — there is no `failed` field on a section.
+- Shared shapes: `parseSectionOutput(stdout, exitCode)` is the
+  exported pure verdict parser, returning `{ ok, executed,
+  passed }` — `passed` is the leaf's exit code (authoritative,
+  exactly as the bash loop records success iff rc == 0);
+  `executed` is whether any verdict line appeared. No `failed`
+  field: a nonzero exit with a verdict is a test failure, a
+  nonzero exit without one is the only retryable case.
+
+**State.** Tested by `tests/test-bra164.ts` (inventory check,
+`agentts check` on this file, `parseSectionOutput` unit checks,
+a live 2-section chunk via the CLI, and a bogus-slug retry
+probe). Gate: `check` — this file passes `agentts check`.
+
+### 1.12 `library/verify-fix.ts` — verify-fix (the fix verification workflow, BRA-158)
+
+**What it does.** Encodes Meroki's manual fix verify+close loop
+as a workflow: given a fix (worker report + diff + log paths, the
+same handoff a worker delivers today) it (1) builds a fresh host
+and re-runs the new/changed test directly with it, counting the
+checks with run.sh's narrow rule (lines containing ` OK:`); (2)
+runs the tiered suite (tier 1 by default) and greps the on-disk
+section logs for the OK count, the ^PASS count, and the bench
+verdict — from the logs, never from the runner's summary line
+(the driver's printed PASS line is parsed separately and
+compared against the independent counts; a mismatch fails the
+verdict); (3) checks the diff is confined to the claimed files;
+(4) compares the measured suite counts against the recorded
+pre-change baseline and explains any delta (expected growth vs
+regression vs unexplained residual); (5) produces a verify
+report. It never closes issues, merges code, or decides
+acceptance — Meroki reviews the report and closes. A section
+that exits 0 with no verdict line at all is a no-verdict pass
+and fails verification. ^PASS is evidence, not a gate: two real
+tier-1 sections print no line starting with PASS (bra112 ends
+"BRA112 PASS: ...", layering ends "LAYERING OK: ...") and one
+prints two (bra164) — the Nov 19 tier-1 logs show 34 ^PASS
+lines across 35 section logs. Bench is tier 3; tier 1 reports
+"not-run" instead of inventing a verdict. Known v0 limit,
+carried verbatim in every report: a false pass — a test that
+passes for the wrong reason — is NOT diagnosed by this workflow
+(same limit as BRA-126).
+
+**Contract.**
+
+- Input: `VerifyFixInput` — `{ fixId, repoRoot, workDir,
+  resumeDir, dquicktsPath?, bunPath?, hostPath?, buildHost?,
+  typecheck?, tier?, onlySections?, directTests, claimedFiles,
+  changedFiles, baseline?, expectedAdditions? }`. `workDir` is
+  scratch for the host build (created by the workflow);
+  `resumeDir` must be fresh (skippedViaResume > 0 fails the
+  verdict). `onlySections` selects scoped mode: those sections
+  run via `run.sh --bash --only` and the baseline comparison is
+  skipped with a note (a scoped run cannot be compared against
+  the full-tier progression). A failed host build throws loudly
+  — without a host there is no verification to report.
+- Output: `VerifyReport` — `{ fixId, verdict, direct,
+  typecheck, suite, confinement, baseline, knownLimit, notes
+  }`, where `verdict` is "verified" (the evidence checks out —
+  NOT acceptance) or "failed", and `notes` names every
+  discrepancy with its counts (empty when verified). `direct`
+  is one `DirectTestResult` per re-run (`{ testPath, exitCode,
+  ok, expectedChecks, checksMatch, executed, passed, passLines,
+  elapsedMs }`); `suite` is one `SuiteResult` (`{ mode, tier,
+  sectionsRan, totalOk, passLines, sections, allPassed,
+  skippedViaResume, summaryLine, summaryMatchesIndependent,
+  elapsedMs }`) with per-section log evidence; `confinement`
+  is `{ confined, extras, missing }`; `baseline` is `{ compared,
+  baselineLabel, baselineSections, baselineOk, deltaSections,
+  deltaOk, expectedSections, expectedOk, explained, explanation }`.
+- Shared shapes: `parseDirectTestOutput(stdout, exitCode)`
+  (run-tests' `parseSectionOutput` plus a ^PASS-line count),
+  `parseTierSummaryLine(stdout)` (the driver's PASS line, null
+  when absent), `parseTier1Aggregation(text)` (the line-based
+  log-grep output — throws loudly on malformed lines, wrong
+  sums, or zero sections), `checkDiffConfinement(changedFiles,
+  claimedFiles)`, `compareBaseline(measured, baseline,
+  expectedAdditions)`, `buildVerifyReport(args)`. The
+  aggregation itself is one `/bin/sh -c` script over the
+  on-disk section logs (the big outputs stay on disk; only the
+  counts cross the trap boundary).
+
+**State.** Tested by `tests/test-bra158.ts` (inventory check,
+`agentts check` on this file, pure unit checks on the real
+BRA-132 log lines and file list, and a live scoped run through
+the CLI on direct). Acceptance: re-verify BRA-132 end to end
+and compare the workflow's report line-by-line against
+Meroki's manual verification of the same fix. Gate: `check` —
+this file passes `agentts check`.
+
 ## 2. Versioning and pinning
 
 **There is no version number on any library file.** No semver,
@@ -1005,6 +1137,8 @@ inventory is complete and so nobody mistakes them for entries.
 | File | What it is | Used by |
 |---|---|---|
 | `library/worker.ts` | Direct adapter's worker process: genuine computation for the `judge` / `fix` / `aggregate` / `rubric-update` specs and the five `improve-*` specs. One process per job trap; result JSON on the last stdout line. | §1.1 consumers, §1.2 (via direct adapter) |
+| `library/consequence-rank.ts` | Consequence-led ranking for the briefing judge: `combinedScore = consequence*10 + topicScore`, `rankByConsequence`; must-read ranking for read papers: `rankReads` / `compareReads` (combined orders; numbers, then fullText, then id are tiebreaks only; an unjudged read throws loudly). Pure functions; the judge's verdicts are combined with keyword topic scores here. | §1.3 (briefing workflow, judge step + must-read) |
+| `library/pool-promotion.ts` | Abstract-informed pooling supplement for briefing discovery (BRA-124 remaining): `selectAbstractFetch` (most recent 150 title-low fresh candidates, most recent first) and `selectSupplement` (top 8 by abstract score ≥ 7, never a pool paper). Pure functions; the supplement adds to the judge's input and displaces nobody — displacement was measured to eject three judged-top-8 papers on the real Nov 18 data. Known limit: TPHC (ascore 7, rank #21) and Gemma (ascore 4, rank #67) are NOT promoted. | §1.3 (briefing workflow, discover second pass + judge step) |
 | `dogfood/bugfix-worker.ts` | Worker process for the five `bugfix-*` specs (reproduce / diagnose / fix / test / verify), real under direct, `simulate: true` under mock (imported by the mock adapter). | §1.4 |
 | `dogfood/briefing-worker.ts` | Worker process for the five `briefing-*` specs (live arXiv fetches, real scoring/extraction). | §1.3 (via briefing adapter) |
 | `dogfood/briefing-prep.ts` | Scratch setup run via an exec trap: copies the live seen list + HTML builder into the run's scratch dir (read-only; the live files are never written). | §1.3 |

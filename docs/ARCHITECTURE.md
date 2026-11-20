@@ -8,6 +8,11 @@ top-level [README](../README.md) is the front door; this doc is the
 reference. It does not repeat the component READMEs — it links to
 them.
 
+Visual companion: [architecture-visual.html](architecture-visual.html)
+— diagrams of the layers, components, run execution, and the
+Muse-vs-any-harness split (added Nov 19, 2026). Keep the two in sync
+when the architecture changes.
+
 ## 1. The three layers
 
 ```
@@ -169,12 +174,35 @@ Each run also records an engine version,
 `dquickts-<pin12>+durablets-<hash16>` — the dquickts pin from the
 vendored tree's `VENDORED_FROM` stamp plus a content hash of
 `durablets.c` (source-derived, never binary-derived, since the
-binary is rebuilt fresh on every `run.sh`). A resume under a
-different engine build is refused loudly (`engine-version-mismatch`
-journal event; the run is marked failed, the blob stays on disk so
-restoring the matching engine and re-queueing can still resume it).
-Runs recorded before BRA-71 carry no version and proceed
-unchecked. Proven by `apps/agentts/tests/test-bra71.ts`.
+binary is rebuilt fresh on every `run.sh`). The full version is
+provenance. The resume gate, since BRA-132, compares the snapshot
+format identity instead: `snapfmt-<sig8hex>:<pin>:<native names>` —
+the build signature read from the snapshot blob's header, the
+dquickts pin, and the ordered host native names — stamped on the
+run + queue entries by `storeBlob` after each suspension, so it
+tracks the latest writer. A resume under a different format
+identity is refused loudly (`engine-version-mismatch` journal
+event; the run is marked failed, the blob stays on disk so
+restoring the matching engine and re-queueing can still resume
+it). A release that changed only durablets.c logic leaves the
+identity unchanged, so parked runs resume; a dquickts pin change,
+a native add, or a native rename changes it and still refuses.
+The signature is never reimplemented in TS — it is read from the
+blob header (delta blobs carry the same header), and when the
+full versions differ and no disk cache hits, a ~50 ms direct
+C-host probe (a hand-written bundle that suspends once on a sleep
+trap) supplies the current engine's signature. The names half
+exists because the signature covers only the native COUNT, not
+the names: a rename would leave the signature unchanged and load
+fine, while the resumed workflow's global lookups failed — so
+the names are parsed from durablets.c's registry with a
+three-way count check. Runs recorded before BRA-71 carry no
+version and proceed unchecked; runs recorded before BRA-132
+carry no format identity and are gated on the live blob's header
+signature plus the recorded pin (a rename in that window is not
+caught). Proven by `apps/agentts/tests/test-bra71.ts` (override
+refusal) and `apps/agentts/tests/test-bra132.ts` (logic-only
+resume, pin/rename/add refusal, legacy behavior).
 
 ### 3.3 The clock
 

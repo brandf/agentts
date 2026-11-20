@@ -36,8 +36,34 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { spawnSync } from "node:child_process";
+import {
+  selectAbstractFetch,
+  selectSupplement,
+  ABSTRACT_FETCH_BATCH_IDS,
+} from "../library/pool-promotion";
 
-const payload = JSON.parse(process.argv[2] ?? "{}");
+/** BRA-179: a job payload over the inline argv cap arrives as
+ * `agentts-file:<path>` (the spawning side writes the JSON to a
+ * scratch file and passes the marker — Linux caps any single argv
+ * string at 128KB). Small payloads still arrive inline. The marker
+ * starts with `a`, which no JSON document starts with, so it can
+ * never collide with an inline payload. A missing or unreadable
+ * file fails LOUDLY (the path named) instead of running with an
+ * empty input. (Marker + 64KB threshold shared with
+ * RESULT_ARG_INLINE_MAX_BYTES / RESULT_ARG_FILE_PREFIX in
+ * src/host.ts — BRA-171; keep the two in sync, per the BRA-88
+ * verbatim-copy rule.) */
+function readPayloadArg(raw: string | undefined): any {
+  const text = raw ?? "{}";
+  if (!text.startsWith("agentts-file:")) return JSON.parse(text);
+  const filePath = text.slice("agentts-file:".length);
+  try {
+    return JSON.parse(fs.readFileSync(filePath, "utf8"));
+  } catch (e) {
+    throw new Error(`briefing-worker: cannot read job payload file ${filePath}: ${e instanceof Error ? e.message : String(e)}`);
+  }
+}
+const payload = readPayloadArg(process.argv[2]);
 const spec: string = payload.spec;
 const input: any = payload.input ?? {};
 
@@ -308,6 +334,14 @@ async function discover(): Promise<any> {
   const seenPath: string = input.seenPath ?? "";
   const windowDays: number = typeof input.windowDays === "number" ? input.windowDays : 10;
   const maxResults: number = typeof input.maxResults === "number" ? input.maxResults : 300;
+  // BRA-124: pre-judge pool size. The LLM judge re-ranks the pool by
+  // consequence and cuts it to the candidate count, so discovery must
+  // return a WIDER pool than the final candidates — the consequential
+  // papers the keyword cut would drop (InfuseLoop, TPHC, Gemma KV,
+  // SpecSearch in round 3) have to be IN the pool to be judged.
+  // Default 18 preserves the old behavior for callers that do not
+  // judge; the briefing workflow passes 40.
+  const preJudgePool: number = typeof input.preJudgePool === "number" ? input.preJudgePool : 18;
   const categories: string[] = Array.isArray(input.categories) && input.categories.length
     ? input.categories
     : ["cs.LG", "cs.CL", "cs.CV", "cs.AI", "stat.ML", "cs.NE"];
@@ -391,14 +425,17 @@ async function discover(): Promise<any> {
     }
   }
   fresh.sort((a, b) => b.score - a.score || b.submitted.localeCompare(a.submitted) || a.id.localeCompare(b.id));
-  // Top 12 by score, then a diversity fill: top 2 per topic not already
+  // Top 60% by score, then a diversity fill: top 2 per topic not already
   // included (looped-recurrent first — the standing high-interest
   // thread — so a strong looped paper is never crowded out by the
-  // week's quantization pile). Cap 18 candidates.
+  // week's quantization pile). Cap preJudgePool candidates (the pool
+  // the LLM judge re-ranks; the workflow cuts it to the final
+  // candidate count by combined consequence-led score).
   const picked: Candidate[] = [];
   const pickedIds = new Set<string>();
+  const topK = Math.max(1, Math.floor(preJudgePool * 0.6));
   for (const c of fresh) {
-    if (picked.length >= 12) break;
+    if (picked.length >= topK) break;
     if (c.score <= 0) break;
     picked.push(c);
     pickedIds.add(c.id);
@@ -407,7 +444,7 @@ async function discover(): Promise<any> {
   for (const topic of topicOrder) {
     let added = 0;
     for (const c of fresh) {
-      if (added >= 2 || picked.length >= 18) break;
+      if (added >= 2 || picked.length >= preJudgePool) break;
       if (c.score > 0 && !pickedIds.has(c.id) && c.topics.includes(topic)) {
         picked.push(c);
         pickedIds.add(c.id);
@@ -416,11 +453,56 @@ async function discover(): Promise<any> {
     }
   }
   const candidates = picked;
+  // BRA-124 pooling gap, second pass (abstract-informed supplement).
+  // List-sourced candidates are title-scored, so a paper whose title
+  // scores <= 2 but whose abstract is topic-strong never reaches the
+  // pool (Nov 18: TPHC title 0 / abstract 7, Gemma title 2 /
+  // abstract 4 — both in the cron's edition, neither in the trial
+  // pool). Fetch abstracts for the most recent title-low fresh
+  // candidates not in the pool (arXiv API id_list, batched) and
+  // promote the abstract-strong ones as a SUPPLEMENT to the judge's
+  // input — the pool itself is unchanged. Selection is pure (see
+  // workflows/library/pool-promotion.ts for why a supplement, not
+  // displacement, and for the known limit: this pass does NOT rescue
+  // TPHC or Gemma on the Nov 18 data). Only when the primary source
+  // is the list pages: API-sourced candidates already carry
+  // abstracts (parseAtom scores them with topicScore). Any fetch
+  // failure degrades to the title pool — the pass never fails
+  // discovery.
+  let abstractPass: { fetched: number; promoted: Candidate[] } = { fetched: 0, promoted: [] };
+  const listSourced = source.startsWith("arxiv.org list pastweek");
+  if (listSourced) {
+    try {
+      const fetchIds = selectAbstractFetch(fresh, pickedIds);
+      if (fetchIds.length > 0) {
+        const scored: Candidate[] = [];
+        for (let i = 0; i < fetchIds.length; i += ABSTRACT_FETCH_BATCH_IDS) {
+          const batch = fetchIds.slice(i, i + ABSTRACT_FETCH_BATCH_IDS);
+          const url = `https://export.arxiv.org/api/query?id_list=${encodeURIComponent(batch.join(","))}&max_results=${batch.length}`;
+          const r = await fetchText(url, 60000);
+          if (r.ok && r.text.includes("<entry>")) scored.push(...parseAtom(r.text));
+          else log(`discover: abstract pass batch ${i / ABSTRACT_FETCH_BATCH_IDS + 1} failed status=${r.status}`);
+          await sleep(1000);
+        }
+        abstractPass.fetched = scored.length;
+        abstractPass.promoted = selectSupplement(scored, pickedIds);
+        if (abstractPass.promoted.length > 0) {
+          log(
+            `discover: abstract pass fetched=${scored.length} promoted=${abstractPass.promoted.map((c) => `${c.id}(ascore ${c.score})`).join(", ")}`,
+          );
+        }
+      }
+    } catch (e) {
+      log(`discover: abstract pass failed (${String(e).slice(0, 200)}) — keeping the title pool`);
+      abstractPass = { fetched: 0, promoted: [] };
+    }
+  }
   const earliestScanned = inWindow.reduce((m, c) => (c.submitted && (!m || c.submitted < m) ? c.submitted : m), "");
   return {
     ok: true,
     error: "",
     candidates,
+    abstractPass,
     excludedSeen: excludedSeen.sort(),
     scanned: inWindow.length,
     freshCount: fresh.length,
@@ -430,6 +512,89 @@ async function discover(): Promise<any> {
     apiStatus,
     earliestScanned,
   };
+}
+
+// ------------------------------------------------------------ judge-consequence
+// BRA-124: the LLM consequence judge (jobspec
+// briefing-judge-consequence). MECHANISM GAP, stated plainly: this
+// script CANNOT judge. It is a deterministic Bun process — it has no
+// LLM in it, and a keyword implementation here would be the v0
+// stem-coverage trap all over again, not judgment. The real judge is
+// a pool worker (a Muse subagent) following the jobspec prose, which
+// reads each abstract and scores consequence 0-10.
+//
+// So this handler only CARRIES recorded verdicts: the caller passes
+// `judgments` (an array of {id, consequence, reasons, evidence}) or
+// `judgmentsPath` (a JSON file with the same shape, produced by a
+// real LLM reading the abstracts — in production the pool worker's
+// completion, in a trial a recorded fixture with provenance). With
+// neither, it FAILS LOUDLY — never a silent keyword fallback, never
+// an invented score. It validates coverage (exactly one verdict per
+// input paper) and range (0-10), and returns the verdicts for the
+// workflow to rank by. The ranking itself lives in
+// workflows/library/consequence-rank.ts, imported by the workflow.
+// NOTE: this shape must stay exactly the declared ConsequenceVerdict
+// in daily-ai-briefing.ts ({id, consequence, reasons, evidence?}) —
+// the host validates the judge trap's output against the extracted
+// schema, and an extra property (an `error` field was here) fails
+// every score with "must NOT have additional properties" (first
+// judge trial, Nov 19).
+interface ConsequenceVerdict {
+  id: string;
+  consequence: number;
+  reasons: string;
+  evidence?: string;
+}
+
+async function judgeConsequence(): Promise<any> {
+  const papers: any[] = Array.isArray(input.papers) ? input.papers : [];
+  if (papers.length === 0) {
+    return { ok: false, error: "briefing-judge-consequence: no papers in input", scores: [] };
+  }
+  let judgments: any = input.judgments ?? null;
+  if (!judgments && typeof input.judgmentsPath === "string" && input.judgmentsPath) {
+    try {
+      const raw = fs.readFileSync(input.judgmentsPath, "utf8");
+      const parsed = JSON.parse(raw);
+      judgments = Array.isArray(parsed) ? parsed : parsed.scores ?? null;
+    } catch (e) {
+      return {
+        ok: false,
+        error: `briefing-judge-consequence: cannot read judgments file ${input.judgmentsPath}: ${String(e).slice(0, 200)}`,
+        scores: [],
+      };
+    }
+  }
+  if (!judgments) {
+    return {
+      ok: false,
+      error:
+        "briefing-judge-consequence: no LLM judge available under the direct adapter — pass judgments (recorded LLM verdicts) or judgmentsPath, or run through the worker pool (jobspec briefing-judge-consequence.md). This script cannot judge; a keyword fallback here would be stem-coverage, not judgment.",
+      scores: [],
+    };
+  }
+  if (!Array.isArray(judgments)) {
+    return { ok: false, error: "briefing-judge-consequence: judgments must be an array", scores: [] };
+  }
+  const byId = new Map<string, ConsequenceVerdict>();
+  for (const j of judgments) {
+    if (typeof j?.id !== "string" || typeof j?.consequence !== "number") {
+      return { ok: false, error: `briefing-judge-consequence: malformed verdict (need {id, consequence}): ${JSON.stringify(j).slice(0, 200)}`, scores: [] };
+    }
+    if (j.consequence < 0 || j.consequence > 10) {
+      return { ok: false, error: `briefing-judge-consequence: consequence out of range 0-10 for ${j.id}: ${j.consequence}`, scores: [] };
+    }
+    if (typeof j?.reasons !== "string" || !j.reasons) {
+      return { ok: false, error: `briefing-judge-consequence: verdict for ${j.id} carries no reasons — a score without evidence is not a judgment`, scores: [] };
+    }
+    byId.set(j.id, { id: j.id, consequence: j.consequence, reasons: j.reasons, evidence: j.evidence ?? "" });
+  }
+  const missing = papers.map((p: any) => p.id).filter((id: string) => !byId.has(id));
+  if (missing.length > 0) {
+    return { ok: false, error: `briefing-judge-consequence: no verdict for ${missing.length} paper(s): ${missing.slice(0, 8).join(", ")}${missing.length > 8 ? ", ..." : ""} — incomplete coverage fails loudly, it is not padded with keyword scores`, scores: [] };
+  }
+  const scores: ConsequenceVerdict[] = papers.map((p: any) => byId.get(p.id)!);
+  return { ok: true, error: "", scores };
 }
 
 // ------------------------------------------------------------ read
@@ -583,6 +748,11 @@ async function read(): Promise<any> {
   const method = pickMethodSentences(bodyText, 6);
   const caveats = pickCaveatSentences(bodyText, 4);
   const { score, topics } = topicScore(pageTitle, abstract);
+  // BRA-124: the judge's consequence score rides on the paper from
+  // discovery (via the candidate) and passes through the read
+  // untouched — the read worker re-scores TOPIC only; it never
+  // re-judges consequence. The workflow's rankScore uses it.
+  const consequence = typeof paper.consequence === "number" ? paper.consequence : undefined;
   return {
     ok: true,
     error: "",
@@ -596,6 +766,7 @@ async function read(): Promise<any> {
     caveats,
     topics,
     score,
+    consequence,
     fullText,
     readChars,
     absUrl,
@@ -786,6 +957,9 @@ try {
   switch (spec) {
     case "briefing-discover":
       result = await discover();
+      break;
+    case "briefing-judge-consequence":
+      result = await judgeConsequence();
       break;
     case "briefing-read":
       result = await read();

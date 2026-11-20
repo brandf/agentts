@@ -228,10 +228,21 @@ export interface QueueEntry {
   frozenPath?: string;
   /** Engine build that wrote this run's snapshot (BRA-71, BRA-62
    * G10): `dquickts-<pin>+durablets-<hash>` — see engineVersion().
-   * A resume under a different engine build is refused loudly.
+   * Recorded for provenance; since BRA-132 the resume gate compares
+   * the snapshot format identity (formatIdentity), not this string.
    * Absent for runs started before BRA-71 (legacy: no version was
    * recorded, so there is nothing to compare — they proceed). */
   engineVersion?: string;
+  /** Snapshot format identity (BRA-132): `snapfmt-<sig8hex>:<pin>:
+   * <native names>` — the build signature read from the snapshot
+   * blob's header, the dquickts pin, and the ordered host native
+   * names. Stamped by storeBlob after each suspension, so it tracks
+   * the latest writer. The resume gate compares this, not the full
+   * engine version: a logic-only durablets.c change leaves it
+   * unchanged, so parked runs resume. Absent for runs last
+   * suspended before BRA-132 (legacy: the gate falls back to
+   * comparing the live blob's header signature only). */
+  formatIdentity?: string;
   /** Trap-code pin (BRA-89): the content hashes of the code that
    * answers this run's job/decide/exec traps, recorded at submit —
    * worker scripts, jobspec prose, the decision model, the
@@ -484,6 +495,20 @@ export const prefixFor = (runId: string): string => runId.replace(/\//g, "_");
 const shaBuf = (b: Buffer): string => crypto.createHash("sha256").update(b).digest("hex");
 const shaFile = (p: string): string => shaBuf(fs.readFileSync(p));
 
+/** BRA-171: a trap-result JSON string is delivered to the C host as
+ * argv[3] of the `resume` spawn, and Linux caps any single argv
+ * string at 128KB (MAX_ARG_STRLEN = 131072 bytes). Results at or
+ * above this many bytes go through a scratch file instead (marker
+ * `agentts-file:<path>`, read by the C host) — 64KB is half the cap,
+ * leaving margin for the `throw:` prefix and argv overhead, and far
+ * above any result a normal trap returns. Measured in bytes, not
+ * characters: multi-byte UTF-8 counts against the cap. */
+export const RESULT_ARG_INLINE_MAX_BYTES = 64 * 1024;
+/** Marker prefix for a file-backed trap result (BRA-171). It starts
+ * with `a`, which no JSON document starts with — the marker can
+ * never collide with an inline result. */
+export const RESULT_ARG_FILE_PREFIX = "agentts-file:";
+
 /** Driver-template version (BRA-94): bump when the driver template
  * in driverFor changes — the bundle cache key includes it, so a
  * template change misses instead of reusing a bundle built from
@@ -576,6 +601,191 @@ function hashDurabletsC(): string {
   return "unknown";
 }
 
+// ------------------------------------------- snapshot format identity (BRA-132)
+//
+// BRA-71 gated resume on the FULL engine version
+// (`dquickts-<pin>+durablets-<hash>`) — any durablets.c change, even a
+// logic-only bug fix that leaves the snapshot format untouched, refused
+// every parked run. BRA-132 narrows the gate to the snapshot FORMAT
+// identity: the inputs to the build signature in quickjs-snapshot.c
+// snap_natives_init, plus the dquickts pin, plus the host native names.
+// A resume is refused only when the format identity differs — i.e. when
+// the snapshot genuinely could not load, or could load but would bind
+// different host natives. The full engine version is still recorded on
+// every run for provenance; it is no longer the gate.
+//
+// The identity has three parts, in order:
+//   1. The build signature (u32) — FNV-1a over CONFIG_VERSION, the
+//      snapshot format version (11), BC_VERSION, the atom/class counts,
+//      sizeof(JSValue), JS_LIMB_BITS, the builtin native lists (name +
+//      def_type/magic), the data/control natives, and the host's
+//      native_count + func_list_count + func lists. It covers NAMES and
+//      SHAPES of natives, never C implementation bodies — so a logic-only
+//      durablets.c change leaves it unchanged. It is READ from the
+//      snapshot blob's own header (the writer stores it there), never
+//      reimplemented in TS: reimplementing it would mean parsing the
+//      builtin tables, the atom enum, and conditional #defines
+//      (JS_LIMB_BITS is 64 vs 32 by target) plus a compiler-determined
+//      sizeof(JSValue) — fragile, drift-prone duplication of the C.
+//   2. The dquickts pin — included even though the signature covers
+//      names/shapes, not implementations: the upstream tree is the unit
+//      of implementation change, and a pin bump is a deliberate engine
+//      upgrade. A pin change always refuses, even if the signature
+//      happens to be identical.
+//   3. The host native names, ordered — NOT in the signature.
+//      snap_natives_push (quickjs-snapshot.c:442) hashes nothing; it
+//      only appends the pointer to the registry table, and only
+//      host->native_count is hashed. ADDING a native moves the count
+//      (caught by the signature); RENAMING one does not (names live
+//      only in durablets_register's JS_SetPropertyStr calls, which are
+//      not signature inputs). A rename would load fine at layer 2
+//      (indices are positional) while the resumed workflow's global
+//      lookups failed or resolved to the wrong function — so the names
+//      are carried explicitly, parsed from durablets.c's registry
+//      (three-way count agreement: registered names, the
+//      durablets_natives[] array, and the .native_count literal).
+//      Caveat, accepted by the BRA-132 decision: durablets.c LOGIC is
+//      not in the identity — resume under a native-behavior fix means
+//      the run continues under the fixed behavior. The native set is
+//      six functions, changed rarely and always under review.
+//
+// Identity string: `snapfmt-<sig8hex>:<pin>:<name1,name2,...>`.
+// Legacy signature-only form (pre-BRA-132 runs, names never recorded):
+// `snapfmt-<sig8hex>`. Synthetic form under the override hook:
+// `override:<override-string>` (see currentFormatIdentity).
+//
+// Blob header layout (quickjs-snapshot.c snap_write_header): magic
+// `QJSSNAP\n` (8B) + LEB128 format version + u8 kind + u64 base id +
+// u32 build signature, host byte order (LE here). Delta blobs carry
+// the same header. Require magic + version 11, else throw loudly.
+
+/** Snapshot blob magic, 8 bytes including the trailing newline. */
+export const SNAPSHOT_MAGIC = "QJSSNAP\n";
+/** Snapshot format version the reader accepts (quickjs-snapshot.c:60). */
+export const SNAPSHOT_FORMAT_VERSION = 11;
+
+/** Read the build signature (u32) from a snapshot blob's header.
+ * Returns null when the file does not exist — the caller decides
+ * what that means (legacy runs have no blob to protect). Throws
+ * loudly on a truncated file, a bad magic, or an unsupported format
+ * version: a present-but-unreadable blob is a real problem, never a
+ * reason to proceed silently. */
+export function readSnapshotBuildSignature(blobPath: string): number | null {
+  if (!fs.existsSync(blobPath)) return null;
+  const buf = fs.readFileSync(blobPath);
+  // Minimum header: 8 magic + 1 version + 1 kind + 8 base id + 4 signature.
+  if (buf.length < 22) {
+    throw new Error(
+      `snapshot blob ${blobPath} is too short to hold a snapshot header (${buf.length} bytes) — refusing to resume from a corrupt blob`,
+    );
+  }
+  if (buf.subarray(0, 8).toString("latin1") !== SNAPSHOT_MAGIC) {
+    throw new Error(
+      `snapshot blob ${blobPath} has a bad magic — refusing to resume from a corrupt blob (expected ${JSON.stringify(SNAPSHOT_MAGIC)})`,
+    );
+  }
+  // LEB128 unsigned version, right after the magic.
+  let version = 0;
+  let shift = 0;
+  let off = 8;
+  for (;;) {
+    if (off >= buf.length) {
+      throw new Error(`snapshot blob ${blobPath} has a truncated version field — refusing to resume from a corrupt blob`);
+    }
+    const b = buf[off++];
+    version |= (b & 0x7f) << shift;
+    if ((b & 0x80) === 0) break;
+    shift += 7;
+    if (shift > 28) {
+      throw new Error(`snapshot blob ${blobPath} has an unparsable version field — refusing to resume from a corrupt blob`);
+    }
+  }
+  if (version !== SNAPSHOT_FORMAT_VERSION) {
+    throw new Error(
+      `snapshot blob ${blobPath} has snapshot format version ${version}, expected ${SNAPSHOT_FORMAT_VERSION} — refusing to resume from a snapshot written by another engine format`,
+    );
+  }
+  // u8 kind + u64 base id, then the u32 build signature (LE).
+  const sigOff = off + 1 + 8;
+  if (buf.length < sigOff + 4) {
+    throw new Error(`snapshot blob ${blobPath} is too short to hold a build signature — refusing to resume from a corrupt blob`);
+  }
+  return buf.readUInt32LE(sigOff);
+}
+
+/** Parse the ordered host native names from durablets.c source: the
+ * JS_SetPropertyStr names inside durablets_register, in registration
+ * order. Cross-checks three counts and throws loudly on any shape
+ * mismatch — registered names vs the durablets_natives[] array vs
+ * the .native_count literal — so an edit that changes one without
+ * the others can never silently produce a wrong identity. */
+export function parseHostNativeNames(durabletsCSource: string): string[] {
+  const regMatch = /void\s+durablets_register\s*\(\s*JSContext\s*\*\s*ctx\s*\)\s*\{/.exec(durabletsCSource);
+  if (!regMatch) {
+    throw new Error(
+      "cannot parse host native names: durablets_register not found in durablets.c — the registry shape changed; update parseHostNativeNames before resuming runs under this engine",
+    );
+  }
+  // Brace-match the function body from its opening brace.
+  let depth = 0;
+  let i = regMatch.index + regMatch[0].length - 1; // at the '{'
+  const bodyStart = i + 1;
+  let bodyEnd = -1;
+  for (; i < durabletsCSource.length; i++) {
+    const ch = durabletsCSource[i];
+    if (ch === "{") depth++;
+    else if (ch === "}") {
+      depth--;
+      if (depth === 0) {
+        bodyEnd = i;
+        break;
+      }
+    }
+  }
+  if (bodyEnd < 0) {
+    throw new Error(
+      "cannot parse host native names: durablets_register body is unterminated in durablets.c — refusing to build a format identity from a corrupt source",
+    );
+  }
+  const body = durabletsCSource.slice(bodyStart, bodyEnd);
+  const names: string[] = [];
+  const nameRe = /JS_SetPropertyStr\s*\(\s*ctx\s*,\s*global\s*,\s*"([^"]+)"\s*,/g;
+  for (const m of body.matchAll(nameRe)) names.push(m[1]);
+  if (names.length === 0) {
+    throw new Error(
+      "cannot parse host native names: no JS_SetPropertyStr registrations found in durablets_register — refusing to build a format identity from an empty registry",
+    );
+  }
+  const arrayCount = (durabletsCSource.match(/\(const void \*\)js_[A-Za-z0-9_]+\s*,/g) ?? []).length;
+  const countMatch = /\.native_count\s*=\s*(\d+)/.exec(durabletsCSource);
+  if (!countMatch) {
+    throw new Error(
+      "cannot parse host native names: .native_count literal not found in durablets.c — the host struct shape changed; update parseHostNativeNames before resuming runs under this engine",
+    );
+  }
+  const declaredCount = Number(countMatch[1]);
+  if (names.length !== arrayCount || names.length !== declaredCount) {
+    throw new Error(
+      `host native counts disagree in durablets.c: ${names.length} registered names, ${arrayCount} durablets_natives[] entries, .native_count = ${declaredCount} — refusing to build a format identity until the registry is consistent`,
+    );
+  }
+  return names;
+}
+
+/** Build a format identity string from its parts. */
+export function formatIdentityFor(signature: number, pin: string, natives: string[]): string {
+  return `snapfmt-${(signature >>> 0).toString(16).padStart(8, "0")}:${pin}:${natives.join(",")}`;
+}
+
+/** Split a format identity into its parts. Returns null on a shape
+ * mismatch (not a snapfmt identity at all). The legacy signature-only
+ * form has pin/natives null. */
+export function splitFormatIdentity(identity: string): { signature: string; pin: string | null; natives: string[] | null } | null {
+  const m = /^snapfmt-([0-9a-f]{8})(?::([^:]*):(.*))?$/.exec(identity);
+  if (!m) return null;
+  return { signature: m[1], pin: m[2] ?? null, natives: m[3] === undefined ? null : m[3] === "" ? [] : m[3].split(",") };
+}
+
 interface RunEntry {
   runId: string;
   status: "running" | "suspended" | "done" | "failed";
@@ -610,8 +820,14 @@ interface RunEntry {
   frozenHash?: string;
   frozenPath?: string;
   /** Engine build that wrote this run's snapshot (BRA-71, BRA-62
-   * G10) — see QueueEntry. Absent for legacy runs. */
+   * G10) — see QueueEntry. Recorded for provenance; since BRA-132
+   * the resume gate compares formatIdentity, not this string.
+   * Absent for legacy runs. */
   engineVersion?: string;
+  /** Snapshot format identity (BRA-132) — see QueueEntry. Stamped
+   * by storeBlob after each suspension. Absent for runs last
+   * suspended before BRA-132. */
+  formatIdentity?: string;
   /** Trap-code pin (BRA-89) — see QueueEntry. Absent for runs
    * started before BRA-89 (legacy: no pin was recorded, so there
    * is nothing to compare — they proceed unchecked). */
@@ -754,6 +970,29 @@ export async function makeDriverHost(
   return host;
 }
 
+/** BRA-118: does this bundle text contain genuine top-level
+ * import/export syntax? A real parse (Bun.Transpiler.scan) — the
+ * old line regexes (`/^\s*export\s/m`, `/^\s*import\s/m`)
+ * false-positived on `import`/`export` at line starts inside
+ * string literals, template literals, and comments (e.g. a Python
+ * script embedded in a workflow). Only static import statements
+ * and any exports count: dynamic `import()` was never refused by
+ * the old check either, and `import.meta` is not an import.
+ * Throws loudly when the text cannot be scanned — an
+ * unverifiable bundle is refused, never run. */
+export function bundleHasModuleSyntax(text: string, outPath: string): boolean {
+  const transpiler = new Bun.Transpiler({ loader: "js" });
+  let scanned: { imports: { kind: string; path: string }[]; exports: string[] };
+  try {
+    scanned = transpiler.scan(text);
+  } catch (e) {
+    throw new Error(
+      `bundle ${outPath} could not be scanned for import/export syntax — refusing to run: ${e instanceof Error ? e.message : String(e)}`,
+    );
+  }
+  return scanned.exports.length > 0 || scanned.imports.some((i) => i.kind === "import-statement");
+}
+
 export class Host {
   readonly hostPath: string;
   /** State dir (blobs, journals, runs, cache, queue). */
@@ -814,7 +1053,7 @@ export class Host {
   /** Per-trap dispatch provenance, recorded in driveStepOnce and
    * attached to the trap-result/trap-error event in ingestLog
    * (BRA-57). Keyed by trapId (globally unique: runId/trap-N). */
-  private pendingTrapMeta = new Map<string, { adapter: string; worker?: string; wallMs: number; tokens?: number; auto?: boolean }>();
+  private pendingTrapMeta = new Map<string, { adapter: string; worker?: string; wallMs: number; tokens?: number; auto?: boolean; canned?: boolean }>();
   private registry = new Map<string, RunEntry>();
   /** Final exit codes of runs that completed (their registry entries
    * are gone — the registry only holds in-flight runs). Lets driveToCompletion()
@@ -847,6 +1086,13 @@ export class Host {
   /** Cached engine version (BRA-71, BRA-62 G10) — see
    * engineVersion(). The engine cannot change mid-process. */
   private cachedEngineVersion: string | null = null;
+  /** BRA-132: this engine's snapshot format identity (null until
+   * computed), the parsed host native names, and the build
+   * signature read from a snapshot blob header. The engine cannot
+   * change mid-process, so all three are cached per Host. */
+  private cachedFormatIdentity: string | null = null;
+  private cachedHostNativeNames: string[] | null = null;
+  private cachedEngineSignature: number | null = null;
   private logOffsets = new Map<string, number>();
   /** Signal that killed the C host on the last slice (runHost), if any — forensics for the
    * host-crash journal event (G1, BRA-74). Null when the C host exited normally. */
@@ -919,6 +1165,13 @@ export class Host {
    * every rebuild and refuse every cross-process resume. Cached per
    * Host (the engine cannot change mid-process).
    *
+   * Recorded on every run for provenance. Since BRA-132 it is NOT
+   * the resume gate — the gate compares the snapshot format
+   * identity (formatIdentity / currentFormatIdentity): a logic-only
+   * durablets.c change leaves the format identity unchanged, so
+   * parked runs resume under it. See the module-level BRA-132
+   * comment above hashDurabletsC.
+   *
    * AGENTTS_ENGINE_VERSION_OVERRIDE (test hook) returns the override
    * verbatim — that is how the test simulates a different engine
    * build. Same pattern as AGENTTS_NO_COMPILER and
@@ -930,6 +1183,197 @@ export class Host {
       this.cachedEngineVersion = `dquickts-${readDquicktsPin()}+durablets-${hashDurabletsC()}`;
     }
     return this.cachedEngineVersion;
+  }
+
+  // ------------------------------------------- snapshot format identity (BRA-132)
+  // The resume gate compares the format identity, not the full engine
+  // version — see the module-level BRA-132 comment above. The full
+  // version is provenance; the identity is the gate.
+
+  /** The ordered host native names, parsed from durablets.c's
+   * registry (see parseHostNativeNames). Cached per Host. A missing
+   * durablets.c tolerates to [] — same as hashDurabletsC's
+   * "unknown" — so the identity degrades to signature+pin only
+   * instead of failing every run; a present-but-unparseable registry
+   * throws loudly (a wrong identity is worse than no gate). */
+  hostNativeNames(): string[] {
+    if (!this.cachedHostNativeNames) {
+      this.cachedHostNativeNames = [];
+      for (const dir of durabletsPackageDirs()) {
+        const f = path.join(dir, "src", "durablets.c");
+        if (fs.existsSync(f)) {
+          this.cachedHostNativeNames = parseHostNativeNames(fs.readFileSync(f, "utf8"));
+          break;
+        }
+      }
+    }
+    return this.cachedHostNativeNames;
+  }
+
+  /** This engine's snapshot format identity. Under the
+   * AGENTTS_ENGINE_VERSION_OVERRIDE hook the identity is the
+   * synthetic `override:<override-string>` — the override is a
+   * reporting fiction about the full version, and it must never
+   * match a real recorded identity (that is how test-bra71 B1 keeps
+   * refusing: recorded real identity != synthetic current). A run
+   * recorded AND driven under the same override proceeds via the
+   * fast path in assertEngineVersion (recorded full == current
+   * full) before the format comparison is reached. Cached per Host
+   * (the engine cannot change mid-process). */
+  currentFormatIdentity(): string {
+    if (!this.cachedFormatIdentity) {
+      const override = process.env.AGENTTS_ENGINE_VERSION_OVERRIDE;
+      if (override) {
+        this.cachedFormatIdentity = `override:${override}`;
+      } else {
+        this.cachedFormatIdentity = formatIdentityFor(this.currentEngineSignature(), readDquicktsPin(), this.hostNativeNames());
+      }
+    }
+    return this.cachedFormatIdentity;
+  }
+
+  /** This engine's build signature (u32), read from a snapshot blob
+   * header — never reimplemented in TS (see the BRA-132 comment
+   * above: sizeof(JSValue) is compiler-determined and the signature
+   * inputs include conditional #defines). In-process cached, then a
+   * disk cache keyed by the exact full engine version (a different
+   * engine is a different key, so stale entries are impossible),
+   * then a direct C-host probe. The probe runs only when the full
+   * strings differ AND the disk cache misses — the fast path
+   * (recorded full == current full) pays nothing. */
+  private currentEngineSignature(): number {
+    if (this.cachedEngineSignature !== null) return this.cachedEngineSignature;
+    const cachePath = this.engineFormatCachePath();
+    try {
+      const raw = JSON.parse(fs.readFileSync(cachePath, "utf8"));
+      if (raw && typeof raw.formatSignature === "string" && /^[0-9a-f]{8}$/.test(raw.formatSignature)) {
+        this.cachedEngineSignature = parseInt(raw.formatSignature, 16);
+        return this.cachedEngineSignature;
+      }
+    } catch {
+      // No cache entry, or an unparsable one — probe and (re)write it.
+    }
+    const sig = this.probeEngineSignature();
+    this.cachedEngineSignature = sig;
+    try {
+      atomicWriteFile(cachePath, JSON.stringify({ formatSignature: sig.toString(16).padStart(8, "0") }));
+    } catch {
+      // The cache is an optimization, not the gate — a failed write
+      // just means the next process probes again.
+    }
+    return sig;
+  }
+
+  /** Disk-cache path for this engine's format signature. Keyed by
+   * the exact full engine version string (sha256), so a different
+   * engine build can never read another build's cached signature. */
+  private engineFormatCachePath(): string {
+    return path.join(this.cacheDir, `engine-format-${shaBuf(Buffer.from(this.engineVersion(), "utf8"))}.json`);
+  }
+
+  /** Direct C-host probe: run a hand-written ~10-line bundle (plain
+   * JS, no imports, no build step — the C host evals the file
+   * directly as a global script) that calls __agentts_begin() then
+   * suspends once on trap("sleep", {ms: 1000}), and read the build
+   * signature from the blob header it writes. Fully synchronous
+   * (~50 ms), no tsc, no nested Host, no stranded runs, no
+   * notifyEvent noise — the C host is spawned directly via
+   * spawnSync, NOT via this.runHost (which would ingest the probe's
+   * log lines into the outer run's journal). save() returns
+   * g_suspend_kind (2 trap / 3 combinator), so `run` exits 2 on
+   * suspension. Throws loudly on any unexpected exit. */
+  private probeEngineSignature(): number {
+    const probeDir = fs.mkdtempSync(path.join(os.tmpdir(), "agentts-format-probe-"));
+    try {
+      const bundlePath = path.join(probeDir, "probe.js");
+      const blobPath = path.join(probeDir, "probe.snap");
+      fs.writeFileSync(
+        bundlePath,
+        [
+          "// BRA-132 format probe: suspend once so the C host writes a blob",
+          "// whose header carries this engine's build signature. Plain JS,",
+          "// no imports, no build step — the C host evals it directly.",
+          "__agentts_begin();",
+          'trap("sleep", { ms: 1000 });',
+          "",
+        ].join("\n"),
+      );
+      const r = spawnSync(this.hostPath, ["run", bundlePath, blobPath], {
+        encoding: "utf8",
+        env: { ...process.env },
+        timeout: 30_000,
+      });
+      if (r.status !== 2) {
+        throw new Error(
+          `engine format probe failed: the C host exited ${r.status ?? "unknown"} (expected 2, suspended at the sleep trap) — stderr: ${(r.stderr ?? "").trim().slice(-500)}`,
+        );
+      }
+      const sig = readSnapshotBuildSignature(blobPath);
+      if (sig === null) {
+        throw new Error(`engine format probe failed: the C host suspended but wrote no snapshot blob at ${blobPath}`);
+      }
+      return sig;
+    } finally {
+      try {
+        fs.rmSync(probeDir, { recursive: true, force: true });
+      } catch {
+        // Best effort — a leftover probe dir is harmless scratch.
+      }
+    }
+  }
+
+  /** Stamp the snapshot format identity on a run after a suspension
+   * (called from storeBlob, once the checkpoint is durable): read
+   * the signature from the just-written blob's header, combine with
+   * the dquickts pin and the host native names, and record it on
+   * the registry entry + queue entry, unconditionally (overwrite)
+   * so the record tracks the latest writer. Throws loudly if the
+   * just-written blob is unreadable or the registry is
+   * unparseable — a wrong identity is worse than no gate, and the
+   * parse is pinned by test-bra132. */
+  private stampFormatIdentity(runId: string, snapPath: string): void {
+    const sig = readSnapshotBuildSignature(snapPath);
+    if (sig === null) {
+      throw new Error(
+        `cannot stamp format identity for ${runId}: snapshot file ${snapPath} is missing just after storeBlob wrote it — refusing to resume from a checkpoint with no verifiable format`,
+      );
+    }
+    const identity = formatIdentityFor(sig, readDquicktsPin(), this.hostNativeNames());
+    const reg = this.registry.get(runId);
+    if (reg) {
+      reg.formatIdentity = identity;
+      this.saveRunEntry(runId);
+    }
+    this.stampQueueEntry(runId, { formatIdentity: identity });
+  }
+
+  /** The build signatures of a run's live checkpoint files (delta +
+   * keyframe, or the single blob) — for the pre-BRA-132 legacy path
+   * of the gate, where no format identity was ever recorded.
+   * Returns null when there is no live snapshot on disk (nothing
+   * to protect — the caller proceeds, same as today's legacy
+   * behavior). Throws loudly (via readSnapshotBuildSignature) when
+   * a present file is unreadable. */
+  private readLiveBlobSignatures(runId: string): number[] | null {
+    const manifest = this.readManifest(runId);
+    const files: string[] = [];
+    if (manifest) {
+      if (manifest.kind === "delta") {
+        files.push(this.deltaPath(runId));
+        if (manifest.keyframeHash) files.push(this.keyframePath(manifest.keyframeHash));
+      } else {
+        files.push(this.blobPath(runId));
+      }
+    } else {
+      files.push(this.blobPath(runId));
+    }
+    const sigs: number[] = [];
+    for (const f of files) {
+      const sig = readSnapshotBuildSignature(f);
+      if (sig === null) return null;
+      sigs.push(sig);
+    }
+    return sigs;
   }
 
   /** Freeze a workflow's closure (G9): copy the entry file + its
@@ -1158,7 +1602,7 @@ export class Host {
    * its queue entry (if one exists — submit does this at enqueue;
    * startRun does it when it freezes on demand, e.g. the admit
    * path, which enqueues without submitting). */
-  private stampQueueEntry(runId: string, fields: { frozenHash?: string; frozenPath?: string; engineVersion?: string; trapPin?: TrapPin }): void {
+  private stampQueueEntry(runId: string, fields: { frozenHash?: string; frozenPath?: string; engineVersion?: string; formatIdentity?: string; trapPin?: TrapPin }): void {
     // BRA-82: a read-modify-write — hold the enqueue lock across
     // it so a concurrent submit cannot interleave and lose either
     // the stamp or the new entry.
@@ -1178,15 +1622,78 @@ export class Host {
    * only protects runs started after BRA-71. On mismatch the run
    * is marked failed with the version error by runQueue's catch
    * (the blob stays on disk, so restoring the matching engine and
-   * re-queueing can still resume it). */
+   * re-queueing can still resume it).
+   *
+   * BRA-132 narrows the gate: the full engine version is provenance,
+   * not the gate — the comparison is the snapshot FORMAT identity
+   * (see the module-level BRA-132 comment). A logic-only durablets.c
+   * change leaves the format identity unchanged, so parked runs
+   * resume; a dquickts pin change, a native add, or a native rename
+   * changes it and still refuses. The journal event keeps the full
+   * recorded/current strings (test-bra71 B1 asserts them) and adds
+   * the format identities. */
   private assertEngineVersion(runId: string, reg: RunEntry, q: QueueEntry): void {
-    const recorded = reg.engineVersion ?? q.engineVersion ?? null;
-    if (!recorded) return;
-    const current = this.engineVersion();
-    if (recorded === current) return;
+    const recordedFull = reg.engineVersion ?? q.engineVersion ?? null;
+    const recordedFormat = reg.formatIdentity ?? q.formatIdentity ?? null;
+    const currentFull = this.engineVersion();
+    // Legacy (pre-BRA-71): nothing was ever recorded — proceed as before.
+    if (!recordedFull && !recordedFormat) return;
+    // Same engine build — fast path, no probe, no disk cache, no blob read.
+    if (recordedFull && recordedFull === currentFull) return;
+    // The full strings differ: compare snapshot format identities.
+    const current = this.currentFormatIdentity();
+    let recorded = recordedFormat;
+    let legacySigOnly = false;
+    if (!recorded) {
+      // Pre-BRA-132 run: no format identity was ever recorded. Two
+      // checks, both of which must pass:
+      //   (a) Pin — the recorded full version carries it
+      //       (`dquickts-<pin>+...`). A pin bump is a deliberate
+      //       engine upgrade and refuses even when the signature
+      //       happens to be identical: the pin is NOT a signature
+      //       input (verified in snap_natives_init), so the
+      //       signature alone would NOT catch a pin-only change.
+      //       Uncheckable when no full version was recorded
+      //       (pre-BRA-71) or the recorded string is an override —
+      //       then the signature check below still applies.
+      //   (b) Signature — the live snapshot's own header carries
+      //       the writing engine's build signature. A native ADD is
+      //       caught here (host->native_count is hashed); a RENAME
+      //       is not (names were never recorded) — documented limit.
+      // No live snapshot on disk: nothing to protect, proceed
+      // (same as today's legacy behavior).
+      const recordedPin = recordedFull ? (/^dquickts-([0-9a-f]+)\+/.exec(recordedFull)?.[1] ?? null) : null;
+      const pinOk = recordedPin === null || recordedPin === readDquicktsPin();
+      const sigs = this.readLiveBlobSignatures(runId);
+      if (sigs === null) return;
+      const cur = splitFormatIdentity(current);
+      const sigOk = cur !== null && sigs.every((s) => s.toString(16).padStart(8, "0") === cur.signature);
+      if (pinOk && sigOk) return;
+      // Fall through to the refusal with a signature-only identity.
+      recorded = `snapfmt-${sigs[0].toString(16).padStart(8, "0")}`;
+      legacySigOnly = true;
+    } else if (recorded === current) {
+      return;
+    }
+    // Mismatch — refuse loudly, as before: the blob stays on disk so
+    // restoring the matching engine and re-queueing can still resume
+    // the run.
+    const recordedDesc = legacySigOnly
+      ? `${recorded} (signature only — pre-BRA-132 run, native names were never recorded)`
+      : recorded;
+    const currentDesc = current.startsWith("override:")
+      ? `${current} (override hook — no real format identity)`
+      : current;
     const msg =
-      `refusing to resume ${runId}: snapshot was written by engine ${recorded} but this host is engine ${current} — snapshots are same-engine-only; restore the ${recorded} engine build to resume this run, or start a fresh run`;
-    this.journalEvent(runId, { event: "engine-version-mismatch", runId, recorded, current });
+      `refusing to resume ${runId}: snapshot was written by engine ${recordedFull ?? "(unrecorded)"} (snapshot format ${recordedDesc}) but this host is engine ${currentFull} (snapshot format ${currentDesc}) — resume requires the same snapshot format; restore the ${recordedFull ?? "original"} engine build to resume this run, or start a fresh run`;
+    this.journalEvent(runId, {
+      event: "engine-version-mismatch",
+      runId,
+      recorded: recordedFull,
+      current: currentFull,
+      recordedFormat: recorded,
+      currentFormat: current,
+    });
     throw new Error(msg);
   }
 
@@ -3252,6 +3759,12 @@ export class Host {
     };
     this.writeManifest(runId, manifest);
     this.pruneKeyframes();
+    // BRA-132: stamp the snapshot format identity from the
+    // just-written slice blob's header, so the resume gate compares
+    // the format that actually wrote this checkpoint — not the full
+    // engine version. After the manifest commit, so the stamp
+    // describes a durable checkpoint.
+    this.stampFormatIdentity(runId, snap);
   }
   private loadBlob(runId: string, snap: string): void {
     const manifest = this.readManifest(runId);
@@ -3398,6 +3911,9 @@ export class Host {
           // too, so a journal reader sees the gate was auto-answered
           // from the result event alone.
           if (meta.auto === true) ev.auto = true;
+          // BRA-120: same for canned — a journal reader sees the
+          // exec result was simulated from the result event alone.
+          if (meta.canned === true) ev.canned = true;
         }
       }
       // BRA-73: promote the wrapper-captured call site to the trap
@@ -3994,6 +4510,16 @@ export class Host {
     h.update("\0");
     h.update(entryM[1]);
     h.update("\0");
+    // BRA-132: the bundle cache key KEEPS the full engine version,
+    // deliberately — it is not narrowed to the format identity.
+    // The key's job is "same key = same engine, exactly", and a
+    // rebuild costs ~5 ms once per engine change; strictness costs
+    // nothing and keeps the invariant trivially auditable. (A
+    // format-only identity here would also be correct — the bundle
+    // is built from the frozen closure + driver template, neither
+    // of which depends on durablets.c logic — but the saving is
+    // one ~5 ms rebuild per logic-only engine change, and the
+    // strict key is the safer invariant to reason about.)
     h.update(this.engineVersion());
     h.update("\0");
     h.update(Bun.version);
@@ -4092,7 +4618,7 @@ export class Host {
     }
     if (!fs.existsSync(outPath)) throw new Error("no bundle output");
     const text = fs.readFileSync(outPath, "utf8");
-    if (/^\s*export\s/m.test(text) || /^\s*import\s/m.test(text)) {
+    if (bundleHasModuleSyntax(text, outPath)) {
       throw new Error(
         `bundle ${outPath} still contains export/import syntax after Bun.build — refusing to run a bundle the C host would eval as a module`,
       );
@@ -4582,7 +5108,7 @@ export class Host {
     }
     if (!fs.existsSync(outPath)) throw new Error("no bundle output");
     const text = fs.readFileSync(outPath, "utf8");
-    if (/^\s*export\s/m.test(text) || /^\s*import\s/m.test(text)) {
+    if (bundleHasModuleSyntax(text, outPath)) {
       throw new Error(
         `bundle ${outPath} still contains export/import syntax after Bun.build — refusing to run a bundle the C host would eval as a module`,
       );
@@ -4783,10 +5309,14 @@ export class Host {
     // below that rebuilds the answer. BRA-119: `auto` rides the
     // same path — a repaired auto-answer is still an auto-answer,
     // and the journal must not lose the marking to a repair.
-    const provenance: { worker?: string; tokens?: number; auto?: boolean } = {
+    const provenance: { worker?: string; tokens?: number; auto?: boolean; canned?: boolean } = {
       ...(typeof (answer as any).worker === "string" ? { worker: (answer as any).worker as string } : {}),
       ...(typeof (answer as any).tokens === "number" ? { tokens: (answer as any).tokens as number } : {}),
       ...(answer as any).auto === true ? { auto: true as const } : {},
+      // BRA-120: `canned` rides the same path — a repaired canned
+      // answer is still a canned answer, and the journal must not
+      // lose the marking to a repair.
+      ...(answer as any).canned === true ? { canned: true as const } : {},
     };
     if ("throw" in answer) {
       // A throw payload crosses the same resume path as a value: it
@@ -4938,12 +5468,15 @@ export class Host {
         // BRA-119: same for auto (attached at ingest from
         // pendingTrapMeta) — a re-dispatched auto-answer stays
         // marked, or the journal would lose the marking to a crash.
+        // BRA-120: same for canned — a re-dispatched canned exec
+        // stays marked.
         return {
           answer: {
             value: e.result,
             ...(typeof e.worker === "string" ? { worker: e.worker } : {}),
             ...(typeof e.tokens === "number" ? { tokens: e.tokens } : {}),
             ...(e.auto === true ? { auto: true as const } : {}),
+            ...(e.canned === true ? { canned: true as const } : {}),
           },
           ...(typeof e.adapter === "string" ? { adapter: e.adapter } : {}),
           ...(typeof e.wallMs === "number" ? { wallMs: e.wallMs } : {}),
@@ -5117,15 +5650,54 @@ export class Host {
     return this.journal(runId).filter((e) => e.event === "fork");
   }
 
+  /**
+   * BRA-171: argv-safe form of a trap-result JSON string for the C
+   * host's `resume` command. Small results go inline, exactly as
+   * before. A result at or above RESULT_ARG_INLINE_MAX_BYTES is
+   * written to a scratch file under slices/ (one file per delivery,
+   * random suffix — deliveries for one run are sequential, but a
+   * crash mid-delivery must never collide with the retry's file)
+   * and argv[3] becomes `agentts-file:<path>`, which the C host
+   * reads. The caller MUST invoke the returned cleanup after the
+   * spawn — it unlinks the file when one was written (a no-op for
+   * the inline form), so a delivered result never litters the state
+   * dir. (Verbatim copy in plugins/mock/src/mock-plugin.ts — the
+   * mock host drives runs through the same C host; keep the two in
+   * sync, per the BRA-88 verbatim-copy rule.)
+   */
+  private resultArg(runId: string, json: string): { arg: string; cleanup: () => void } {
+    if (Buffer.byteLength(json, "utf8") < RESULT_ARG_INLINE_MAX_BYTES) {
+      return { arg: json, cleanup: () => {} };
+    }
+    const filePath = path.join(this.workdir, `${prefixFor(runId)}.trap-result-${crypto.randomUUID()}.json`);
+    fs.writeFileSync(filePath, json, "utf8");
+    return {
+      arg: `${RESULT_ARG_FILE_PREFIX}${filePath}`,
+      cleanup: () => {
+        try {
+          fs.unlinkSync(filePath);
+        } catch {
+          /* already gone — the resume consumed it or the run crashed */
+        }
+      },
+    };
+  }
+
   private deliverResult(runId: string, result: any): number {
     const entry = this.registry.get(runId)!;
     this.loadBlob(runId, entry.snap);
-    const rc = this.runHost(
-      ["resume", entry.snap, JSON.stringify(result)],
-      entry.out,
-      entry.log,
-      { ...entry.env, ...this.chainEnvFor(runId) },
-    );
+    const { arg, cleanup } = this.resultArg(runId, JSON.stringify(result));
+    let rc: number;
+    try {
+      rc = this.runHost(
+        ["resume", entry.snap, arg],
+        entry.out,
+        entry.log,
+        { ...entry.env, ...this.chainEnvFor(runId) },
+      );
+    } finally {
+      cleanup();
+    }
     if (rc === 0 || rc === 2 || rc === 3) {
       entry.rc = rc;
       this.refresh(entry);
@@ -5141,12 +5713,18 @@ export class Host {
   private deliverThrow(runId: string, err: any): number {
     const entry = this.registry.get(runId)!;
     this.loadBlob(runId, entry.snap);
-    const rc = this.runHost(
-      ["resume", entry.snap, "throw:" + JSON.stringify(err)],
-      entry.out,
-      entry.log,
-      { ...entry.env, ...this.chainEnvFor(runId) },
-    );
+    const { arg, cleanup } = this.resultArg(runId, JSON.stringify(err));
+    let rc: number;
+    try {
+      rc = this.runHost(
+        ["resume", entry.snap, "throw:" + arg],
+        entry.out,
+        entry.log,
+        { ...entry.env, ...this.chainEnvFor(runId) },
+      );
+    } finally {
+      cleanup();
+    }
     if (rc === 0 || rc === 2 || rc === 3) {
       entry.rc = rc;
       this.refresh(entry);
@@ -5525,7 +6103,9 @@ export class Host {
           // BRA-119: the recorded answer carries auto (from the
           // trap-dispatched result or a rebuilt trap-result) — keep
           // it, so the trap-result event on resume stays marked.
+          // BRA-120: same for canned.
           ...((recorded.answer as any).auto === true ? { auto: true as const } : {}),
+          ...((recorded.answer as any).canned === true ? { canned: true as const } : {}),
         });
         if ("throw" in recorded.answer) rc = this.deliverThrow(runId, recorded.answer.throw);
         else rc = this.deliverResult(runId, recorded.answer.value);
@@ -5602,6 +6182,12 @@ export class Host {
             `(--gates auto is the default; pass --gates hold on BOTH run/submit and queue run for a real human checkpoint)`,
         );
       }
+      // BRA-120: a canned exec answer is marked, not logged again —
+      // the mock adapter already logged CANNED EXEC naming the
+      // command. The journal event carries `canned: true` (and the
+      // answer carries it in `result`, via the TrapAnswer
+      // provenance) so a journal reader sees the exec was simulated.
+      const cannedExec = trapEv.type === "exec" && (ans as any).canned === true;
       this.journalEvent(runId, {
         event: "trap-dispatched",
         runId,
@@ -5612,6 +6198,7 @@ export class Host {
         adapter: fromHostGateQueue ? "host" : this.adapter.name,
         wallMs,
         ...(autoAnswered ? { auto: true as const } : {}),
+        ...(cannedExec ? { canned: true as const } : {}),
       });
       // TEST HOOK (BRA-75): crash after dispatch, before resume —
       // simulates a host SIGKILL in the G3 window (dispatch done,
@@ -5633,6 +6220,10 @@ export class Host {
         // reader sees the answer was auto without digging into
         // trap-dispatched.
         ...(autoAnswered ? { auto: true as const } : {}),
+        // BRA-120: same for canned — the trap-result event carries
+        // the marking so a journal reader sees the exec was
+        // simulated from the result event alone.
+        ...(cannedExec ? { canned: true as const } : {}),
       });
       if ("throw" in ans) rc = this.deliverThrow(runId, ans.throw);
       else rc = this.deliverResult(runId, ans.value);

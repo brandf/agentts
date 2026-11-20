@@ -99,14 +99,17 @@ Two different upgrades, two different answers. Upgrading AgentTS
 alone — same dquickts engine — does not make old snapshots
 unloadable: the snapshot format (SNAP_FORMAT_VERSION, BC_VERSION,
 class table) and the registered native set are unchanged, so the
-snapshot bytes still load. But today's `assertEngineVersion`
-compares the full `dquickts-<pin>+durablets-<hash>` string, so a
+snapshot bytes still load. Before r1, `assertEngineVersion`
+compared the full `dquickts-<pin>+durablets-<hash>` string, so a
 release that changed durablets.c — r1 did, twice (BRA-121, BRA-125)
-— still refuses to resume a parked run, loudly, with an
-`engine-version-mismatch` journal event. That refusal is the gate
-being conservative, not snapshot incompatibility; narrowing it is
-BRA-132 (open: narrow the gate to the format inputs, or keep the
-conservative refusal as a deliberate safety property).
+— still refused to resume a parked run, loudly, with an
+`engine-version-mismatch` journal event. That refusal was the gate
+being conservative, not snapshot incompatibility. Since r1 (BRA-132,
+below) the gate compares the snapshot format identity instead — the
+build signature read from the snapshot blob's header, the dquickts
+pin, and the ordered host native names — so a release that changed
+only durablets.c logic resumes parked runs; a dquickts pin change,
+a native add, or a native rename still refuses loudly.
 Upgrading to a release with a new dquickts engine is the case that
 can actually break parked runs: if the new engine moves the
 snapshot format, old snapshots won't load. Migration options:
@@ -183,6 +186,85 @@ limitations).
 
 ### Changed
 
+**Tiered test runner with resume
+([BRA-137](https://linear.app/brandf/issue/BRA-137/long-runsh-suite-runs-keep-getting-sigterm-killed-mid-flight)).**
+`./run.sh` is now tier 1 by default (16 sections, measured 223–228 s)
+instead of the full ~30 min suite: targeted tests for what changed
+plus a sampled quick tier. `--tier 2` runs broader integration and
+more e2e; `--full` / `--tier 3` runs everything including the bench.
+A run survives being killed: each section writes a completion marker,
+and re-invoking resumes the uncompleted tail (a kill costs the tail,
+not the whole run). A tree-fingerprint guard refuses a resume across
+a tree change. Per-attempt logs are written under a per-run resume
+directory, and the PASS line names the tier and what was skipped, so
+a tier-1 PASS can never read as a full PASS. Full suite, verified
+both paths: 2678 OK, 94–95 ^PASS, bench ALL GREEN on 53 metrics.
+See the usage skill (§10) for the tier table and the targeted-test
+rules. No workflow change is needed; run `./run.sh --list` to see the
+section inventory.
+
+**Mock exec results are now marked as canned
+([BRA-120](https://linear.app/brandf/issue/BRA-120/mock-adapter-silently-fakes-exec-success-warn-loudly-when-an-exec)).**
+Under `--adapter mock`, any exec except `cat` (reads for real) and
+`echo hi` still returns the canned `{stdout: "", exitCode: 0}` — but
+now it logs `[mock] CANNED EXEC: command "..." was NOT run ...`
+naming the command, and the journal marks the trap's dispatched and
+result events `canned: true`, so a mock run can no longer pass
+vacuously without saying so. Queued exec answers are delivered
+as-is, unmarked. The mock still never runs a command.
+
+**The tick agent ignores events for runs that aren't here
+([BRA-133](https://linear.app/brandf/issue/BRA-133/tick-agent-receives-events-for-runs-that-do-not-exist-in-the)).**
+A foreign host posting to the worker server could wake the tick
+loop with events for runs that don't exist in the production
+state dir. `ingestEvent` now runs the same run-existence check
+deliver-result already does (queue entry, registry entry, or
+journal) and a foreign runId gets the same 404 — the poster is
+fire-and-forget, so the 404 can't break it, and it is the
+diagnosable signal. One shared check, so the two sites cannot
+drift.
+
+**Briefing htmlPath now names the week file that exists
+([BRA-123](https://linear.app/brandf/issue/BRA-123/daily-ai-briefing-returned-htmlpath-does-not-match-the-week-file-the)).**
+The workflow returned `ai-briefings-week-<edition date>.html`, but
+the builder names the weekly page by the Monday of the edition's
+week — so for a Tuesday edition the returned path pointed at a file
+that does not exist. The workflow now computes the week Monday
+itself (UTC, so local time can't shift the weekday) and the print
+and the returned path share one value, so they cannot disagree.
+
+**Failed plan phases now show the command's stdout
+([BRA-122](https://linear.app/brandf/issue/BRA-122/plan-driven-work-failed-command-phase-hides-stdout-only-stderr-is)).**
+A command phase that failed used to report only its stderr, so a
+command that explains its failure on stdout left no trace of why it
+failed. The phase-failure error (and the commit step's) now carries
+the stdout tail (last 2 KB, `...` when truncated) alongside the
+stderr head, each labeled. The full streams were already in the run's
+journal as the exec trap's events.
+
+**Traps inside native-builtin callbacks are refused at extraction time
+([BRA-129](https://linear.app/brandf/issue/BRA-129/traps-cant-suspend-inside-native-builtin-callbacks)).**
+A trap called inside `Array.map`, `forEach`, `filter`, and twelve other
+native-builtin callbacks used to fail mid-run with `TypeError: this call
+cannot be suspended`, because the callback runs from C and dquickts
+cannot suspend from it. The extractor now refuses the workflow at
+first run, naming the callback and the fix (use a plain `for` loop or a
+direct call instead). A thunk merely created inside a callback and
+invoked later by `all()` still runs. Supporting suspension from inside
+a native callback would need snapshot-format changes and is an engine
+redesign, not a fix — this refusal is the behavior.
+
+**Bundle validator no longer refuses import/export inside strings
+([BRA-118](https://linear.app/brandf/issue/BRA-118/bundle-validator-false-positives-on-importexport-inside-string)).**
+The check that refuses a bundle the C host would eval as a module
+used to test the bundle text with line regexes, so a workflow
+embedding a script, code sample, or doc text with `import` or
+`export` at a line start was un-runnable. The check is now a real
+parse (`Bun.Transpiler.scan`): only static import statements and
+any exports refuse, with the refusal message unchanged. Dynamic
+`import()` and `import.meta` were never refused and still aren't;
+an unscannable bundle is refused loudly, never run.
+
 **Driver bundle cache
 ([BRA-94](https://linear.app/brandf/issue/BRA-94/cache-the-driver-bundle-by-frozenhash-instead-of-rebuilding-per-run)).**
 Bundles are cached on disk under `stateDir/bundles/<key>/`, keyed by
@@ -211,6 +293,55 @@ in-flight notifications before exiting, so delivery is preserved.
 The G4 blob copy now hashes the source once and reuses it in both
 integrity checks (both checks stay — each is load-bearing for a
 different half). ~0.85 ms saved per 500 KB copy. No behavior change.
+
+**Parked runs now resume across AgentTS-only upgrades
+([BRA-132](https://linear.app/brandf/issue/BRA-132/assertengineversion-refuses-resume-on-any-durabletsc-change-even-when)).**
+The resume gate used to compare the full engine version
+(`dquickts-<pin>+durablets-<hash>`), so any change to durablets.c —
+even a logic-only bug fix that leaves the snapshot format untouched
+— refused every parked run. It now compares the snapshot format
+identity: the build signature read from the snapshot blob's header,
+the dquickts pin, and the ordered host native names. A release that
+changed only durablets.c logic resumes parked runs; a dquickts pin
+change, a native add, or a native rename still refuses loudly with
+an `engine-version-mismatch` journal event and the blob left on
+disk. The full engine version is still recorded on every run for
+provenance. Two limits to know: runs recorded before this change
+carry no format identity, so they are gated on the blob-header
+signature plus the recorded pin (a native rename in that window is
+not caught); and durablets.c logic itself is not in the identity —
+resuming under a native-behavior fix means the run continues under
+the fixed behavior.
+
+### Fixed
+
+**Large trap results now deliver instead of failing the spawn
+([BRA-171](https://linear.app/brandf/issue/BRA-171/engine-cannot-deliver-an-exec-trap-result-larger-than-128kb-e2big-on-resume)).**
+A trap result whose JSON exceeded ~128KB failed the resume spawn with
+`E2BIG: argument list too long`, so the run could not be resumed — the
+bench section's result (~230KB from 217,671 bytes of stdout) was
+undeliverable this way, which blocked a green tier-3 run through the
+workflow driver. Results at or above 64KB now travel through a
+scratch file (`agentts-file:<path>` on argv) that the C host reads;
+small results still go inline, and the file is unlinked after the
+resume. A missing or unreadable file fails loudly (named on stderr,
+lifecycle `failed`) instead of resuming with a wrong result.
+Migration: none — the same workflows now complete.
+
+**Large job inputs now run instead of failing the spawn
+([BRA-179](https://linear.app/brandf/issue/BRA-179/direct-adapter-cannot-spawn-a-worker-for-a-job-whose-input-exceeds)).**
+A job whose input JSON exceeded ~128KB failed the worker spawn with
+`E2BIG: argument list too long`, so the job could not run at all —
+the first rubricReview run hit this with two full-page reference
+examples (74KB + 71KB). Inputs at or above 64KB now travel through
+a scratch file (`agentts-file:<path>` on argv) that the worker
+script reads; small inputs still go inline, and the file is unlinked
+after the spawn. The same cap applied at the two other sites on the
+job-input path: the pool worker-loop's spawn and the muse adapter's
+sync curl `--data` (large bodies now travel as `--data-binary
+@<file>`). A missing or unreadable file fails loudly (named on
+stderr) instead of running with an empty input.
+Migration: none — the same workflows now run.
 
 ### Known limitations (not yet fixed)
 

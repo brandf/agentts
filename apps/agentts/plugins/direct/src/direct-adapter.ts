@@ -22,8 +22,10 @@
 //  - decide: the local decision model (decision-model.ts) —
 //    cheap/fast/narrow, computed from the question content.
 
-import { spawnSync } from "node:child_process";
+import { spawnSync, type SpawnSyncReturns } from "node:child_process";
+import * as crypto from "node:crypto";
 import * as fs from "node:fs";
+import * as os from "node:os";
 import * as path from "node:path";
 import { HOLD, type Adapter, type TrapAnswer, type TrapContext } from "../../../src/adapter";
 import { decideLocal } from "../../../src/decision-model";
@@ -40,6 +42,24 @@ export interface DirectAdapterConfig {
 
 const DEFAULT_WORKER = path.resolve(import.meta.dir, "..", "..", "..", "workflows", "library", "worker.ts");
 const DEFAULT_BUGFIX_WORKER = path.resolve(import.meta.dir, "..", "..", "..", "workflows", "dogfood", "bugfix-worker.ts");
+
+/** BRA-179: a job payload is passed to the worker script as argv[2]
+ * of the spawn, and Linux caps any single argv string at 128KB
+ * (MAX_ARG_STRLEN = 131072 bytes). Payloads at or above this many
+ * bytes go through a scratch file instead (marker
+ * `agentts-file:<path>`, read by the worker script) — 64KB is half
+ * the cap, leaving margin for argv overhead, and far above any
+ * payload a normal job carries. Measured in bytes, not characters:
+ * multi-byte UTF-8 counts against the cap. (Same threshold + marker
+ * as RESULT_ARG_INLINE_MAX_BYTES / RESULT_ARG_FILE_PREFIX in
+ * src/host.ts — BRA-171, the output side of this same argv
+ * boundary; keep the two in sync, per the BRA-88 verbatim-copy
+ * rule.) */
+const JOB_ARG_INLINE_MAX_BYTES = 64 * 1024;
+/** Marker prefix for a file-backed job payload (BRA-179). It starts
+ * with `a`, which no JSON document starts with — the marker can
+ * never collide with an inline payload. */
+const JOB_ARG_FILE_PREFIX = "agentts-file:";
 
 export class DirectAdapter implements Adapter {
   readonly name = "direct";
@@ -101,6 +121,39 @@ export class DirectAdapter implements Adapter {
     return this.workers[spec] ?? null;
   }
 
+  /**
+   * BRA-179: argv-safe form of a job payload JSON string for the
+   * worker-script spawn. Small payloads go inline, exactly as
+   * before. A payload at or above JOB_ARG_INLINE_MAX_BYTES is
+   * written to a scratch file under os.tmpdir() (one file per spawn,
+   * random suffix — spawns for one run are sequential, but a crash
+   * mid-spawn must never collide with the retry's file) and argv[2]
+   * becomes `agentts-file:<path>`, which the worker script reads.
+   * The caller MUST invoke the returned cleanup after the spawn —
+   * it unlinks the file when one was written (a no-op for the
+   * inline form), so a dispatched job never litters the temp dir.
+   * (The pool worker-loop has the same helper for its own spawn
+   * site — plugins/muse/worker-loop.ts — keep the two in sync, per
+   * the BRA-88 verbatim-copy rule.)
+   */
+  private jobPayloadArg(payload: string): { arg: string; cleanup: () => void } {
+    if (Buffer.byteLength(payload, "utf8") < JOB_ARG_INLINE_MAX_BYTES) {
+      return { arg: payload, cleanup: () => {} };
+    }
+    const filePath = path.join(os.tmpdir(), `.agentts-job-payload-${crypto.randomUUID()}.json`);
+    fs.writeFileSync(filePath, payload, "utf8");
+    return {
+      arg: `${JOB_ARG_FILE_PREFIX}${filePath}`,
+      cleanup: () => {
+        try {
+          fs.unlinkSync(filePath);
+        } catch {
+          /* already gone — the worker consumed it or the spawn failed before reading */
+        }
+      },
+    };
+  }
+
   private runJob(spec: string, input: unknown, ctx: TrapContext): TrapAnswer {
     const script = this.workers[spec];
     if (!script) {
@@ -111,12 +164,17 @@ export class DirectAdapter implements Adapter {
     if (!fs.existsSync(script)) {
       throw new Error(`direct adapter: worker script not found for jobspec "${spec}": ${script}`);
     }
-    const payload = JSON.stringify({ spec, input });
-    const r = spawnSync(
-      "/opt/hatch-image/bin/bun",
-      [script, payload],
-      { encoding: "utf8", timeout: this.workerTimeoutMs, cwd: this.cwd },
-    );
+    const { arg, cleanup } = this.jobPayloadArg(JSON.stringify({ spec, input }));
+    let r: SpawnSyncReturns<string>;
+    try {
+      r = spawnSync(
+        "/opt/hatch-image/bin/bun",
+        [script, arg],
+        { encoding: "utf8", timeout: this.workerTimeoutMs, cwd: this.cwd },
+      );
+    } finally {
+      cleanup();
+    }
     if (r.error) {
       throw new Error(`direct adapter: worker for "${spec}" failed to spawn: ${String(r.error)}`);
     }

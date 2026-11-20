@@ -57,7 +57,7 @@ import * as path from "node:path";
 import * as os from "node:os";
 import { spawn, type Subprocess } from "bun";
 import { spawnSync } from "node:child_process";
-import { Host } from "../src/host";
+import { Host, flushNotifications } from "../src/host";
 import { MockAdapter } from "../plugins/mock/src/mock-adapter";
 
 const DIR = path.dirname(new URL(import.meta.url).pathname);
@@ -304,6 +304,22 @@ async function main(): Promise<number> {
 
   // ---------------------------------------------------------- B. tick wake
   console.log("\n=== B. tick wake (BRA-65) ===");
+  // BRA-172: B1/B3 post events for runIds that must exist in this
+  // state dir — BRA-133 404s events for foreign runIds (runExists:
+  // queue entry, registry entry, or journal). Submit real runs for
+  // both ids (the section C pattern), so each event is a legit
+  // run's event rather than a foreign one. submit() posts
+  // run-submitted via fire-and-forget notifyEvent, so wait for the
+  // POSTs to land before flushing — a late event would otherwise
+  // pollute B1's one-event assertion.
+  {
+    const host = new Host({ stateDir: STATE_DIR });
+    const r1 = host.submit(path.join(TESTS, "workflow-judges.ts"), { runId: "test-run-1" });
+    check(r1.runId === "test-run-1", `B: submitted workflow-judges as test-run-1`);
+    const r2 = host.submit(path.join(TESTS, "workflow-judges.ts"), { runId: "b3" });
+    check(r2.runId === "b3", `B: submitted workflow-judges as b3`);
+    await flushNotifications();
+  }
   // Flush the stale job-completed events section A left behind
   // (a tick returns on ANY pending event).
   await flushEvents();
@@ -335,7 +351,8 @@ async function main(): Promise<number> {
     await sleep(200);
     const second = await http("GET", `/tick?timeoutMs=500`);
     check(second.status === 409, `B3: second concurrent tick is a 409 (got ${second.status})`);
-    await http("POST", "/event", { type: "timer-fired", runId: "b3" });
+    const ev3 = await http("POST", "/event", { type: "timer-fired", runId: "b3" });
+    check(ev3.status === 200, `B3: POST /event ok (${ev3.status})`);
     const r1 = await first;
     check(r1.status === 200 && r1.body?.events?.some((e: any) => e.type === "timer-fired"), `B3: first tick resolved with the timer-fired event`);
   }

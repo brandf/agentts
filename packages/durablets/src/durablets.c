@@ -1549,6 +1549,44 @@ static void print_exception(JSContext *ctx)
     JS_FreeValue(ctx, exc);
 }
 
+/* BRA-171: read a whole file into a NUL-terminated buffer, or NULL
+ * when it cannot be read (missing, directory, short read). Unlike
+ * load_file, this never exits: the caller reports the failure
+ * loudly instead of dying mid-slice. */
+static char *read_text_file(const char *filename)
+{
+    FILE *f = fopen(filename, "rb");
+    char *buf;
+    long len;
+    if (!f) return NULL;
+    if (fseek(f, 0, SEEK_END) != 0) {
+        fclose(f);
+        return NULL;
+    }
+    len = ftell(f);
+    if (len < 0) {
+        fclose(f);
+        return NULL;
+    }
+    if (fseek(f, 0, SEEK_SET) != 0) {
+        fclose(f);
+        return NULL;
+    }
+    buf = malloc((size_t)len + 1);
+    if (!buf) {
+        fclose(f);
+        return NULL;
+    }
+    if (len > 0 && fread(buf, 1, (size_t)len, f) != (size_t)len) {
+        free(buf);
+        fclose(f);
+        return NULL;
+    }
+    buf[len] = '\0';
+    fclose(f);
+    return buf;
+}
+
 static uint8_t *load_file(const char *filename, size_t *plen)
 {
     FILE *f = fopen(filename, "rb");
@@ -2036,7 +2074,28 @@ int main(int argc, char **argv)
             throw_flag = 1;
             result_json += 6;
         }
+        /* BRA-171: a result over the inline argv cap arrives as
+         * `agentts-file:<path>` (the TS host writes the JSON to a
+         * scratch file and passes the marker); small results still
+         * arrive inline. The marker starts with `a`, which no JSON
+         * document starts with, so it can never collide with an
+         * inline result. A missing or unreadable file fails LOUDLY
+         * — a lifecycle `failed` event plus a named stderr line —
+         * never a resume with a wrong or empty result. The buffer is
+         * freed right after parsing: parse_result copies the text
+         * into a value, so nothing below needs the raw string. */
+        char *result_file_buf = NULL;
+        if (!strncmp(result_json, "agentts-file:", 13)) {
+            result_file_buf = read_text_file(result_json + 13);
+            if (!result_file_buf) {
+                fprintf(stderr, "durablets: cannot read result file %s\n", result_json + 13);
+                emit_lifecycle(ctx, "failed", -1);
+                return 1;
+            }
+            result_json = result_file_buf;
+        }
         val = parse_result(ctx, result_json);
+        free(result_file_buf);
         if (JS_IsException(val))
             return 1;
         if (JS_IsSuspended(rt)) {

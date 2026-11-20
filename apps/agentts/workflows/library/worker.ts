@@ -51,7 +51,28 @@
  */
 import * as fs from "node:fs";
 import * as crypto from "node:crypto";
-const payload = JSON.parse(process.argv[2] ?? "{}");
+/** BRA-179: a job payload over the inline argv cap arrives as
+ * `agentts-file:<path>` (the spawning side writes the JSON to a
+ * scratch file and passes the marker — Linux caps any single argv
+ * string at 128KB). Small payloads still arrive inline. The marker
+ * starts with `a`, which no JSON document starts with, so it can
+ * never collide with an inline payload. A missing or unreadable
+ * file fails LOUDLY (the path named) instead of running with an
+ * empty input. (Marker + 64KB threshold shared with
+ * RESULT_ARG_INLINE_MAX_BYTES / RESULT_ARG_FILE_PREFIX in
+ * src/host.ts — BRA-171; keep the two in sync, per the BRA-88
+ * verbatim-copy rule.) */
+function readPayloadArg(raw: string | undefined): any {
+  const text = raw ?? "{}";
+  if (!text.startsWith("agentts-file:")) return JSON.parse(text);
+  const filePath = text.slice("agentts-file:".length);
+  try {
+    return JSON.parse(fs.readFileSync(filePath, "utf8"));
+  } catch (e) {
+    throw new Error(`worker: cannot read job payload file ${filePath}: ${e instanceof Error ? e.message : String(e)}`);
+  }
+}
+const payload = readPayloadArg(process.argv[2]);
 const spec: string = payload.spec;
 const input: any = payload.input ?? {};
 

@@ -340,23 +340,94 @@ async function sectionC(): Promise<void> {
   await stopServer(9);
   check(await serverDown(), "C KILL OK: server is down after SIGKILL");
   check(queueStatus(runId) === "running", `C STRAND OK: ${runId} entry still "running" after the kill (stranded, not driven)`);
-  // Let the orphaned exec finish (5s sleep) so no orphan C host is
-  // still writing the journal when the restarted server re-drives.
-  await sleep(6000);
+  // BRA-175: POST /queue/run now drives the queue in a CHILD process,
+  // so killing the server no longer kills the driver — the child
+  // survives and finishes the drive on its own. Wait for it to
+  // complete the run (not a fixed sleep for the orphaned exec), then
+  // restart the server: the run must already be done, and the
+  // restart drive must report nothing stranded. The repair path
+  // itself is covered by section C2, which kills the driver.
+  const completed = await waitFor(() => queueStatus(runId) === "done", 20_000, `${runId} done by the surviving child driver`);
+  check(completed, `C SURVIVE OK: ${runId} completed by the child driver after the server kill (got ${queueStatus(runId) ?? "missing"})`);
   await startServer();
   const h = await http("GET", "/health");
   check(h.status === 200, "C RESTART OK: server is back up after restart");
   const drive = await http("POST", "/queue/run");
-  const action = (drive.body?.repair?.actions ?? []).find((a: any) => a.runId === runId);
   check(
-    drive.status === 200 && action?.from === "running" && action?.to === "queued",
-    `C REPAIR OK: restart drive reported ${runId} running -> queued (got ${drive.status}, ${JSON.stringify(action ?? drive.body?.repair).slice(0, 200)})`,
+    drive.status === 200 && drive.body?.repair?.inspected === 0 && (drive.body?.repair?.actions ?? []).length === 0,
+    `C REPAIR OK: restart drive reported nothing stranded (got ${drive.status}, ${JSON.stringify(drive.body?.repair).slice(0, 200)})`,
   );
   const driven = (drive.body?.entries ?? []).find((e: any) => e.runId === runId);
   check(drive.status === 200 && driven?.status === "done", `C RECOVER OK: ${runId} done after restart drive (got ${driven?.status ?? "missing"})`);
   const res = getResult(runId);
   check(res?.exitCode === 0, `C RECOVER OK: ${runId} completed after restart (exitCode ${res?.exitCode})`);
   console.log(`C INFO: marker has ${markerLines(marker)} line(s) — the exec may have re-run once across the crash (BRA-75 behavior)`);
+}
+
+/** The repair path POST /queue/run still exercises (BRA-175 moved
+ * the driver into a child process, so the server-kill case in
+ * section C no longer strands anything): kill the DRIVER itself
+ * mid-drive — the driver lock's holder.json names its pid — and
+ * the next drive must repair the stranded entry running->queued
+ * and recover the run. */
+async function sectionC2(): Promise<void> {
+  console.log("\n=== C2. driver killed mid-drive ===");
+  const runId = "bra116-c2";
+  const marker = path.join(WORKDIR, "bra116-c2.marker");
+  submit(path.join(ROOT, "tests", "workflows", "workflow-bra72-exec.ts"), runId, { markerFile: marker, sleepMs: 5000 }, "direct");
+  // Fire the server drive and never await it: its driver is about
+  // to be SIGKILLed, so the drive ends 500 — the catch is attached
+  // here so the rejection is handled from the start.
+  http("POST", "/queue/run").catch(() => undefined);
+  const running = await waitFor(
+    () => queueStatus(runId) === "running" && markerLines(marker) >= 1,
+    10_000,
+    `${runId} entry running with exec dispatched`,
+  );
+  check(running, `C2 STRAND OK: ${runId} running, exec dispatched before the kill`);
+  const holderPath = path.join(STATE_DIR, "driver.lock", "holder.json");
+  let driverPid: number | null = null;
+  try {
+    driverPid = JSON.parse(fs.readFileSync(holderPath, "utf8")).pid ?? null;
+  } catch {
+    driverPid = null;
+  }
+  check(typeof driverPid === "number" && (driverPid as number) > 0, `C2 KILL OK: driver lock names a pid (got ${driverPid})`);
+  if (typeof driverPid === "number" && driverPid > 0) {
+    try {
+      process.kill(driverPid, 9);
+    } catch {
+      /* already dead */
+    }
+    const dead = await waitFor(
+      () => {
+        try {
+          process.kill(driverPid as number, 0);
+          return false;
+        } catch {
+          return true;
+        }
+      },
+      5_000,
+      "driver pid gone",
+    );
+    check(dead, "C2 KILL OK: driver process is gone");
+  }
+  check(queueStatus(runId) === "running", `C2 STRAND OK: ${runId} entry still "running" after the driver kill (stranded, not driven)`);
+  // Let the orphaned exec finish (5s sleep) so no orphan C host is
+  // still writing the journal when the next drive re-drives.
+  await sleep(6000);
+  const drive = await http("POST", "/queue/run");
+  const action = (drive.body?.repair?.actions ?? []).find((a: any) => a.runId === runId);
+  check(
+    drive.status === 200 && action?.from === "running" && action?.to === "queued",
+    `C2 REPAIR OK: drive reported ${runId} running -> queued (got ${drive.status}, ${JSON.stringify(action ?? drive.body?.repair).slice(0, 200)})`,
+  );
+  const driven = (drive.body?.entries ?? []).find((e: any) => e.runId === runId);
+  check(drive.status === 200 && driven?.status === "done", `C2 RECOVER OK: ${runId} done after repair drive (got ${driven?.status ?? "missing"})`);
+  const res = getResult(runId);
+  check(res?.exitCode === 0, `C2 RECOVER OK: ${runId} completed after repair (exitCode ${res?.exitCode})`);
+  console.log(`C2 INFO: marker has ${markerLines(marker)} line(s) — the exec may have re-run once across the crash (BRA-75 behavior)`);
 }
 
 async function sectionD(): Promise<void> {
@@ -386,6 +457,7 @@ try {
   await sectionA();
   await sectionB();
   await sectionC();
+  await sectionC2();
   await sectionD();
 } finally {
   await stopServer(9);
@@ -400,4 +472,4 @@ if (FAILURES.length) {
   console.log(`\nFAIL bra116 driver-endpoints suite (${FAILURES.length} failure(s))`);
   process.exit(1);
 }
-console.log("\nPASS bra116 driver-endpoints suite (endpoint behaviour + error cases, lock refusal both directions, restart-mid-drive repair, deliver-gate end to end)");
+console.log("\nPASS bra116 driver-endpoints suite (endpoint behaviour + error cases, lock refusal both directions, server-restart driver survival + driver-kill repair, deliver-gate end to end)");

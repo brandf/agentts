@@ -333,6 +333,46 @@ export function splitExecuted(phases: PlanPhase[], executeThrough: string | unde
   return { executed, deferred };
 }
 
+// ------------------------------------------- exec failure reporting (BRA-122)
+/** How much of a failed command's output the failure error carries:
+ * stdout is reported as a TAIL (the failure reason is usually at
+ * the end — a test runner's summary, a script's FAIL line), stderr
+ * as a HEAD (as before). Both bounds keep the error readable; the
+ * full streams live in the run's journal as the exec trap's
+ * dispatched/result events. */
+export const EXEC_STDOUT_TAIL_CHARS = 2048;
+export const EXEC_STDERR_HEAD_CHARS = 300;
+
+/** The failure line for a non-zero exec: the exit code, the stdout
+ * tail, and the stderr head, each labeled so the reader can tell
+ * which stream a line came from. A stream that is empty contributes
+ * nothing; when BOTH are empty the line keeps the old "(no stderr)"
+ * text. A truncated stdout tail is prefixed with "..." so the reader
+ * knows there was more above the cut.
+ *
+ * (BRA-122: the phase error used to carry stderr only, so a command
+ * that reported its failure on stdout — the common case — left no
+ * trace of why it failed. The error is the failed phase's execution
+ * record: the run throws, so no PhaseRecord is returned, and the
+ * journal's lifecycle-"failed" event carries this message — the
+ * wave-failure aggregation embeds each phase's error verbatim, so
+ * the streams reach the run's record through it.) */
+export function formatExecFailure(
+  label: string,
+  r: { stdout?: string; stderr?: string; exitCode: number },
+): string {
+  const stdoutRaw = (r.stdout ?? "").trim();
+  const stdoutTail = stdoutRaw.slice(-EXEC_STDOUT_TAIL_CHARS);
+  const stderrHead = (r.stderr ?? "").trim().slice(0, EXEC_STDERR_HEAD_CHARS);
+  const parts: string[] = [];
+  if (stdoutTail) {
+    parts.push(`stdout tail: ${stdoutRaw.length > EXEC_STDOUT_TAIL_CHARS ? "..." : ""}${stdoutTail}`);
+  }
+  if (stderrHead) parts.push(`stderr: ${stderrHead}`);
+  if (parts.length === 0) parts.push("(no stderr)");
+  return `${label} exited ${r.exitCode}: ${parts.join(" | ")}`;
+}
+
 // ---------------------------------------------------------- phase execute
 /** Execute one phase. Command phases run for real through the
  * `exec` trap — a non-zero exit throws at the call site (the wave
@@ -346,9 +386,7 @@ export function executePhase(phase: PlanPhase, prior: PhaseRecord[]): PhaseRecor
     }
     const r = exec({ cmd: phase.command, args: phase.args ?? [], ...(phase.cwd ? { cwd: phase.cwd } : {}) });
     if (r.exitCode !== 0) {
-      throw new Error(
-        `plan-driven-work: phase "${phase.name}" command exited ${r.exitCode}: ${(r.stderr ?? "").trim().slice(0, 300) || "(no stderr)"}`,
-      );
+      throw new Error(`plan-driven-work: ${formatExecFailure(`phase "${phase.name}" command`, r)}`);
     }
     const evidence = (r.stdout ?? "").trim();
     return {
@@ -521,9 +559,7 @@ export default function planDrivenWork(input: PlanDrivenWorkInput): PlanDrivenWo
       ...(input.commit.cwd ? { cwd: input.commit.cwd } : {}),
     });
     if (r.exitCode !== 0) {
-      throw new Error(
-        `plan-driven-work: commit step exited ${r.exitCode}: ${(r.stderr ?? "").trim().slice(0, 300) || "(no stderr)"}`,
-      );
+      throw new Error(`plan-driven-work: ${formatExecFailure("commit step", r)}`);
     }
     committed = true;
     commitDetail = `commit exit 0, ${(r.stdout ?? "").trim().slice(0, 200)}`;

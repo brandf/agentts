@@ -1,0 +1,2642 @@
+{
+ "provenance": "Derived 2026-11-19 from real Nov 18, 2026 data. Pool (40): arXiv list pages, frozen pre-cron seen list (377 IDs), discover() algorithm reproduced exactly (pool == trial pool). Fetch candidates (200): the 200 most-recent title-low (score<=2) fresh papers by (submitted desc, id desc). Abstract-scored (150): arXiv API id_list abstracts for the 150 most-recent title-low papers, scored with briefing-worker.ts topicScore(title, abstract); real abstract text kept only for the top 8 by ascore + TPHC (2611.23026) + Gemma (2611.23035), empty elsewhere (selection reads id+score only). Sources: ~/workspace/tmp/bra124-fresh-2026-11-18.json, bra124-abstract-prototype.json, bra124-abstract-topics.json, bra124-pool-split.json, ~/workspace/bra124-judgments-2026-11-18.json.",
+ "pool": [
+  {
+   "id": "2611.22947",
+   "title": "The Kernel Reality Check: Benchmarking and Distilling Efficient Attention at Scale",
+   "score": 8,
+   "submitted": "2026-11-18",
+   "topics": [
+    "significance",
+    "architecture-attention"
+   ],
+   "fromTopK": true
+  },
+  {
+   "id": "2611.21917",
+   "title": "Lost in a Few Heads: Diagnosing and Repairing Block Selection in Sparse Attention",
+   "score": 7,
+   "submitted": "2026-11-18",
+   "topics": [
+    "significance",
+    "architecture-attention"
+   ],
+   "fromTopK": true
+  },
+  {
+   "id": "2611.17339",
+   "title": "Does the Ranking Hold? A Practitioner-Facing Audit of Hallucination Detectors on Small, Quantized, On-Device LLMs",
+   "score": 5,
+   "submitted": "2026-11-16",
+   "topics": [
+    "significance",
+    "quantization"
+   ],
+   "fromTopK": false
+  },
+  {
+   "id": "2611.18680",
+   "title": "Spread Too Thin: How Higher Resolution Dilutes a Vision Transformer&#39;s Attention, and a Training-Free Rescaling",
+   "score": 8,
+   "submitted": "2026-11-17",
+   "topics": [
+    "architecture-attention",
+    "vision-multimodal"
+   ],
+   "fromTopK": true
+  },
+  {
+   "id": "2611.22241",
+   "title": "Where Does Hindsight Enter Clinical Agent Benchmarks? An Audit of Simulators and Case Construction",
+   "score": 6,
+   "submitted": "2026-11-18",
+   "topics": [
+    "significance"
+   ],
+   "fromTopK": true
+  },
+  {
+   "id": "2611.22612",
+   "title": "Right Diagnosis, Unsafe Route: Auditing Clinical AI Decision Trajectories and Corrective Oversight for Validity and Potential Harm",
+   "score": 6,
+   "submitted": "2026-11-18",
+   "topics": [
+    "significance"
+   ],
+   "fromTopK": true
+  },
+  {
+   "id": "2611.22853",
+   "title": "Keeping Parts Honest: Isolated Part Graphs for Faithful Vision Transformer Explanations",
+   "score": 6,
+   "submitted": "2026-11-18",
+   "topics": [
+    "architecture-attention",
+    "vision-multimodal"
+   ],
+   "fromTopK": true
+  },
+  {
+   "id": "2611.22186",
+   "title": "Is 4-Bit Quantization More Than Noise to a Chat Model&#39;s Safety Behaviour? Attributing Behavioural Shifts with Matched Perturbations",
+   "score": 4,
+   "submitted": "2026-11-18",
+   "topics": [
+    "quantization"
+   ],
+   "fromTopK": false
+  },
+  {
+   "id": "2611.17680",
+   "title": "Aligned, Conflicting, or Unspecified? A Diagnostic Benchmark for Multimodal Time Series Forecasting",
+   "score": 8,
+   "submitted": "2026-11-16",
+   "topics": [
+    "significance",
+    "vision-multimodal"
+   ],
+   "fromTopK": true
+  },
+  {
+   "id": "2611.22343",
+   "title": "PURE: A Diagnostic Benchmark for Multi-Granularity Multimodal Identity Matching",
+   "score": 8,
+   "submitted": "2026-11-18",
+   "topics": [
+    "significance",
+    "vision-multimodal"
+   ],
+   "fromTopK": true
+  },
+  {
+   "id": "2611.18053",
+   "title": "InfiHall-Bench: A Benchmark for Hallucination Evaluation in Autoregressive Text-to-Image Generation",
+   "score": 7,
+   "submitted": "2026-11-16",
+   "topics": [
+    "significance",
+    "vision-multimodal",
+    "diffusion"
+   ],
+   "fromTopK": true
+  },
+  {
+   "id": "2611.18880",
+   "title": "RAVEN-Bench: A Paired EO-IR Video QA Benchmark for Aerial Multimodal Understanding",
+   "score": 7,
+   "submitted": "2026-11-17",
+   "topics": [
+    "significance",
+    "vision-multimodal"
+   ],
+   "fromTopK": true
+  },
+  {
+   "id": "2611.20381",
+   "title": "Trait Collapse in Text-to-Image Generation: Evaluating and Mitigating Personality Inconsistency in Visual Storytelling",
+   "score": 6,
+   "submitted": "2026-11-17",
+   "topics": [
+    "vision-multimodal",
+    "diffusion"
+   ],
+   "fromTopK": false
+  },
+  {
+   "id": "2611.21485",
+   "title": "Lost in the Hallway: Benchmarking Persistent Spatial Memory Across Revisits",
+   "score": 6,
+   "submitted": "2026-11-17",
+   "topics": [
+    "significance"
+   ],
+   "fromTopK": false
+  },
+  {
+   "id": "2611.22434",
+   "title": "Encoding, Decodability, and Use: A Five-Layer Framework for Benchmark Measurement Audits with Evidence from UAV Intent Recognition",
+   "score": 6,
+   "submitted": "2026-11-18",
+   "topics": [
+    "significance"
+   ],
+   "fromTopK": true
+  },
+  {
+   "id": "2611.18981",
+   "title": "GPBam: A Retrieval-Aware German Public Law Exam Benchmark",
+   "score": 5,
+   "submitted": "2026-11-17",
+   "topics": [
+    "significance",
+    "context-compression"
+   ],
+   "fromTopK": false
+  },
+  {
+   "id": "2611.22426",
+   "title": "InfuseLoop: Cross-Trajectory Latent Injection for Scalable Parallel Looped Transformers",
+   "score": 5,
+   "submitted": "2026-11-18",
+   "topics": [
+    "looped-recurrent",
+    "architecture-attention"
+   ],
+   "fromTopK": false
+  },
+  {
+   "id": "2611.22296",
+   "title": "SpecSearch: Towards Hardware-Aware Efficient Speculative Decoding",
+   "score": 4,
+   "submitted": "2026-11-18",
+   "topics": [
+    "speculative-decoding"
+   ],
+   "fromTopK": false
+  },
+  {
+   "id": "2611.21839",
+   "title": "VisHead-Spec: Head-Routed Visual Attention for Multimodal Speculative Decoding",
+   "score": 10,
+   "submitted": "2026-11-18",
+   "topics": [
+    "architecture-attention",
+    "vision-multimodal",
+    "speculative-decoding"
+   ],
+   "fromTopK": true
+  },
+  {
+   "id": "2611.17955",
+   "title": "WebArena-Pro: A Heterogeneous, Multimodal, Reproducible Benchmark for Web Agents",
+   "score": 8,
+   "submitted": "2026-11-16",
+   "topics": [
+    "significance",
+    "vision-multimodal"
+   ],
+   "fromTopK": true
+  },
+  {
+   "id": "2611.21105",
+   "title": "CivilBench: Benchmarking Vision-Language Models for Multimodal Information Integration in Civil Engineering",
+   "score": 7,
+   "submitted": "2026-11-17",
+   "topics": [
+    "significance",
+    "vision-multimodal"
+   ],
+   "fromTopK": true
+  },
+  {
+   "id": "2611.22652",
+   "title": "OmniTongue: A Comprehensive MLLM Benchmark for Automated Tongue Diagnosis in Traditional Chinese Medicine",
+   "score": 6,
+   "submitted": "2026-11-18",
+   "topics": [
+    "significance"
+   ],
+   "fromTopK": true
+  },
+  {
+   "id": "2611.19446",
+   "title": "Architectures and KV Replay for Depth-Recurrent Language Models",
+   "score": 5,
+   "submitted": "2026-11-17",
+   "topics": [
+    "looped-recurrent",
+    "architecture-attention"
+   ],
+   "fromTopK": false
+  },
+  {
+   "id": "2611.22728",
+   "title": "LoopZip: Visual Token Compression for Efficient Looped Vision-Language Models",
+   "score": 7,
+   "submitted": "2026-11-18",
+   "topics": [
+    "looped-recurrent",
+    "vision-multimodal"
+   ],
+   "fromTopK": true
+  },
+  {
+   "id": "2611.22757",
+   "title": "LoopPrune: Recurrent Pruning for Looped Diffusion Transformers",
+   "score": 7,
+   "submitted": "2026-11-18",
+   "topics": [
+    "looped-recurrent",
+    "architecture-attention",
+    "diffusion"
+   ],
+   "fromTopK": true
+  },
+  {
+   "id": "2611.19116",
+   "title": "A Hybrid State Space-Attention Architecture for Forecasting the Trajectories of Battery Degradation",
+   "score": 6,
+   "submitted": "2026-11-17",
+   "topics": [
+    "architecture-attention"
+   ],
+   "fromTopK": true
+  },
+  {
+   "id": "2611.19440",
+   "title": "Few-Shot Visual Concept Extraction for Steering Diffusion Transformers",
+   "score": 6,
+   "submitted": "2026-11-17",
+   "topics": [
+    "architecture-attention",
+    "vision-multimodal",
+    "diffusion"
+   ],
+   "fromTopK": true
+  },
+  {
+   "id": "2611.20307",
+   "title": "PoCoAttn: Position-Content Collaborative Sparse Attention for Fast and High-Fidelity Video Generation",
+   "score": 6,
+   "submitted": "2026-11-17",
+   "topics": [
+    "architecture-attention",
+    "vision-multimodal"
+   ],
+   "fromTopK": false
+  },
+  {
+   "id": "2611.20704",
+   "title": "QASK-Edit: Adaptive Sparse Attention Across Queries and Key Sources for Efficient Video Editing",
+   "score": 6,
+   "submitted": "2026-11-17",
+   "topics": [
+    "architecture-attention",
+    "vision-multimodal"
+   ],
+   "fromTopK": false
+  },
+  {
+   "id": "2611.21038",
+   "title": "ScoutCache: Efficient Few-Step Autoregressive Video Diffusion via Conditional Readout and Selective Caching",
+   "score": 6,
+   "submitted": "2026-11-17",
+   "topics": [
+    "vision-multimodal",
+    "diffusion"
+   ],
+   "fromTopK": false
+  },
+  {
+   "id": "2611.21300",
+   "title": "LATTE-WordSeg-Lite: Multi-Granularity Thai Word Segmentation on a CPU, with a Reproducible Benchmark",
+   "score": 6,
+   "submitted": "2026-11-17",
+   "topics": [
+    "significance"
+   ],
+   "fromTopK": false
+  },
+  {
+   "id": "2611.22191",
+   "title": "RISA: Recoverable Sparse Attention for Block-Diffusion Language Models",
+   "score": 6,
+   "submitted": "2026-11-18",
+   "topics": [
+    "architecture-attention",
+    "diffusion"
+   ],
+   "fromTopK": true
+  },
+  {
+   "id": "2611.22666",
+   "title": "VSpark: Speculative Decoding for Autoregressive Vision-Language-Action Models",
+   "score": 6,
+   "submitted": "2026-11-18",
+   "topics": [
+    "vision-multimodal",
+    "speculative-decoding"
+   ],
+   "fromTopK": true
+  },
+  {
+   "id": "2611.22962",
+   "title": "Hierarchical Diffusion Transformer for End-to-End Image Generation",
+   "score": 6,
+   "submitted": "2026-11-18",
+   "topics": [
+    "architecture-attention",
+    "vision-multimodal",
+    "diffusion"
+   ],
+   "fromTopK": true
+  },
+  {
+   "id": "2611.18963",
+   "title": "SpecRelay: Amortize or Avoid the Round Trip in Edge-Cloud Speculative Decoding",
+   "score": 4,
+   "submitted": "2026-11-17",
+   "topics": [
+    "speculative-decoding"
+   ],
+   "fromTopK": false
+  },
+  {
+   "id": "2611.18771",
+   "title": "Agri-MRAG: Parameter-Enhanced Multimodal Retrieval-Augmented Generation for Agricultural Visual Question Answering",
+   "score": 6,
+   "submitted": "2026-11-17",
+   "topics": [
+    "context-compression",
+    "vision-multimodal"
+   ],
+   "fromTopK": true
+  },
+  {
+   "id": "2611.19748",
+   "title": "SEAT: Sign-Type Evidence-Audited Transport for Multi-Label Tongue Diagnosis",
+   "score": 6,
+   "submitted": "2026-11-17",
+   "topics": [
+    "significance"
+   ],
+   "fromTopK": true
+  },
+  {
+   "id": "2611.19956",
+   "title": "FinVision: Multimodal AI for Visualizing Financial Narratives",
+   "score": 6,
+   "submitted": "2026-11-17",
+   "topics": [
+    "vision-multimodal"
+   ],
+   "fromTopK": false
+  },
+  {
+   "id": "2611.21029",
+   "title": "Sparse Attention for Visual Generation: Toward Algorithm-System Co-Design",
+   "score": 6,
+   "submitted": "2026-11-17",
+   "topics": [
+    "architecture-attention",
+    "vision-multimodal"
+   ],
+   "fromTopK": false
+  },
+  {
+   "id": "2611.22131",
+   "title": "LoCaR: Localized Canvas Retrieval With Frozen Vision-Language Model",
+   "score": 4,
+   "submitted": "2026-11-18",
+   "topics": [
+    "context-compression",
+    "vision-multimodal"
+   ],
+   "fromTopK": false
+  }
+ ],
+ "fetchCandidates": [
+  {
+   "id": "2611.23229",
+   "score": 0,
+   "submitted": "2026-11-18"
+  },
+  {
+   "id": "2611.23228",
+   "score": 2,
+   "submitted": "2026-11-18"
+  },
+  {
+   "id": "2611.23226",
+   "score": 2,
+   "submitted": "2026-11-18"
+  },
+  {
+   "id": "2611.23225",
+   "score": 0,
+   "submitted": "2026-11-18"
+  },
+  {
+   "id": "2611.23221",
+   "score": 0,
+   "submitted": "2026-11-18"
+  },
+  {
+   "id": "2611.23219",
+   "score": 0,
+   "submitted": "2026-11-18"
+  },
+  {
+   "id": "2611.23218",
+   "score": 0,
+   "submitted": "2026-11-18"
+  },
+  {
+   "id": "2611.23216",
+   "score": 0,
+   "submitted": "2026-11-18"
+  },
+  {
+   "id": "2611.23212",
+   "score": 0,
+   "submitted": "2026-11-18"
+  },
+  {
+   "id": "2611.23209",
+   "score": 0,
+   "submitted": "2026-11-18"
+  },
+  {
+   "id": "2611.23208",
+   "score": 0,
+   "submitted": "2026-11-18"
+  },
+  {
+   "id": "2611.23206",
+   "score": 2,
+   "submitted": "2026-11-18"
+  },
+  {
+   "id": "2611.23205",
+   "score": 0,
+   "submitted": "2026-11-18"
+  },
+  {
+   "id": "2611.23202",
+   "score": 2,
+   "submitted": "2026-11-18"
+  },
+  {
+   "id": "2611.23198",
+   "score": 0,
+   "submitted": "2026-11-18"
+  },
+  {
+   "id": "2611.23197",
+   "score": 0,
+   "submitted": "2026-11-18"
+  },
+  {
+   "id": "2611.23192",
+   "score": 2,
+   "submitted": "2026-11-18"
+  },
+  {
+   "id": "2611.23189",
+   "score": 2,
+   "submitted": "2026-11-18"
+  },
+  {
+   "id": "2611.23187",
+   "score": 0,
+   "submitted": "2026-11-18"
+  },
+  {
+   "id": "2611.23185",
+   "score": 0,
+   "submitted": "2026-11-18"
+  },
+  {
+   "id": "2611.23184",
+   "score": 0,
+   "submitted": "2026-11-18"
+  },
+  {
+   "id": "2611.23182",
+   "score": 0,
+   "submitted": "2026-11-18"
+  },
+  {
+   "id": "2611.23177",
+   "score": 2,
+   "submitted": "2026-11-18"
+  },
+  {
+   "id": "2611.23174",
+   "score": 0,
+   "submitted": "2026-11-18"
+  },
+  {
+   "id": "2611.23161",
+   "score": 0,
+   "submitted": "2026-11-18"
+  },
+  {
+   "id": "2611.23154",
+   "score": 0,
+   "submitted": "2026-11-18"
+  },
+  {
+   "id": "2611.23149",
+   "score": 2,
+   "submitted": "2026-11-18"
+  },
+  {
+   "id": "2611.23144",
+   "score": 0,
+   "submitted": "2026-11-18"
+  },
+  {
+   "id": "2611.23143",
+   "score": 0,
+   "submitted": "2026-11-18"
+  },
+  {
+   "id": "2611.23142",
+   "score": 0,
+   "submitted": "2026-11-18"
+  },
+  {
+   "id": "2611.23140",
+   "score": 2,
+   "submitted": "2026-11-18"
+  },
+  {
+   "id": "2611.23138",
+   "score": 0,
+   "submitted": "2026-11-18"
+  },
+  {
+   "id": "2611.23134",
+   "score": 0,
+   "submitted": "2026-11-18"
+  },
+  {
+   "id": "2611.23130",
+   "score": 0,
+   "submitted": "2026-11-18"
+  },
+  {
+   "id": "2611.23129",
+   "score": 0,
+   "submitted": "2026-11-18"
+  },
+  {
+   "id": "2611.23127",
+   "score": 2,
+   "submitted": "2026-11-18"
+  },
+  {
+   "id": "2611.23126",
+   "score": 2,
+   "submitted": "2026-11-18"
+  },
+  {
+   "id": "2611.23124",
+   "score": 0,
+   "submitted": "2026-11-18"
+  },
+  {
+   "id": "2611.23119",
+   "score": 0,
+   "submitted": "2026-11-18"
+  },
+  {
+   "id": "2611.23115",
+   "score": 0,
+   "submitted": "2026-11-18"
+  },
+  {
+   "id": "2611.23112",
+   "score": 0,
+   "submitted": "2026-11-18"
+  },
+  {
+   "id": "2611.23111",
+   "score": 0,
+   "submitted": "2026-11-18"
+  },
+  {
+   "id": "2611.23108",
+   "score": 0,
+   "submitted": "2026-11-18"
+  },
+  {
+   "id": "2611.23106",
+   "score": 0,
+   "submitted": "2026-11-18"
+  },
+  {
+   "id": "2611.23096",
+   "score": 0,
+   "submitted": "2026-11-18"
+  },
+  {
+   "id": "2611.23093",
+   "score": 0,
+   "submitted": "2026-11-18"
+  },
+  {
+   "id": "2611.23091",
+   "score": 0,
+   "submitted": "2026-11-18"
+  },
+  {
+   "id": "2611.23088",
+   "score": 0,
+   "submitted": "2026-11-18"
+  },
+  {
+   "id": "2611.23085",
+   "score": 2,
+   "submitted": "2026-11-18"
+  },
+  {
+   "id": "2611.23081",
+   "score": 2,
+   "submitted": "2026-11-18"
+  },
+  {
+   "id": "2611.23080",
+   "score": 0,
+   "submitted": "2026-11-18"
+  },
+  {
+   "id": "2611.23078",
+   "score": 2,
+   "submitted": "2026-11-18"
+  },
+  {
+   "id": "2611.23076",
+   "score": 0,
+   "submitted": "2026-11-18"
+  },
+  {
+   "id": "2611.23074",
+   "score": 0,
+   "submitted": "2026-11-18"
+  },
+  {
+   "id": "2611.23072",
+   "score": 0,
+   "submitted": "2026-11-18"
+  },
+  {
+   "id": "2611.23068",
+   "score": 0,
+   "submitted": "2026-11-18"
+  },
+  {
+   "id": "2611.23067",
+   "score": 0,
+   "submitted": "2026-11-18"
+  },
+  {
+   "id": "2611.23063",
+   "score": 0,
+   "submitted": "2026-11-18"
+  },
+  {
+   "id": "2611.23056",
+   "score": 0,
+   "submitted": "2026-11-18"
+  },
+  {
+   "id": "2611.23055",
+   "score": 2,
+   "submitted": "2026-11-18"
+  },
+  {
+   "id": "2611.23054",
+   "score": 0,
+   "submitted": "2026-11-18"
+  },
+  {
+   "id": "2611.23051",
+   "score": 0,
+   "submitted": "2026-11-18"
+  },
+  {
+   "id": "2611.23050",
+   "score": 0,
+   "submitted": "2026-11-18"
+  },
+  {
+   "id": "2611.23049",
+   "score": 0,
+   "submitted": "2026-11-18"
+  },
+  {
+   "id": "2611.23048",
+   "score": 0,
+   "submitted": "2026-11-18"
+  },
+  {
+   "id": "2611.23042",
+   "score": 0,
+   "submitted": "2026-11-18"
+  },
+  {
+   "id": "2611.23040",
+   "score": 0,
+   "submitted": "2026-11-18"
+  },
+  {
+   "id": "2611.23038",
+   "score": 2,
+   "submitted": "2026-11-18"
+  },
+  {
+   "id": "2611.23037",
+   "score": 0,
+   "submitted": "2026-11-18"
+  },
+  {
+   "id": "2611.23035",
+   "score": 2,
+   "submitted": "2026-11-18"
+  },
+  {
+   "id": "2611.23030",
+   "score": 0,
+   "submitted": "2026-11-18"
+  },
+  {
+   "id": "2611.23026",
+   "score": 0,
+   "submitted": "2026-11-18"
+  },
+  {
+   "id": "2611.23025",
+   "score": 2,
+   "submitted": "2026-11-18"
+  },
+  {
+   "id": "2611.23007",
+   "score": 2,
+   "submitted": "2026-11-18"
+  },
+  {
+   "id": "2611.23001",
+   "score": 0,
+   "submitted": "2026-11-18"
+  },
+  {
+   "id": "2611.22998",
+   "score": 0,
+   "submitted": "2026-11-18"
+  },
+  {
+   "id": "2611.22996",
+   "score": 2,
+   "submitted": "2026-11-18"
+  },
+  {
+   "id": "2611.22995",
+   "score": 0,
+   "submitted": "2026-11-18"
+  },
+  {
+   "id": "2611.22989",
+   "score": 0,
+   "submitted": "2026-11-18"
+  },
+  {
+   "id": "2611.22988",
+   "score": 0,
+   "submitted": "2026-11-18"
+  },
+  {
+   "id": "2611.22981",
+   "score": 2,
+   "submitted": "2026-11-18"
+  },
+  {
+   "id": "2611.22975",
+   "score": 0,
+   "submitted": "2026-11-18"
+  },
+  {
+   "id": "2611.22973",
+   "score": 0,
+   "submitted": "2026-11-18"
+  },
+  {
+   "id": "2611.22971",
+   "score": 0,
+   "submitted": "2026-11-18"
+  },
+  {
+   "id": "2611.22969",
+   "score": 2,
+   "submitted": "2026-11-18"
+  },
+  {
+   "id": "2611.22968",
+   "score": 0,
+   "submitted": "2026-11-18"
+  },
+  {
+   "id": "2611.22967",
+   "score": 2,
+   "submitted": "2026-11-18"
+  },
+  {
+   "id": "2611.22965",
+   "score": 2,
+   "submitted": "2026-11-18"
+  },
+  {
+   "id": "2611.22964",
+   "score": 0,
+   "submitted": "2026-11-18"
+  },
+  {
+   "id": "2611.22958",
+   "score": 0,
+   "submitted": "2026-11-18"
+  },
+  {
+   "id": "2611.22956",
+   "score": 2,
+   "submitted": "2026-11-18"
+  },
+  {
+   "id": "2611.22955",
+   "score": 0,
+   "submitted": "2026-11-18"
+  },
+  {
+   "id": "2611.22953",
+   "score": 0,
+   "submitted": "2026-11-18"
+  },
+  {
+   "id": "2611.22951",
+   "score": 0,
+   "submitted": "2026-11-18"
+  },
+  {
+   "id": "2611.22949",
+   "score": 0,
+   "submitted": "2026-11-18"
+  },
+  {
+   "id": "2611.22948",
+   "score": 0,
+   "submitted": "2026-11-18"
+  },
+  {
+   "id": "2611.22941",
+   "score": 2,
+   "submitted": "2026-11-18"
+  },
+  {
+   "id": "2611.22935",
+   "score": 0,
+   "submitted": "2026-11-18"
+  },
+  {
+   "id": "2611.22929",
+   "score": 0,
+   "submitted": "2026-11-18"
+  },
+  {
+   "id": "2611.22926",
+   "score": 0,
+   "submitted": "2026-11-18"
+  },
+  {
+   "id": "2611.22925",
+   "score": 2,
+   "submitted": "2026-11-18"
+  },
+  {
+   "id": "2611.22922",
+   "score": 0,
+   "submitted": "2026-11-18"
+  },
+  {
+   "id": "2611.22904",
+   "score": 0,
+   "submitted": "2026-11-18"
+  },
+  {
+   "id": "2611.22903",
+   "score": 0,
+   "submitted": "2026-11-18"
+  },
+  {
+   "id": "2611.22901",
+   "score": 0,
+   "submitted": "2026-11-18"
+  },
+  {
+   "id": "2611.22898",
+   "score": 0,
+   "submitted": "2026-11-18"
+  },
+  {
+   "id": "2611.22897",
+   "score": 0,
+   "submitted": "2026-11-18"
+  },
+  {
+   "id": "2611.22896",
+   "score": 0,
+   "submitted": "2026-11-18"
+  },
+  {
+   "id": "2611.22894",
+   "score": 0,
+   "submitted": "2026-11-18"
+  },
+  {
+   "id": "2611.22889",
+   "score": 0,
+   "submitted": "2026-11-18"
+  },
+  {
+   "id": "2611.22888",
+   "score": 0,
+   "submitted": "2026-11-18"
+  },
+  {
+   "id": "2611.22884",
+   "score": 0,
+   "submitted": "2026-11-18"
+  },
+  {
+   "id": "2611.22880",
+   "score": 2,
+   "submitted": "2026-11-18"
+  },
+  {
+   "id": "2611.22879",
+   "score": 0,
+   "submitted": "2026-11-18"
+  },
+  {
+   "id": "2611.22878",
+   "score": 0,
+   "submitted": "2026-11-18"
+  },
+  {
+   "id": "2611.22873",
+   "score": 0,
+   "submitted": "2026-11-18"
+  },
+  {
+   "id": "2611.22868",
+   "score": 0,
+   "submitted": "2026-11-18"
+  },
+  {
+   "id": "2611.22867",
+   "score": 2,
+   "submitted": "2026-11-18"
+  },
+  {
+   "id": "2611.22859",
+   "score": 0,
+   "submitted": "2026-11-18"
+  },
+  {
+   "id": "2611.22857",
+   "score": 2,
+   "submitted": "2026-11-18"
+  },
+  {
+   "id": "2611.22856",
+   "score": 0,
+   "submitted": "2026-11-18"
+  },
+  {
+   "id": "2611.22855",
+   "score": 0,
+   "submitted": "2026-11-18"
+  },
+  {
+   "id": "2611.22854",
+   "score": 0,
+   "submitted": "2026-11-18"
+  },
+  {
+   "id": "2611.22852",
+   "score": 0,
+   "submitted": "2026-11-18"
+  },
+  {
+   "id": "2611.22842",
+   "score": 2,
+   "submitted": "2026-11-18"
+  },
+  {
+   "id": "2611.22841",
+   "score": 0,
+   "submitted": "2026-11-18"
+  },
+  {
+   "id": "2611.22838",
+   "score": 0,
+   "submitted": "2026-11-18"
+  },
+  {
+   "id": "2611.22835",
+   "score": 0,
+   "submitted": "2026-11-18"
+  },
+  {
+   "id": "2611.22829",
+   "score": 0,
+   "submitted": "2026-11-18"
+  },
+  {
+   "id": "2611.22828",
+   "score": 0,
+   "submitted": "2026-11-18"
+  },
+  {
+   "id": "2611.22827",
+   "score": 0,
+   "submitted": "2026-11-18"
+  },
+  {
+   "id": "2611.22826",
+   "score": 0,
+   "submitted": "2026-11-18"
+  },
+  {
+   "id": "2611.22825",
+   "score": 0,
+   "submitted": "2026-11-18"
+  },
+  {
+   "id": "2611.22820",
+   "score": 0,
+   "submitted": "2026-11-18"
+  },
+  {
+   "id": "2611.22812",
+   "score": 0,
+   "submitted": "2026-11-18"
+  },
+  {
+   "id": "2611.22806",
+   "score": 0,
+   "submitted": "2026-11-18"
+  },
+  {
+   "id": "2611.22790",
+   "score": 2,
+   "submitted": "2026-11-18"
+  },
+  {
+   "id": "2611.22782",
+   "score": 0,
+   "submitted": "2026-11-18"
+  },
+  {
+   "id": "2611.22777",
+   "score": 0,
+   "submitted": "2026-11-18"
+  },
+  {
+   "id": "2611.22769",
+   "score": 0,
+   "submitted": "2026-11-18"
+  },
+  {
+   "id": "2611.22766",
+   "score": 2,
+   "submitted": "2026-11-18"
+  },
+  {
+   "id": "2611.22761",
+   "score": 0,
+   "submitted": "2026-11-18"
+  },
+  {
+   "id": "2611.22759",
+   "score": 0,
+   "submitted": "2026-11-18"
+  },
+  {
+   "id": "2611.22738",
+   "score": 0,
+   "submitted": "2026-11-18"
+  },
+  {
+   "id": "2611.22736",
+   "score": 2,
+   "submitted": "2026-11-18"
+  },
+  {
+   "id": "2611.22733",
+   "score": 2,
+   "submitted": "2026-11-18"
+  },
+  {
+   "id": "2611.22727",
+   "score": 0,
+   "submitted": "2026-11-18"
+  },
+  {
+   "id": "2611.22726",
+   "score": 2,
+   "submitted": "2026-11-18"
+  },
+  {
+   "id": "2611.22722",
+   "score": 0,
+   "submitted": "2026-11-18"
+  },
+  {
+   "id": "2611.22721",
+   "score": 2,
+   "submitted": "2026-11-18"
+  },
+  {
+   "id": "2611.22717",
+   "score": 2,
+   "submitted": "2026-11-18"
+  },
+  {
+   "id": "2611.22715",
+   "score": 0,
+   "submitted": "2026-11-18"
+  },
+  {
+   "id": "2611.22709",
+   "score": 2,
+   "submitted": "2026-11-18"
+  },
+  {
+   "id": "2611.22705",
+   "score": 0,
+   "submitted": "2026-11-18"
+  },
+  {
+   "id": "2611.22704",
+   "score": 2,
+   "submitted": "2026-11-18"
+  },
+  {
+   "id": "2611.22700",
+   "score": 0,
+   "submitted": "2026-11-18"
+  },
+  {
+   "id": "2611.22699",
+   "score": 0,
+   "submitted": "2026-11-18"
+  },
+  {
+   "id": "2611.22697",
+   "score": 0,
+   "submitted": "2026-11-18"
+  },
+  {
+   "id": "2611.22691",
+   "score": 0,
+   "submitted": "2026-11-18"
+  },
+  {
+   "id": "2611.22686",
+   "score": 0,
+   "submitted": "2026-11-18"
+  },
+  {
+   "id": "2611.22685",
+   "score": 0,
+   "submitted": "2026-11-18"
+  },
+  {
+   "id": "2611.22682",
+   "score": 0,
+   "submitted": "2026-11-18"
+  },
+  {
+   "id": "2611.22680",
+   "score": 0,
+   "submitted": "2026-11-18"
+  },
+  {
+   "id": "2611.22673",
+   "score": 2,
+   "submitted": "2026-11-18"
+  },
+  {
+   "id": "2611.22670",
+   "score": 0,
+   "submitted": "2026-11-18"
+  },
+  {
+   "id": "2611.22669",
+   "score": 0,
+   "submitted": "2026-11-18"
+  },
+  {
+   "id": "2611.22668",
+   "score": 0,
+   "submitted": "2026-11-18"
+  },
+  {
+   "id": "2611.22661",
+   "score": 0,
+   "submitted": "2026-11-18"
+  },
+  {
+   "id": "2611.22658",
+   "score": 0,
+   "submitted": "2026-11-18"
+  },
+  {
+   "id": "2611.22657",
+   "score": 0,
+   "submitted": "2026-11-18"
+  },
+  {
+   "id": "2611.22655",
+   "score": 0,
+   "submitted": "2026-11-18"
+  },
+  {
+   "id": "2611.22650",
+   "score": 0,
+   "submitted": "2026-11-18"
+  },
+  {
+   "id": "2611.22648",
+   "score": 2,
+   "submitted": "2026-11-18"
+  },
+  {
+   "id": "2611.22646",
+   "score": 0,
+   "submitted": "2026-11-18"
+  },
+  {
+   "id": "2611.22645",
+   "score": 2,
+   "submitted": "2026-11-18"
+  },
+  {
+   "id": "2611.22639",
+   "score": 2,
+   "submitted": "2026-11-18"
+  },
+  {
+   "id": "2611.22637",
+   "score": 2,
+   "submitted": "2026-11-18"
+  },
+  {
+   "id": "2611.22636",
+   "score": 0,
+   "submitted": "2026-11-18"
+  },
+  {
+   "id": "2611.22635",
+   "score": 0,
+   "submitted": "2026-11-18"
+  },
+  {
+   "id": "2611.22619",
+   "score": 0,
+   "submitted": "2026-11-18"
+  },
+  {
+   "id": "2611.22610",
+   "score": 0,
+   "submitted": "2026-11-18"
+  },
+  {
+   "id": "2611.22609",
+   "score": 2,
+   "submitted": "2026-11-18"
+  },
+  {
+   "id": "2611.22608",
+   "score": 0,
+   "submitted": "2026-11-18"
+  },
+  {
+   "id": "2611.22607",
+   "score": 0,
+   "submitted": "2026-11-18"
+  },
+  {
+   "id": "2611.22597",
+   "score": 0,
+   "submitted": "2026-11-18"
+  },
+  {
+   "id": "2611.22596",
+   "score": 0,
+   "submitted": "2026-11-18"
+  },
+  {
+   "id": "2611.22595",
+   "score": 0,
+   "submitted": "2026-11-18"
+  },
+  {
+   "id": "2611.22592",
+   "score": 0,
+   "submitted": "2026-11-18"
+  },
+  {
+   "id": "2611.22591",
+   "score": 0,
+   "submitted": "2026-11-18"
+  },
+  {
+   "id": "2611.22589",
+   "score": 0,
+   "submitted": "2026-11-18"
+  },
+  {
+   "id": "2611.22583",
+   "score": 0,
+   "submitted": "2026-11-18"
+  },
+  {
+   "id": "2611.22577",
+   "score": 2,
+   "submitted": "2026-11-18"
+  },
+  {
+   "id": "2611.22576",
+   "score": 2,
+   "submitted": "2026-11-18"
+  },
+  {
+   "id": "2611.22575",
+   "score": 0,
+   "submitted": "2026-11-18"
+  },
+  {
+   "id": "2611.22565",
+   "score": 0,
+   "submitted": "2026-11-18"
+  },
+  {
+   "id": "2611.22564",
+   "score": 2,
+   "submitted": "2026-11-18"
+  },
+  {
+   "id": "2611.22563",
+   "score": 0,
+   "submitted": "2026-11-18"
+  },
+  {
+   "id": "2611.22557",
+   "score": 0,
+   "submitted": "2026-11-18"
+  },
+  {
+   "id": "2611.22549",
+   "score": 2,
+   "submitted": "2026-11-18"
+  },
+  {
+   "id": "2611.22548",
+   "score": 2,
+   "submitted": "2026-11-18"
+  }
+ ],
+ "abstractScored": [
+  {
+   "id": "2611.22879",
+   "title": "SlideJev: Order-Stable and Tissue-Grounded Jev Decisions for Whole-Slide Pathology",
+   "ascore": 14,
+   "tscore": 0,
+   "submitted": "2026-11-18",
+   "abstract": "Whole-slide visual question answering (VQA) offers a natural-language interface to pathology, allowing diagnostic and phenotypic questions to be answered directly from tissue slides. However, current vision-language models (VLMs) rely heavily on linguistic priors: their answers are sensitive to the order of the candidate answers, and can be reached through shortcuts that bypass the tissue evidence. To address these challenges, we introduce SlideJev, a framework that separately verifies candidate answers against the slide and learns to ground these judgments in tissue evidence. To connect parallel candidate evaluation with visual evidence learning, we adopt Jev and score each candidate by the difference between support and rejection log-likelihoods from the original language-model head. We compute these scores in parallel using separate prompts with the same format and no option-position labels, then normalize them for answer selection. To ground these scores in tissue evidence, candidate-conditioned reading and comparison guide gated updates to visual tokens across decoder layers. With the backbone frozen, we train these visual modules through the same scores using question-answer and paired-image supervision. Across three whole-slide pathology VQA benchmarks, SlideJev achieves the highest mean overall accuracy and 100% answer consistency across four option orders. Image-control experiments further show that SlideJev achieves the largest average accuracy gains from correct images over mismatched and image-free inputs across the three datasets. Our code is publicly available at https://github.com/leowu-ai/SlideJev."
+  },
+  {
+   "id": "2611.22826",
+   "title": "OICycle: Observe, Infer, and Intervene Cycle for Belief-State Learning in Longitudinal Clinical Decision Making",
+   "ascore": 13,
+   "tscore": 0,
+   "submitted": "2026-11-18",
+   "abstract": "Clinical care is a closed loop: clinicians observe partial evidence, infer the patient's state, and intervene, and each intervention determines what is observed next. This makes clinical decision making a partially observable Markov decision process (POMDP), in which a belief over a latent patient state must be updated from irregular, multimodal, and incomplete records. Yet most deep clinical models predict from a single snapshot or from coarsely aggregated history, while POMDP-based clinical methods need hand-specified discrete state spaces and transition models that real electronic health records cannot supply. We introduce OICycle (Observe, Infer, and Intervene Cycle), which learns a stochastic belief state directly from retrospective trajectories. At every episode, a learned recurrent operator fuses a sample of the previous belief with the new multimodal observations and the intervention that produced them. The resulting Gaussian belief is trained to predict clinicians' next interventions, the time to the next episode, and next-episode mortality. To enable reproducible evaluation, we release a benchmark derived from MIMIC-IV, MIMIC-IV-Note, and MIMIC-CXR that organizes 72,075 hospital admissions (5.4M laboratory, microbiology, radiology, prescription, and note records) into temporally ordered therapeutic--diagnostic episodes. Compared with an otherwise identical history-free model, OICycle improves next-intervention adaptive recall from 0.253 to 0.347, time-to-next-episode macro-F1 from 0.293 to 0.351, and next-episode mortality macro-F1 from 0.585 to 0.649. Analysis shows that the learned belief encodes intervention type and trajectory position and evolves smoothly across episodes, and that the benefit of history is concentrated in interventions whose ordering depends on prior findings."
+  },
+  {
+   "id": "2611.23228",
+   "title": "Spool: Low-Latency Streaming Inference for Hybrid Vision-Language Models",
+   "ascore": 13,
+   "tscore": 2,
+   "submitted": "2026-11-18",
+   "abstract": "Applications such as visual accessibility agents and robotics require answering questions about recent video content promptly, over a bounded window of past frames (e.g., the last two minutes). Hybrid vision-language models (VLMs), which interleave attention with linear recurrent layers such as Gated DeltaNet (GDN), are attractive for this setting, but maintaining a sliding window is expensive. The reason is that recurrent layers combine all past frames into a shared state, so expiring old frames normally requires re-running the entire window through the model. We observe that the recurrent update is affine in the state with input-dependent coefficients, so the effect of each frame can be captured as a transformation that composes associatively. We present Spool, a training-free framework that caches per-frame state transformations and composes them efficiently as the window advances, removing expired frames from each recurrent layer's state without replaying frames through the backbone. Removal is exact within each layer; as with key-value eviction in attention, expired frames can retain residual influence through the cached inputs computed by earlier layers. We design a dedicated data structure and GPU kernels to achieve low caching and composition overhead. Across five open-source hybrid VLMs and four video reasoning benchmarks, Spool achieves the lowest p95 time-to-first-token in all 20 model-benchmark tests, reducing it by a geometric mean of $6.6\\times$ over the faster of two recent vLLM baselines, while improving accuracy by 2.3 percentage points on average."
+  },
+  {
+   "id": "2611.22769",
+   "title": "ForceBody: Force-Paired Parametric Body Motion with Torque Uncertainty",
+   "ascore": 11,
+   "tscore": 0,
+   "submitted": "2026-11-18",
+   "abstract": "Forces and torques drive human motion, central to biomechanics, robotics, and physics-aware animation, yet they are often absent from learning-based motion pipelines for body reconstruction and generation. Some motion datasets provide force annotations, but the paired motion sequences are incompatible with the parametric body models used in modern learning pipelines. In addition, existing datasets typically obtain joint torques through inverse dynamics, which is inherently sensitive to the quality of the input kinematics; however, they do not quantify the reliability of these torque estimates. We close this gap with ForceBody, the first dataset to bring ground truth force supervision into a parametric body representation, shipped with per-sample torque uncertainty. ForceBody pairs the SKEL body model with ground reaction forces and inverse-dynamics joint torques across 10,386 motion trials (9.7M frames, 26.9 hours) from 140 subjects. Each torque label is paired with a per-frame, per-joint uncertainty annotation obtained by Monte Carlo sampling through the inverse dynamics pipeline. We benchmark six architectures (MLP, Conv1D, LSTM, GRU, Mamba2, Transformer) on ground reaction force and joint torque prediction from SKEL motion. As one example use of the released uncertainty, finetuning a Transformer with per-sample uncertainty weighting reduces the MAE of joint torque estimation by 5%. Code and data are at https://github.com/DominoAI-Lab/ForceBody-NeurIPS-ED-2026."
+  },
+  {
+   "id": "2611.23127",
+   "title": "The Illusion of Grounding: Do Vision-Language Models Weigh Retrieved Text and Images Like an Ideal Observer?",
+   "ascore": 11,
+   "tscore": 2,
+   "submitted": "2026-11-18",
+   "abstract": "Retrieval-augmented vision-language models (VLMs) answer from two sources of evidence that can each fail: the retrieved text can be wrong or noisy, and the image can be degraded or contradicted. We introduce GIB-200K, 200,000 image-question items built from COCO and Visual Genome, each expanded into controlled stress conditions: hard-negative retrieval noise (1-20 documents), visual ambiguity (Gaussian and motion blur, low-resource crops) and cross-modal conflict with counterfactual flip pairs. Instead of only measuring degradation, we ask how models combine the two modalities. From ideal Bayesian cue combination we derive a testable prediction that yields formal definitions of Knowledge Inertia (text over-weighted relative to the model's own image evidence) and Sensory Capture (the reverse), and we estimate the weights with a measurement-error-corrected regression whose recovery of known weights we verify. A counterfactual flip decomposition separates modality bias from concept priors, and a Grounding Illusion Score measures how much clean accuracy is not grounded in the image. We evaluate 4 open models on one frozen, seeded evaluation split of 2,000 GIB-200K items. All models are accurate on clean inputs (92.5%-94.2%) but adverse accuracy falls to 41.3%-59.9%. The two LLaVA models over-weight the text (Knowledge Inertia, w_T/w_I = 1.229 and 1.322), whereas InternVL3 favours the image (w_T/w_I = 0.680); between 34.8% and 71.4% of the clean answers that are correct are abandoned when the document lies. A training-free consistency check that compares the answer with and without retrieval trades coverage for accuracy under misleading documents, while falling back to the image fails when the image is heavily degraded. All per-instance outputs, code, and an audit that recomputes every reported open-model number are released."
+  },
+  {
+   "id": "2611.22790",
+   "title": "NexSight: Verifiable Tasks for Fine-Grained Agentic Long-Video Understanding",
+   "ascore": 10,
+   "tscore": 2,
+   "submitted": "2026-11-18",
+   "abstract": "Fine-grained questions about long videos ask how many times an action occurs, in what order events unfold, or exactly when a state changes. Answering them can require finding brief moments scattered across hours of footage. Agentic models that decide when and where to look promise to find these moments, yet this ability is hard both to measure and to learn. Sparse supporting evidence may establish that an action occurred without establishing its total count; verifying timeline-wide claims requires checking for missed occurrences and double counting. Answer-only supervision, in turn, does not explicitly supervise the search for evidence. We present NexSight, which builds verifiable tasks to both evaluate and train agentic long-video understanding. Its agentic pipeline, SightForge, accepts a task only if a verifier blind to the draft answer can reconstruct it from evidence densely reacquired from the raw video and counterexample checks fail to refute it. This yields SightLine, 310 evidence-traceable tasks from 108 long videos, evaluated through SightLoop, a shared multiscale harness supporting temporal exploration, local inspection, evidence integration, and revisiting while recording returned observations. On disjoint videos, solver trajectories on verified tasks become step-level supervision for observation decisions. The strongest model reaches only 54.52% on SightLine, yet 79.35% when given the annotated evidence. With under 6K examples, Sight-35B nearly doubles its base model's interactive accuracy (21.29% to 42.26%), outperforms the 397B model of its family, begins using explicit spatial inspection after post-training, which its base model never uses, and gains over 8 points on two external long-video benchmarks."
+  },
+  {
+   "id": "2611.22854",
+   "title": "WATERFALL: Workflow for Adaptive Training with Evolutionary Reward Formulation and Automated Learning Loops",
+   "ascore": 10,
+   "tscore": 0,
+   "submitted": "2026-11-18",
+   "abstract": "Reward design remains a central bottleneck in reinforcement learning (RL), particularly in sparse-reward, long-horizon and partially observable settings requiring dependency chaining, memory, and deceptive affordance disambiguation. While recent foundation-model approaches reduce manual reward engineering, most assume goal-conditioning, task descriptions, expert demonstrations, or ground-truth metrics. These assumptions are problematic in partially observable environments, where task-relevant objectives, affordances, and dynamics must be discovered through interaction rather than disclosed a priori. We formalise this problem setting by introducing WATERFALL, an iterative population-based workflow for automated reward discovery under the strict observability constraints inherent in POMDP environments. WATERFALL achieves this by (i) synthesising diverse programmatic reward candidates via persona-conditioned generation, (ii) evaluating candidate behaviour from raw visual rollouts utilising a Swiss-system evolutionary tournament judged by vision-language models to identify elites, and (iii) leveraging longitudinal assessment histories to iteratively mutate, escalate, or prune candidates. We evaluate WATERFALL across fully observable and reveal-gated partially observable environments ranging from discrete to continuous, comparing against sparse-reward RL, intrinsic-motivation and foundation-model reward-synthesis baselines. Our results indicate that WATERFALL discovers and refines reward programs without access to privileged information, outperforming baselines that retain their native information advantages, most clearly in the POMDP regime. Extensive ablations substantiate that visual evidence, tournament-based selection, and iterative refinement are jointly important. Enforcing this contract is what separates autonomous reward discovery from benchmark-privileged reward shaping."
+  },
+  {
+   "id": "2611.23115",
+   "title": "Nunchi: Ears Help Eyes in Multi-Party Conversations",
+   "ascore": 9,
+   "tscore": 0,
+   "submitted": "2026-11-18",
+   "abstract": "Identifying whom a person looks at is central to understanding multi-party conversations, yet gaze geometry alone becomes ambiguous as more people appear. Conversations offer cues that geometry lacks, such as who is speaking and what is said, but no gaze dataset provides them for many multi-party scenes. We introduce SORBET, a benchmark of 3,340 samples from 1,578 clips with synchronized speech, transcripts, and attended person labels, covering more multi-party scenes than existing gaze datasets. Prior gaze models struggle to use these cues, which come in different forms, must be linked to the right person, and can conflict with gaze geometry. We propose Nunchi, a framework that constructs a text prompt from the transcript and the outputs of gaze and speaker models, links every cue to the candidates with shared labels, and lets a vision-language model (VLM) weigh gaze geometry against conversational cues to identify the attended person. Nunchi outperforms the strongest existing method by 4.8 percentage points. On SORBET, conversational cues help whereas additional visual cues do not, and the gains hold across three VLMs, with automatic transcripts, and on two existing datasets."
+  },
+  {
+   "id": "2611.23212",
+   "title": "EviSlide-MIL: Multi-Query Pooling and Shared Prediction for Class-Incremental Whole-Slide Image Classification",
+   "ascore": 9,
+   "tscore": 0,
+   "submitted": "2026-11-18",
+   "abstract": ""
+  },
+  {
+   "id": "2611.22904",
+   "title": "Who Pays for Byzantine Robustness? Validity, Data-Share Dictatorships, and Fairness When Only a Few Hospitals Collaborate",
+   "ascore": 8,
+   "tscore": 0,
+   "submitted": "2026-11-18",
+   "abstract": ""
+  },
+  {
+   "id": "2611.22964",
+   "title": "Training-Free Building Change Detection with Example-Induced Discriminants",
+   "ascore": 8,
+   "tscore": 0,
+   "submitted": "2026-11-18",
+   "abstract": ""
+  },
+  {
+   "id": "2611.22973",
+   "title": "VITAL: A Framework for Validating Agentic AI in Pharmaceutical Drug Development and Clinical Trial Operations",
+   "ascore": 8,
+   "tscore": 0,
+   "submitted": "2026-11-18",
+   "abstract": ""
+  },
+  {
+   "id": "2611.23025",
+   "title": "When a Larger Guidance Scale Repairs Text-to-Video Failures and When It Does Not",
+   "ascore": 8,
+   "tscore": 2,
+   "submitted": "2026-11-18",
+   "abstract": ""
+  },
+  {
+   "id": "2611.23088",
+   "title": "Event-Based Person Detection for Maritime UAV Search",
+   "ascore": 8,
+   "tscore": 0,
+   "submitted": "2026-11-18",
+   "abstract": ""
+  },
+  {
+   "id": "2611.23226",
+   "title": "FastFrames: Video Generation at Interactive Latency",
+   "ascore": 8,
+   "tscore": 2,
+   "submitted": "2026-11-18",
+   "abstract": ""
+  },
+  {
+   "id": "2611.22736",
+   "title": "RefCloth: Transferable Adversarial Tablecloths for Vision-Language-Action Models",
+   "ascore": 7,
+   "tscore": 2,
+   "submitted": "2026-11-18",
+   "abstract": ""
+  },
+  {
+   "id": "2611.22766",
+   "title": "StitchRAG: Constructing Compact and Evidence-Preserving Contexts for RAG with Diffusion-Based Stitching",
+   "ascore": 7,
+   "tscore": 2,
+   "submitted": "2026-11-18",
+   "abstract": ""
+  },
+  {
+   "id": "2611.22782",
+   "title": "PANO: Parallel Latent Space Neural Operator for Solving PDEs",
+   "ascore": 7,
+   "tscore": 0,
+   "submitted": "2026-11-18",
+   "abstract": ""
+  },
+  {
+   "id": "2611.22857",
+   "title": "Beyond Co-Generation: Rethinking Jointness in Joint Audio-Video Generation",
+   "ascore": 7,
+   "tscore": 2,
+   "submitted": "2026-11-18",
+   "abstract": ""
+  },
+  {
+   "id": "2611.22859",
+   "title": "When the tail is earned by its companions: measuring label dependence in long-tailed multi-label classification",
+   "ascore": 7,
+   "tscore": 0,
+   "submitted": "2026-11-18",
+   "abstract": ""
+  },
+  {
+   "id": "2611.23026",
+   "title": "TPHC: Improving Hyper-Connections with Tensor-Parallel Grouped Updates",
+   "ascore": 7,
+   "tscore": 0,
+   "submitted": "2026-11-18",
+   "abstract": "Hyper-Connections (HC) expand the residual stream of a Transformer into $N$ parallel streams, and manifold-constrained HC (mHC) stabilizes them at scale. However, mHC benefits little from more than four streams, partly because each sublayer writes a single output to all streams, limiting how differently they can be updated. In this work, we propose TPHC, which integrates tensor-parallel (TP) shards with HC streams to promote greater independence across streams. Specifically, we route a separate mixture of the residual streams to each TP shard and keep the individual shard outputs separate during write-back, so each stream can receive a different mixture of those outputs. This design makes the residual-stream updates more expressive without adding parameters or FLOPs to the attention or FFN sublayers. With native support for stream sharding under TP, TPHC requires only 9% more training time than mHC on an 8B model when both use four streams. Increasing the number of streams from four to sixteen raises its training time by only 19%. On a 1.1B model trained on 100B tokens, TPHC reduces validation loss by 0.7-1.0% and raises average zero-shot accuracy across six commonsense reasoning benchmarks by 0.3-0.7 percentage points relative to mHC at matched stream counts $N\\in\\{4,8,16\\}$. Our code is available at https://github.com/wuyou2002/TPHC."
+  },
+  {
+   "id": "2611.23055",
+   "title": "FrameRouter: Frame Budget Routing for Long-Video Understanding on Video-MME-v2 and Beyond",
+   "ascore": 7,
+   "tscore": 2,
+   "submitted": "2026-11-18",
+   "abstract": ""
+  },
+  {
+   "id": "2611.23144",
+   "title": "$\u03c0^4$: A Foundation Model for 4D Scene Geometry and Motion",
+   "ascore": 7,
+   "tscore": 0,
+   "submitted": "2026-11-18",
+   "abstract": ""
+  },
+  {
+   "id": "2611.23187",
+   "title": "Any2Building: Unifying Point Clouds and Images for Building Reconstruction via Shared Spatial Queries",
+   "ascore": 7,
+   "tscore": 0,
+   "submitted": "2026-11-18",
+   "abstract": ""
+  },
+  {
+   "id": "2611.22733",
+   "title": "Evolve in Panorama, Render in View: Panoramic World State Evolution for Video World Models",
+   "ascore": 6,
+   "tscore": 2,
+   "submitted": "2026-11-18",
+   "abstract": ""
+  },
+  {
+   "id": "2611.22820",
+   "title": "Pixel is All You Need",
+   "ascore": 6,
+   "tscore": 0,
+   "submitted": "2026-11-18",
+   "abstract": ""
+  },
+  {
+   "id": "2611.22842",
+   "title": "SilverSpoon-KD: A General-Purpose Toolkit for Knowledge Distillation",
+   "ascore": 6,
+   "tscore": 2,
+   "submitted": "2026-11-18",
+   "abstract": ""
+  },
+  {
+   "id": "2611.22896",
+   "title": "Impact of Pretraining Length, Model Size, and Annotation Budget on Downstream Clinical Tasks of Foundation Models in Radiotherapy",
+   "ascore": 6,
+   "tscore": 0,
+   "submitted": "2026-11-18",
+   "abstract": ""
+  },
+  {
+   "id": "2611.22925",
+   "title": "Code World Model 2.0: Towards Infinite Controllable Video Generation",
+   "ascore": 6,
+   "tscore": 2,
+   "submitted": "2026-11-18",
+   "abstract": ""
+  },
+  {
+   "id": "2611.22956",
+   "title": "Is model self-assessment enough for diverse LVLM ensembles?",
+   "ascore": 6,
+   "tscore": 2,
+   "submitted": "2026-11-18",
+   "abstract": ""
+  },
+  {
+   "id": "2611.22996",
+   "title": "The Rhythm of Generated Video: Latent Chunking Leaves Periodic Traces in Compressed Bitstreams",
+   "ascore": 6,
+   "tscore": 2,
+   "submitted": "2026-11-18",
+   "abstract": ""
+  },
+  {
+   "id": "2611.23007",
+   "title": "Tracking Ethological Behaviors of Broiler Chickens Through Computer Vision (YoloV11) Using an Android Mobile Device",
+   "ascore": 6,
+   "tscore": 2,
+   "submitted": "2026-11-18",
+   "abstract": ""
+  },
+  {
+   "id": "2611.23037",
+   "title": "Automated Annotation-Free Synthetic Data Generation for Underwater Litter Detection: A Comparison of Generative Approaches",
+   "ascore": 6,
+   "tscore": 0,
+   "submitted": "2026-11-18",
+   "abstract": ""
+  },
+  {
+   "id": "2611.23085",
+   "title": "Transfer Once, Ask Locally: Compact Audio-Visual Memory for On-Device Question Answering",
+   "ascore": 6,
+   "tscore": 2,
+   "submitted": "2026-11-18",
+   "abstract": ""
+  },
+  {
+   "id": "2611.23140",
+   "title": "GameRealm: Grounding Visual Learning in Interactive Games",
+   "ascore": 6,
+   "tscore": 2,
+   "submitted": "2026-11-18",
+   "abstract": ""
+  },
+  {
+   "id": "2611.23192",
+   "title": "WoRD: Diffusion-Based Posterior Inference for Online Goal Recognition",
+   "ascore": 6,
+   "tscore": 2,
+   "submitted": "2026-11-18",
+   "abstract": ""
+  },
+  {
+   "id": "2611.23206",
+   "title": "Reading Scene States: Uncovering Safety Failures in Vision-Language Models",
+   "ascore": 6,
+   "tscore": 2,
+   "submitted": "2026-11-18",
+   "abstract": ""
+  },
+  {
+   "id": "2611.23209",
+   "title": "Learning Grounded Reasoning from Human Gaze",
+   "ascore": 6,
+   "tscore": 0,
+   "submitted": "2026-11-18",
+   "abstract": ""
+  },
+  {
+   "id": "2611.22812",
+   "title": "Pluggable Subband-Decoupled Fusion and Unlabeled Capture Prototype Calibration: Bridging High-SNR Null-Subcarrier Regrowth and Low-SNR Coherent Preambles for Cross-Domain IoT RF Fingerprinting",
+   "ascore": 5,
+   "tscore": 0,
+   "submitted": "2026-11-18",
+   "abstract": ""
+  },
+  {
+   "id": "2611.22855",
+   "title": "CaFe: Causally Faithful Conditional Traffic Scenario Generation",
+   "ascore": 5,
+   "tscore": 0,
+   "submitted": "2026-11-18",
+   "abstract": ""
+  },
+  {
+   "id": "2611.22856",
+   "title": "Propose &amp; Verify: Fast Reflection Symmetry Detection via Harmonic Fields",
+   "ascore": 5,
+   "tscore": 0,
+   "submitted": "2026-11-18",
+   "abstract": ""
+  },
+  {
+   "id": "2611.22867",
+   "title": "LOCUS: Causal Support Windows for Attribute Control in Autoregressive Image Generation",
+   "ascore": 5,
+   "tscore": 2,
+   "submitted": "2026-11-18",
+   "abstract": ""
+  },
+  {
+   "id": "2611.22878",
+   "title": "Outcome-Balanced PPO and Policy-Induced Flow Rectification for Flow-Based VLA Policies",
+   "ascore": 5,
+   "tscore": 0,
+   "submitted": "2026-11-18",
+   "abstract": ""
+  },
+  {
+   "id": "2611.22922",
+   "title": "SWIR-cGAN: Synthesizing SWIR Bands Using VNIR Imagery from CBERS and AMAZONIA-1",
+   "ascore": 5,
+   "tscore": 0,
+   "submitted": "2026-11-18",
+   "abstract": ""
+  },
+  {
+   "id": "2611.22967",
+   "title": "CodeReel: Accelerating Code-to-Video Agents with Exact Frame Reuse and Blocking-Aware Scheduling",
+   "ascore": 5,
+   "tscore": 2,
+   "submitted": "2026-11-18",
+   "abstract": ""
+  },
+  {
+   "id": "2611.22995",
+   "title": "CAST: Calibrating Correspondences for Training-Free Biomedical In-Context Segmentation",
+   "ascore": 5,
+   "tscore": 0,
+   "submitted": "2026-11-18",
+   "abstract": ""
+  },
+  {
+   "id": "2611.23001",
+   "title": "NVIDIA Kumo Tabular: Pushing the Accuracy-Efficiency Frontier for Tabular Prediction",
+   "ascore": 5,
+   "tscore": 0,
+   "submitted": "2026-11-18",
+   "abstract": ""
+  },
+  {
+   "id": "2611.23040",
+   "title": "Variance Restoration over Covariance Rank: Memory-Budgeted Analytic Continual Learning",
+   "ascore": 5,
+   "tscore": 0,
+   "submitted": "2026-11-18",
+   "abstract": ""
+  },
+  {
+   "id": "2611.23054",
+   "title": "ReTouchGS: Ultralight Render-free Aesthetic Color Enhancement and Transfer for 3D Gaussian Splatting",
+   "ascore": 5,
+   "tscore": 0,
+   "submitted": "2026-11-18",
+   "abstract": ""
+  },
+  {
+   "id": "2611.23072",
+   "title": "Amortizing Tempered Sampling with Corrected Self-Training",
+   "ascore": 5,
+   "tscore": 0,
+   "submitted": "2026-11-18",
+   "abstract": ""
+  },
+  {
+   "id": "2611.23074",
+   "title": "Runtime Verification of Multiple Natural Language Criteria for Agent Governance",
+   "ascore": 5,
+   "tscore": 0,
+   "submitted": "2026-11-18",
+   "abstract": ""
+  },
+  {
+   "id": "2611.23129",
+   "title": "Where Should Physics Enter? Information, Identifiability and Calibration in Probabilistic Sea Surface Temperature Forecasting",
+   "ascore": 5,
+   "tscore": 0,
+   "submitted": "2026-11-18",
+   "abstract": ""
+  },
+  {
+   "id": "2611.23138",
+   "title": "RSI-Prime: Training Models to Train Models",
+   "ascore": 5,
+   "tscore": 0,
+   "submitted": "2026-11-18",
+   "abstract": ""
+  },
+  {
+   "id": "2611.23197",
+   "title": "Structure--Residual Inductive Biases for Language Model Pretraining",
+   "ascore": 5,
+   "tscore": 0,
+   "submitted": "2026-11-18",
+   "abstract": ""
+  },
+  {
+   "id": "2611.23218",
+   "title": "What Does a Bias Head Measure? Non-Identifiability in Head-Level Bias Attribution",
+   "ascore": 5,
+   "tscore": 0,
+   "submitted": "2026-11-18",
+   "abstract": ""
+  },
+  {
+   "id": "2611.23225",
+   "title": "StringQFT: A Multiuse Textbook Resource for AI-Assisted Theoretical Physics",
+   "ascore": 5,
+   "tscore": 0,
+   "submitted": "2026-11-18",
+   "abstract": ""
+  },
+  {
+   "id": "2611.22726",
+   "title": "Stress Testing a Multimodal Large Language Model Grading Assistant on Kinematics Graph Reading",
+   "ascore": 4,
+   "tscore": 2,
+   "submitted": "2026-11-18",
+   "abstract": ""
+  },
+  {
+   "id": "2611.22880",
+   "title": "Learning Agent-Centric Vision-Language-Action World Models for Autonomous Driving",
+   "ascore": 4,
+   "tscore": 2,
+   "submitted": "2026-11-18",
+   "abstract": ""
+  },
+  {
+   "id": "2611.22884",
+   "title": "RoadAnnoter: An AI-Assisted Desktop Tool for Semantic Segmentation Annotation of Road-Scene Images",
+   "ascore": 4,
+   "tscore": 0,
+   "submitted": "2026-11-18",
+   "abstract": ""
+  },
+  {
+   "id": "2611.22889",
+   "title": "Beyond Attribute-Centric Fairness: Modelling and Mitigating Unified Bias Representation in Omni-modal Large Language Models",
+   "ascore": 4,
+   "tscore": 0,
+   "submitted": "2026-11-18",
+   "abstract": ""
+  },
+  {
+   "id": "2611.22894",
+   "title": "Wear and Go: Calibration Free Sparse Inertial Motion Capture via Online Sensor Setup Estimation",
+   "ascore": 4,
+   "tscore": 0,
+   "submitted": "2026-11-18",
+   "abstract": ""
+  },
+  {
+   "id": "2611.22903",
+   "title": "BRepA: Graph-Based B-Rep Pretraining for Unified CAD Understanding and Generation",
+   "ascore": 4,
+   "tscore": 0,
+   "submitted": "2026-11-18",
+   "abstract": ""
+  },
+  {
+   "id": "2611.22941",
+   "title": "A Transformer-Derived Iterative Preconditioner",
+   "ascore": 4,
+   "tscore": 2,
+   "submitted": "2026-11-18",
+   "abstract": ""
+  },
+  {
+   "id": "2611.22958",
+   "title": "DDSL: Iterative Self-Labeling for Financial Market States",
+   "ascore": 4,
+   "tscore": 0,
+   "submitted": "2026-11-18",
+   "abstract": ""
+  },
+  {
+   "id": "2611.22965",
+   "title": "High-Dimensional Black-Box Optimization via Guidance Sampling of Diffusion Models",
+   "ascore": 4,
+   "tscore": 2,
+   "submitted": "2026-11-18",
+   "abstract": ""
+  },
+  {
+   "id": "2611.22981",
+   "title": "SpikWM: Efficient End-to-End Spiking World Modeling for Visual Planning",
+   "ascore": 4,
+   "tscore": 2,
+   "submitted": "2026-11-18",
+   "abstract": ""
+  },
+  {
+   "id": "2611.23035",
+   "title": "Storing the Gemma 4 K=V Cache Once: Exact Global-KV Memory Savings in a Paged Serving Engine with Unchanged Attention Kernels",
+   "ascore": 4,
+   "tscore": 2,
+   "submitted": "2026-11-18",
+   "abstract": "In the global attention layers of Gemma 4 31B, the value is the normalized key projection, and the key is the value scaled by a fixed weight, with rotary position encoding on one quarter of its dimensions. The Gemma 4 report states that this design reduces the global KV cache by up to 37.5%, but the open serving engines that we checked still store a full key and a full value: 1,024 values per KV head and token. We store one 640-value row instead, exact in real arithmetic, and an unchanged paged attention kernel reads it through two overlapping strided views as its key cache and its value cache. In a vLLM prototype with the 16-bit 31B model, the outputs are bit-identical to an emulation of the same arithmetic on the stock cache, 2 of 432 final answers differ from the stock engine (within its run-to-run noise), and the steady decode KV memory per request falls by a factor of 1.34 to 1.40 at 32K to 64K tokens. On a prefill/decode pair of two A100 GPUs with NIXL transfer and CPU offload, a decode engine with a full 15 GiB pool ran 1.38 times the stock decode tokens per step for 16K-token prompts (repeated to 0.06%) and 1.24 times for 8K-token prompts; a model of the vLLM block pool predicted both ratios to within 1% (the engine was 0.7% to 0.9% higher) and matched the change between them. The eager decode throughput rose by 1.30 and 1.11 times, and on this path the compact engine gave the same output tokens as the emulation for 8 prompts at batch 1. The run-time prototype makes an eager step 4% to 9% slower at equal batch, and the method does not yet stack with an 8-bit KV cache at the default scale."
+  },
+  {
+   "id": "2611.23038",
+   "title": "When Anchors Shift the Target: Advantage-Gated Adaptation for Diffusion Reinforcement Learning",
+   "ascore": 4,
+   "tscore": 2,
+   "submitted": "2026-11-18",
+   "abstract": ""
+  },
+  {
+   "id": "2611.23042",
+   "title": "Uncovering the Invisible in Routine Radiology: Cross-Modal Detection of MRI-Verified Soft-Tissue Pathologies from CBCT via Physics-Guided 3D Self-Supervised Learning",
+   "ascore": 4,
+   "tscore": 0,
+   "submitted": "2026-11-18",
+   "abstract": ""
+  },
+  {
+   "id": "2611.23051",
+   "title": "Refin3R: Geometry-Guided Refinement for Feed-Forward 3D Reconstruction",
+   "ascore": 4,
+   "tscore": 0,
+   "submitted": "2026-11-18",
+   "abstract": ""
+  },
+  {
+   "id": "2611.23093",
+   "title": "What&#39;s in a Tree ? Hierarchical $n$-gram models as controlled approximators of language",
+   "ascore": 4,
+   "tscore": 0,
+   "submitted": "2026-11-18",
+   "abstract": ""
+  },
+  {
+   "id": "2611.23134",
+   "title": "Correcting Flows with Marginal Matching",
+   "ascore": 4,
+   "tscore": 0,
+   "submitted": "2026-11-18",
+   "abstract": ""
+  },
+  {
+   "id": "2611.23143",
+   "title": "TCP4D: A Unified Tool-Center-Point Tracking and Generation Model for Robot Manipulation",
+   "ascore": 4,
+   "tscore": 0,
+   "submitted": "2026-11-18",
+   "abstract": ""
+  },
+  {
+   "id": "2611.23189",
+   "title": "Retrieval-Augmented Correction for Generalist Medical Image Segmentation",
+   "ascore": 4,
+   "tscore": 2,
+   "submitted": "2026-11-18",
+   "abstract": ""
+  },
+  {
+   "id": "2611.23205",
+   "title": "Fine-Tuning Gemma 4 Edge Models for MATLAB Signal-Processing Code with SFT and QLoRA on a Laptop iGPU",
+   "ascore": 4,
+   "tscore": 0,
+   "submitted": "2026-11-18",
+   "abstract": ""
+  },
+  {
+   "id": "2611.23208",
+   "title": "Distortion-Free Semantic Watermarks for Black-Box Generative Models",
+   "ascore": 4,
+   "tscore": 0,
+   "submitted": "2026-11-18",
+   "abstract": ""
+  },
+  {
+   "id": "2611.22777",
+   "title": "CrossEnv: Synthesizing Verifiable Cross-Environment Tasks for Long-Horizon Agent Training",
+   "ascore": 3,
+   "tscore": 0,
+   "submitted": "2026-11-18",
+   "abstract": ""
+  },
+  {
+   "id": "2611.22825",
+   "title": "A tiny object detection dataset for high-altitude open-water search and rescue",
+   "ascore": 3,
+   "tscore": 0,
+   "submitted": "2026-11-18",
+   "abstract": ""
+  },
+  {
+   "id": "2611.22827",
+   "title": "Compact and Decodable Electrocardiogram Text for Large Language Models",
+   "ascore": 3,
+   "tscore": 0,
+   "submitted": "2026-11-18",
+   "abstract": ""
+  },
+  {
+   "id": "2611.22835",
+   "title": "When Passing Checks Do Not Establish Completion: Evidence Interpretation in Coding Agents",
+   "ascore": 3,
+   "tscore": 0,
+   "submitted": "2026-11-18",
+   "abstract": ""
+  },
+  {
+   "id": "2611.22838",
+   "title": "Better Rankers, Worse Retrievers: The Hidden Cost of RL Post-Training in Generative Recommendation",
+   "ascore": 3,
+   "tscore": 0,
+   "submitted": "2026-11-18",
+   "abstract": ""
+  },
+  {
+   "id": "2611.22901",
+   "title": "Done, But Still Working: Anytime Evaluation of When Coding Agents Should Stop",
+   "ascore": 3,
+   "tscore": 0,
+   "submitted": "2026-11-18",
+   "abstract": ""
+  },
+  {
+   "id": "2611.22929",
+   "title": "Projected Penalty-Gradient Tracking for Communication-Efficient Byzantine-Resilient Federated Learning",
+   "ascore": 3,
+   "tscore": 0,
+   "submitted": "2026-11-18",
+   "abstract": ""
+  },
+  {
+   "id": "2611.22935",
+   "title": "The Shared Word: Evaluating Language Models on Dutch Word Puzzles",
+   "ascore": 3,
+   "tscore": 0,
+   "submitted": "2026-11-18",
+   "abstract": ""
+  },
+  {
+   "id": "2611.22953",
+   "title": "Fiberpose: state-of-the-art fiber morphometry and instance segmentation with a distance-transform neural network",
+   "ascore": 3,
+   "tscore": 0,
+   "submitted": "2026-11-18",
+   "abstract": ""
+  },
+  {
+   "id": "2611.22971",
+   "title": "SEAM: Computer-Use Agents Know the Harm Between Screens, and Commit It Anyway",
+   "ascore": 3,
+   "tscore": 0,
+   "submitted": "2026-11-18",
+   "abstract": ""
+  },
+  {
+   "id": "2611.23124",
+   "title": "Get Hint-Augmented GRPO Done Right Through Activation Steering",
+   "ascore": 3,
+   "tscore": 0,
+   "submitted": "2026-11-18",
+   "abstract": ""
+  },
+  {
+   "id": "2611.23142",
+   "title": "Mind the Gap: A Deployed Multi-Agent System for Documentation Maintenance",
+   "ascore": 3,
+   "tscore": 0,
+   "submitted": "2026-11-18",
+   "abstract": ""
+  },
+  {
+   "id": "2611.23216",
+   "title": "Higher-Scoring Coding Models Did Not Get More Work Done",
+   "ascore": 3,
+   "tscore": 0,
+   "submitted": "2026-11-18",
+   "abstract": ""
+  },
+  {
+   "id": "2611.23219",
+   "title": "Do LLM Agents Still Need to Be Told How to Self-Improve?",
+   "ascore": 3,
+   "tscore": 0,
+   "submitted": "2026-11-18",
+   "abstract": ""
+  },
+  {
+   "id": "2611.22721",
+   "title": "HADVQ: Hessian Aware Directional Vector Quantization",
+   "ascore": 2,
+   "tscore": 2,
+   "submitted": "2026-11-18",
+   "abstract": ""
+  },
+  {
+   "id": "2611.22722",
+   "title": "Practice in Text, Act in Pixels: Correcting Where Perception Fails",
+   "ascore": 2,
+   "tscore": 0,
+   "submitted": "2026-11-18",
+   "abstract": ""
+  },
+  {
+   "id": "2611.22759",
+   "title": "Robust Actor-Critic Learning under Transport and Divergence Uncertainty",
+   "ascore": 2,
+   "tscore": 0,
+   "submitted": "2026-11-18",
+   "abstract": ""
+  },
+  {
+   "id": "2611.22828",
+   "title": "TabDAG: Structured Evolutionary Search for Tabular Feature Engineering",
+   "ascore": 2,
+   "tscore": 0,
+   "submitted": "2026-11-18",
+   "abstract": ""
+  },
+  {
+   "id": "2611.22868",
+   "title": "Against Coercion: AI Alignment as a Synthetic Social Contract",
+   "ascore": 2,
+   "tscore": 0,
+   "submitted": "2026-11-18",
+   "abstract": ""
+  },
+  {
+   "id": "2611.22873",
+   "title": "Path-Aligned Constraint Equivariance",
+   "ascore": 2,
+   "tscore": 0,
+   "submitted": "2026-11-18",
+   "abstract": ""
+  },
+  {
+   "id": "2611.22951",
+   "title": "A high-dimensional spatial-physical coupling operator for generalizable super-resolution of three-dimensional turbulent flows",
+   "ascore": 2,
+   "tscore": 0,
+   "submitted": "2026-11-18",
+   "abstract": ""
+  },
+  {
+   "id": "2611.22955",
+   "title": "ResoLUT: Distilling Residual Networks into Lookup-Table Networks",
+   "ascore": 2,
+   "tscore": 0,
+   "submitted": "2026-11-18",
+   "abstract": ""
+  },
+  {
+   "id": "2611.22968",
+   "title": "MI-Hyper: Generating Multiple Instance Models for Weight Space Transfer Learning in Histopathology via Mixed Tasks Pretrained HyperNetwork",
+   "ascore": 2,
+   "tscore": 0,
+   "submitted": "2026-11-18",
+   "abstract": ""
+  },
+  {
+   "id": "2611.22969",
+   "title": "Rescaling OLS-Merged Adapters To Improve Personalized Image Generation",
+   "ascore": 2,
+   "tscore": 2,
+   "submitted": "2026-11-18",
+   "abstract": ""
+  },
+  {
+   "id": "2611.22989",
+   "title": "How Web Research Agents Interpret User Priorities",
+   "ascore": 2,
+   "tscore": 0,
+   "submitted": "2026-11-18",
+   "abstract": ""
+  },
+  {
+   "id": "2611.23030",
+   "title": "Check Your Blind Spots: Decision-Guided Perception by Probing the Planner with Hypothetical Objects",
+   "ascore": 2,
+   "tscore": 0,
+   "submitted": "2026-11-18",
+   "abstract": ""
+  },
+  {
+   "id": "2611.23050",
+   "title": "Magflow: Differentiable Simulation of Industrial-Grade 6D Magnetic Levitation",
+   "ascore": 2,
+   "tscore": 0,
+   "submitted": "2026-11-18",
+   "abstract": ""
+  },
+  {
+   "id": "2611.23056",
+   "title": "RFW-S: Everyday Deformable Objects with Independent Simulation Verification",
+   "ascore": 2,
+   "tscore": 0,
+   "submitted": "2026-11-18",
+   "abstract": ""
+  },
+  {
+   "id": "2611.23067",
+   "title": "Values Shape What Self-Improving Coding Agents Build",
+   "ascore": 2,
+   "tscore": 0,
+   "submitted": "2026-11-18",
+   "abstract": ""
+  },
+  {
+   "id": "2611.23078",
+   "title": "UnrealEvent: Synthetic Dataset Generation and Annotation for Event-Based Vision",
+   "ascore": 2,
+   "tscore": 2,
+   "submitted": "2026-11-18",
+   "abstract": ""
+  },
+  {
+   "id": "2611.23081",
+   "title": "Learning to Undo: Transfer Reinforcement Learning under State Space Transformations",
+   "ascore": 2,
+   "tscore": 2,
+   "submitted": "2026-11-18",
+   "abstract": ""
+  },
+  {
+   "id": "2611.23091",
+   "title": "BugGen 2.0: Rethinking the Roles of LLMs for Scalable RTL Bug Synthesis",
+   "ascore": 2,
+   "tscore": 0,
+   "submitted": "2026-11-18",
+   "abstract": ""
+  },
+  {
+   "id": "2611.23106",
+   "title": "Natural Language Programming: Rethinking Language, Memory, and Cognition in the Era of Generative AI",
+   "ascore": 2,
+   "tscore": 0,
+   "submitted": "2026-11-18",
+   "abstract": ""
+  },
+  {
+   "id": "2611.23111",
+   "title": "Event-Based Dynamic Lip Region Estimation During Speech",
+   "ascore": 2,
+   "tscore": 0,
+   "submitted": "2026-11-18",
+   "abstract": ""
+  },
+  {
+   "id": "2611.23126",
+   "title": "Which Past Matters? Training History and Multi-Forecast Horizon in Equity Transformers",
+   "ascore": 2,
+   "tscore": 2,
+   "submitted": "2026-11-18",
+   "abstract": ""
+  },
+  {
+   "id": "2611.23130",
+   "title": "A Neural Envelope Method for Rapid Gradient-based Optimum Takeoff Trajectory Design",
+   "ascore": 2,
+   "tscore": 0,
+   "submitted": "2026-11-18",
+   "abstract": ""
+  },
+  {
+   "id": "2611.23149",
+   "title": "Capability Composition in Heterogeneous Teams via Barrier-Guided Diffusion Sampling",
+   "ascore": 2,
+   "tscore": 2,
+   "submitted": "2026-11-18",
+   "abstract": ""
+  },
+  {
+   "id": "2611.23154",
+   "title": "Learning Stratified Policies for Inference-Time Objectives",
+   "ascore": 2,
+   "tscore": 0,
+   "submitted": "2026-11-18",
+   "abstract": ""
+  },
+  {
+   "id": "2611.23161",
+   "title": "Attribution Through the Decoder: Prediction-Space Explanations for Structured Outputs",
+   "ascore": 2,
+   "tscore": 0,
+   "submitted": "2026-11-18",
+   "abstract": ""
+  },
+  {
+   "id": "2611.23177",
+   "title": "D\u00e9j\u00e0 View: A Shared Working-Memory Model for Visual Tasks",
+   "ascore": 2,
+   "tscore": 2,
+   "submitted": "2026-11-18",
+   "abstract": ""
+  },
+  {
+   "id": "2611.23202",
+   "title": "Agent Trust Infrastructure (ATI): A Federated Identity, Trust, Attestation, and Accountability Architecture for Cross-Organization Autonomous AI Agents",
+   "ascore": 2,
+   "tscore": 2,
+   "submitted": "2026-11-18",
+   "abstract": ""
+  },
+  {
+   "id": "2611.23229",
+   "title": "Ambient LLMs: Data-Efficient Supervised Fine-tuning via Temperature Matching",
+   "ascore": 2,
+   "tscore": 0,
+   "submitted": "2026-11-18",
+   "abstract": ""
+  },
+  {
+   "id": "2611.22727",
+   "title": "SlopeGuard: Towards Generalizable AI-Generated Image Detection via Radial Spectral Slope Guidance",
+   "ascore": 0,
+   "tscore": 0,
+   "submitted": "2026-11-18",
+   "abstract": ""
+  },
+  {
+   "id": "2611.22738",
+   "title": "Can Activation Steering Substitute for Prompt-Based Affective Priming in LLM Digital Twins?",
+   "ascore": 0,
+   "tscore": 0,
+   "submitted": "2026-11-18",
+   "abstract": ""
+  },
+  {
+   "id": "2611.22761",
+   "title": "Network-Exposed Configuration Attacks on LLM-Controlled Social Robots",
+   "ascore": 0,
+   "tscore": 0,
+   "submitted": "2026-11-18",
+   "abstract": ""
+  },
+  {
+   "id": "2611.22806",
+   "title": "Virtual Double Oracle: Faster Convergence by Leveraging Strategies That Were Watching All Along",
+   "ascore": 0,
+   "tscore": 0,
+   "submitted": "2026-11-18",
+   "abstract": ""
+  },
+  {
+   "id": "2611.22829",
+   "title": "Kolibri: Color Finds the Place, Refinement Sets the Pose for RGB-D Localization in Colored Point Clouds",
+   "ascore": 0,
+   "tscore": 0,
+   "submitted": "2026-11-18",
+   "abstract": ""
+  },
+  {
+   "id": "2611.22841",
+   "title": "Verifying Agents in Rubric-Graded Environments",
+   "ascore": 0,
+   "tscore": 0,
+   "submitted": "2026-11-18",
+   "abstract": ""
+  },
+  {
+   "id": "2611.22852",
+   "title": "Technical Report of Mobile Manipulator Robot for Industrial Environments",
+   "ascore": 0,
+   "tscore": 0,
+   "submitted": "2026-11-18",
+   "abstract": ""
+  },
+  {
+   "id": "2611.22888",
+   "title": "Stopping Is Not the Limit: Understanding and Eliciting Agent Capability in Long-Horizon Vulnerability Exploitation",
+   "ascore": 0,
+   "tscore": 0,
+   "submitted": "2026-11-18",
+   "abstract": ""
+  },
+  {
+   "id": "2611.22897",
+   "title": "Born for the Task: Rethinking Quantum Chemistry with Foresighted Agentic Computing",
+   "ascore": 0,
+   "tscore": 0,
+   "submitted": "2026-11-18",
+   "abstract": ""
+  },
+  {
+   "id": "2611.22898",
+   "title": "You Only Encode Once: Sub-Pixel-Shifted Frames for Arbitrary-Scale Remote Sensing Super-Resolution with 2D Gaussian Splatting",
+   "ascore": 0,
+   "tscore": 0,
+   "submitted": "2026-11-18",
+   "abstract": ""
+  },
+  {
+   "id": "2611.22926",
+   "title": "When Do Typed Decision Models Work in Transportation? Evidence from Travel Choice and Traffic Signal Control",
+   "ascore": 0,
+   "tscore": 0,
+   "submitted": "2026-11-18",
+   "abstract": ""
+  },
+  {
+   "id": "2611.22948",
+   "title": "Symmetries of Counterfactuals: Identification and Testability of Counterfactual Maps from Covariate Heterogeneity",
+   "ascore": 0,
+   "tscore": 0,
+   "submitted": "2026-11-18",
+   "abstract": ""
+  },
+  {
+   "id": "2611.22949",
+   "title": "Can Decision Models Replace LLMs in Real-World Contact Center Classification and Judging Tasks?",
+   "ascore": 0,
+   "tscore": 0,
+   "submitted": "2026-11-18",
+   "abstract": ""
+  },
+  {
+   "id": "2611.22975",
+   "title": "Large Language Models Have Not Yet Transformed Science",
+   "ascore": 0,
+   "tscore": 0,
+   "submitted": "2026-11-18",
+   "abstract": ""
+  },
+  {
+   "id": "2611.22988",
+   "title": "Structured AI ideation yields physical strategies for epithelial barrier repair",
+   "ascore": 0,
+   "tscore": 0,
+   "submitted": "2026-11-18",
+   "abstract": ""
+  },
+  {
+   "id": "2611.22998",
+   "title": "Residual-Guided Lightweight Reinforcement Learning for Risk-Aware Trajectory Selection with a Frozen World Model",
+   "ascore": 0,
+   "tscore": 0,
+   "submitted": "2026-11-18",
+   "abstract": ""
+  },
+  {
+   "id": "2611.23048",
+   "title": "Wall-to-wall maps of canopy height and aboveground carbon across the Atlantic Forest",
+   "ascore": 0,
+   "tscore": 0,
+   "submitted": "2026-11-18",
+   "abstract": ""
+  },
+  {
+   "id": "2611.23049",
+   "title": "Reversing the text is not reversing the path: a fixed-text measure without a zero, and an assembly-order comparison that vanishes identically",
+   "ascore": 0,
+   "tscore": 0,
+   "submitted": "2026-11-18",
+   "abstract": ""
+  },
+  {
+   "id": "2611.23063",
+   "title": "Deep Reinforcement Learning for Heat Pump and Underfloor Heating Control: An End-to-End Case Study",
+   "ascore": 0,
+   "tscore": 0,
+   "submitted": "2026-11-18",
+   "abstract": ""
+  },
+  {
+   "id": "2611.23068",
+   "title": "The Resolution Hypothesis: Agent Evolution&#39;s Key Is Identifying Improvements",
+   "ascore": 0,
+   "tscore": 0,
+   "submitted": "2026-11-18",
+   "abstract": ""
+  },
+  {
+   "id": "2611.23076",
+   "title": "Pareto-Informed Smart &#34;Predict, then Optimize&#34; for Multi-Objective Combinatorial Problems",
+   "ascore": 0,
+   "tscore": 0,
+   "submitted": "2026-11-18",
+   "abstract": ""
+  },
+  {
+   "id": "2611.23080",
+   "title": "Colombo: A Frontier-to-Frontier Autoresearch System for Oracle-Based Optimization",
+   "ascore": 0,
+   "tscore": 0,
+   "submitted": "2026-11-18",
+   "abstract": ""
+  },
+  {
+   "id": "2611.23096",
+   "title": "Hidden-State Similarity Predicts Re-Elicitation After Inoculation Prompting",
+   "ascore": 0,
+   "tscore": 0,
+   "submitted": "2026-11-18",
+   "abstract": ""
+  },
+  {
+   "id": "2611.23108",
+   "title": "FMT: Lossless Image Compression in a Fixed Number of Parallel Steps",
+   "ascore": 0,
+   "tscore": 0,
+   "submitted": "2026-11-18",
+   "abstract": ""
+  },
+  {
+   "id": "2611.23112",
+   "title": "Large-scale Neuron Community Discovery Reveals Neuron-Sparse Behaviors in Language Models",
+   "ascore": 0,
+   "tscore": 0,
+   "submitted": "2026-11-18",
+   "abstract": ""
+  },
+  {
+   "id": "2611.23119",
+   "title": "Dynamic Task Allocation with Dialogue",
+   "ascore": 0,
+   "tscore": 0,
+   "submitted": "2026-11-18",
+   "abstract": ""
+  },
+  {
+   "id": "2611.23174",
+   "title": "Inference after coding agents",
+   "ascore": 0,
+   "tscore": 0,
+   "submitted": "2026-11-18",
+   "abstract": ""
+  },
+  {
+   "id": "2611.23182",
+   "title": "Fully Spiking Neural Implementation of Lambda-Calculus Beta-Reduction via Biologically Documented Mechanisms",
+   "ascore": 0,
+   "tscore": 0,
+   "submitted": "2026-11-18",
+   "abstract": ""
+  },
+  {
+   "id": "2611.23184",
+   "title": "Fold Weighting for Cross-Validation Under Continuous Distributional Drift",
+   "ascore": 0,
+   "tscore": 0,
+   "submitted": "2026-11-18",
+   "abstract": ""
+  },
+  {
+   "id": "2611.23185",
+   "title": "Polarity Composition Hypothesis: Causal Evidence from Negation in NLI",
+   "ascore": 0,
+   "tscore": 0,
+   "submitted": "2026-11-18",
+   "abstract": ""
+  },
+  {
+   "id": "2611.23198",
+   "title": "Learned versus Kinematic Trajectory Prediction under Reduced Observation Frequency",
+   "ascore": 0,
+   "tscore": 0,
+   "submitted": "2026-11-18",
+   "abstract": ""
+  },
+  {
+   "id": "2611.23221",
+   "title": "An inexact stochastic variance-reduced gradient method for constrained convex finite-sum optimization",
+   "ascore": 0,
+   "tscore": 0,
+   "submitted": "2026-11-18",
+   "abstract": ""
+  }
+ ]
+}

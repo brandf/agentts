@@ -566,6 +566,16 @@ async function cmdQueue(args: string[]): Promise<number> {
     // runQueue repairs stranded entries itself before driving (under
     // the lock — see host.ts); print what it repaired, never silently.
     printRepairReport(host.lastRepairReport, false);
+    // BRA-175: the worker server drives the queue in a child process
+    // (POST /queue/run) and reads the repair report back from this
+    // file — the report is computed inside runQueue and cannot cross
+    // the process boundary any other way. Written after runQueue
+    // returns, next to the human-readable print above; a missing
+    // file tells the server the drive never completed.
+    const repairReportPath = flag(args, "--repair-report");
+    if (repairReportPath) {
+      fs.writeFileSync(repairReportPath, JSON.stringify(host.lastRepairReport));
+    }
     for (const e of q) {
       console.log(`${e.status} ${e.runId}${e.error ? ` — ${e.error}` : ""}`);
       // A run submitted with --task syncs to the task when the queue

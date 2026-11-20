@@ -173,6 +173,22 @@ export const prefixFor = (runId: string): string => runId.replace(/\//g, "_");
 const shaBuf = (b: Buffer): string => crypto.createHash("sha256").update(b).digest("hex");
 const shaFile = (p: string): string => shaBuf(fs.readFileSync(p));
 
+/** BRA-171: a trap-result JSON string is delivered to the C host as
+ * argv[3] of the `resume` spawn, and Linux caps any single argv
+ * string at 128KB (MAX_ARG_STRLEN = 131072 bytes). Results at or
+ * above this many bytes go through a scratch file instead (marker
+ * `agentts-file:<path>`, read by the C host) — 64KB is half the cap,
+ * leaving margin for the `throw:` prefix and argv overhead, and far
+ * above any result a normal trap returns. Measured in bytes, not
+ * characters: multi-byte UTF-8 counts against the cap. (Verbatim
+ * copy of the host.ts constants — keep the two in sync, per the
+ * BRA-88 verbatim-copy rule.) */
+export const RESULT_ARG_INLINE_MAX_BYTES = 64 * 1024;
+/** Marker prefix for a file-backed trap result (BRA-171). It starts
+ * with `a`, which no JSON document starts with — the marker can
+ * never collide with an inline result. */
+export const RESULT_ARG_FILE_PREFIX = "agentts-file:";
+
 interface RunEntry {
   runId: string;
   status: "running" | "suspended" | "done" | "failed";
@@ -1266,10 +1282,50 @@ export class MockPlugin {
     return this.journal(runId).filter((e) => e.event === "fork");
   }
 
+  /**
+   * BRA-171: argv-safe form of a trap-result JSON string for the C
+   * host's `resume` command. Small results go inline, exactly as
+   * before. A result at or above RESULT_ARG_INLINE_MAX_BYTES is
+   * written to a scratch file under the workdir (one file per
+   * delivery, random suffix — deliveries for one run are
+   * sequential, but a crash mid-delivery must never collide with
+   * the retry's file) and argv[3] becomes `agentts-file:<path>`,
+   * which the C host reads. The caller MUST invoke the returned
+   * cleanup after the spawn — it unlinks the file when one was
+   * written (a no-op for the inline form), so a delivered result
+   * never litters the workdir. (Verbatim copy of the Host.resultArg
+   * in src/host.ts, except the scratch file lands directly under
+   * this plugin's workdir rather than slices/ — keep the two in
+   * sync, per the BRA-88 verbatim-copy rule.)
+   */
+  private resultArg(runId: string, json: string): { arg: string; cleanup: () => void } {
+    if (Buffer.byteLength(json, "utf8") < RESULT_ARG_INLINE_MAX_BYTES) {
+      return { arg: json, cleanup: () => {} };
+    }
+    const filePath = path.join(this.workdir, `${prefixFor(runId)}.trap-result-${crypto.randomUUID()}.json`);
+    fs.writeFileSync(filePath, json, "utf8");
+    return {
+      arg: `${RESULT_ARG_FILE_PREFIX}${filePath}`,
+      cleanup: () => {
+        try {
+          fs.unlinkSync(filePath);
+        } catch {
+          /* already gone — the resume consumed it or the run crashed */
+        }
+      },
+    };
+  }
+
   private deliverResult(runId: string, result: any): number {
     const entry = this.registry.get(runId)!;
     this.loadBlob(runId, entry.snap);
-    const rc = this.runHost(["resume", entry.snap, JSON.stringify(result)], entry.out, entry.log, entry.env);
+    const { arg, cleanup } = this.resultArg(runId, JSON.stringify(result));
+    let rc: number;
+    try {
+      rc = this.runHost(["resume", entry.snap, arg], entry.out, entry.log, entry.env);
+    } finally {
+      cleanup();
+    }
     entry.rc = rc;
     this.refresh(entry);
     if (rc === 2 || rc === 3) this.storeBlob(runId, entry.snap);
@@ -1279,12 +1335,13 @@ export class MockPlugin {
   private deliverThrow(runId: string, err: any): number {
     const entry = this.registry.get(runId)!;
     this.loadBlob(runId, entry.snap);
-    const rc = this.runHost(
-      ["resume", entry.snap, "throw:" + JSON.stringify(err)],
-      entry.out,
-      entry.log,
-      entry.env,
-    );
+    const { arg, cleanup } = this.resultArg(runId, JSON.stringify(err));
+    let rc: number;
+    try {
+      rc = this.runHost(["resume", entry.snap, "throw:" + arg], entry.out, entry.log, entry.env);
+    } finally {
+      cleanup();
+    }
     entry.rc = rc;
     this.refresh(entry);
     if (rc === 2 || rc === 3) this.storeBlob(runId, entry.snap);

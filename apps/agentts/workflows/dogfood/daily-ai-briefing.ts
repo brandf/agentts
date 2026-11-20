@@ -2,7 +2,8 @@
 // workflow (BRA-55, Phase 2 use case (a)). A real edition end to end
 // through the real engine: arXiv discovery, parallel full-text reads,
 // dedupe against a COPY of the seen list, computed prior-work
-// relations, must-read selection by decide trap, rendered markdown +
+// relations, deterministic must-read selection (top of the
+// consequence-led ranking, BRA-130), rendered markdown +
 // meta.json, a JudgeFixLoop structural polish over the draft, and the
 // weekly HTML page via the existing builder — all into scratch.
 //
@@ -24,21 +25,26 @@
 //   export.arxiv.org 429s on this VM's shared egress IP, while the
 //   list pages answer in ~1s. Candidates are title-scored here and
 //   re-scored with the abstract at read time.
-// - No gate: no step here needs a human decision. The must-read is a
-//   decide trap, not a gate; the v0 decision model ratifies the
-//   score-ordered leader (it cannot reason over paper IDs — see
-//   BRA-55). Real semantic judging awaits BRA-48 subagent workers.
+// - No gate: no step here needs a human decision. The must-read is
+//   a deterministic pick — the top of the consequence-led ranking
+//   (BRA-130). There used to be a decide trap here; it was removed
+//   because the v0 decision model cannot judge consequence (it parses
+//   machine-readable signals and falls back to the first option), so
+//   the trap only ever ratified the leader — a fake step, the r0
+//   species (gates always returning true, exec faking success). Real
+//   semantic judging of the ranking itself is the LLM consequence
+//   judge (BRA-124); the must-read is its top paper.
 // - JudgeFixLoop polishes the draft as a STRUCTURAL check (all five
 //   subsections present, real numbers present); its fix step can only
 //   append revision markers, not write missing sections (BRA-44
 //   worker limitation) — the loop's value here is the check + journal.
 
-import { job, exec, decide, all, type Outcome } from "../../src/agentts";
+import { job, exec, all, type Outcome } from "../../src/agentts";
 import {
   judgeFixLoop,
   resolveTextBlob,
-  type LoopDecision,
 } from "../library/judge-fix-loop";
+import { combinedScore, rankByConsequence, rankReads } from "../library/consequence-rank";
 import { PRIOR_WORK, type PriorWorkEntry } from "./briefing-prior-work";
 
 declare function print(...args: unknown[]): void;
@@ -54,6 +60,10 @@ interface PaperCandidate {
   score: number;
   topics: string[];
   reason: string;
+  /** LLM-judge consequence 0-10, attached by the judge step. */
+  consequence?: number;
+  /** Combined consequence-led rank (consequence * 10 + score). */
+  combined?: number;
 }
 
 interface DiscoveryInput {
@@ -62,12 +72,45 @@ interface DiscoveryInput {
   maxResults: number;
   categories: string[];
   endDate: string;
+  /** Pre-judge pool size (BRA-124): discovery returns a wider pool
+   * than the final candidates so the judge can surface papers the
+   * keyword cut would drop. */
+  preJudgePool: number;
+}
+
+/** One LLM consequence verdict (jobspec briefing-judge-consequence). */
+export interface ConsequenceVerdict {
+  id: string;
+  consequence: number;
+  reasons: string;
+  evidence?: string;
+}
+
+export interface JudgeInput {
+  papers: PaperCandidate[];
+  /** Trial-only: path to a JSON file of recorded LLM verdicts.
+   * Production runs omit it — the pool worker judges live. Under
+   * the direct adapter the script fails loudly without verdicts. */
+  judgmentsPath?: string;
+  judgments?: ConsequenceVerdict[];
+}
+
+export interface JudgeResult {
+  ok: boolean;
+  error: string;
+  scores: ConsequenceVerdict[];
 }
 
 interface DiscoveryResult {
   ok: boolean;
   error: string;
   candidates: PaperCandidate[];
+  /** BRA-124 abstract pass (second pass in discover): the
+   * abstract-strong title-low papers promoted as a SUPPLEMENT to
+   * the judge's input. The pool itself (candidates) is unchanged.
+   * Optional: older/mock discover results carry no supplement and
+   * the judge sees the pool alone. */
+  abstractPass?: { fetched: number; promoted: PaperCandidate[] };
   excludedSeen: string[];
   scanned: number;
   freshCount: number;
@@ -99,6 +142,8 @@ interface PaperRead {
   caveats: string[];
   topics: string[];
   score: number;
+  /** Judge consequence, passed through the read untouched. */
+  consequence?: number;
   fullText: boolean;
   readChars: number;
   absUrl: string;
@@ -204,6 +249,9 @@ export interface BriefingInput {
   selectCount: number;
   venvPython: string;
   mock: boolean;
+  /** Trial-only: path to recorded LLM consequence verdicts (see
+   * JudgeInput). Production runs omit it — the pool judges live. */
+  judgmentsPath?: string;
 }
 
 export interface BriefingResult {
@@ -234,6 +282,32 @@ export interface Rubric {
 }
 
 // ---------------------------------------------------------------- config
+/** The Monday of the week containing `dateStr` ("YYYY-MM-DD"), as the
+ * weekly HTML builder names its pages: the builder
+ * (hidden_files/build_briefings_html.py, `week_monday`) writes
+ * `ai-briefings-week-<monday>.html`, where monday is the edition
+ * date minus its weekday offset (Python weekday(): Monday=0).
+ *
+ * (BRA-123: the workflow used to return
+ * `ai-briefings-week-<editionDate>.html`, which names a file that
+ * does not exist whenever the edition is not a Monday — e.g. the
+ * Nov 18, 2026 trial returned `...-2026-11-18.html` while the file
+ * on disk is `...-2026-11-16.html`. The Monday is computed here
+ * rather than taken from the builder's output: the builder prints
+ * only a summary line, so returning its actual path would mean
+ * changing the live cron builder's stdout contract. Drift risk: if
+ * the builder's week rule ever changes, this must change with it —
+ * the test pins the builder's current rule.)
+ *
+ * UTC throughout: edition dates are plain calendar dates, and local
+ * time would shift the weekday near midnight. */
+export function weekMonday(dateStr: string): string {
+  const d = new Date(`${dateStr}T00:00:00Z`);
+  const offset = (d.getUTCDay() + 6) % 7; // Monday=0 ... Sunday=6
+  d.setUTCDate(d.getUTCDate() - offset);
+  return d.toISOString().slice(0, 10);
+}
+
 export default function dailyAiBriefing(input: BriefingInput): BriefingResult {
   // Input-derived constants (were hardcoded module-level consts).
   const EDITION_DATE = input.editionDate;
@@ -271,6 +345,11 @@ export default function dailyAiBriefing(input: BriefingInput): BriefingResult {
   }
 
   // 2. Discovery (job): scan the window, dedupe vs the seen copy.
+  // Returns a WIDE pre-judge pool (BRA-124): the judge re-ranks it
+  // by consequence and cuts it to the candidate count, so papers the
+  // keyword cut would drop stay in play for judging.
+  const POOL_SIZE = 40;
+  const CANDIDATE_COUNT = 18;
   const discovery = job<DiscoveryInput, DiscoveryResult>({
     spec: "briefing-discover",
     input: {
@@ -279,6 +358,7 @@ export default function dailyAiBriefing(input: BriefingInput): BriefingResult {
       maxResults: 300,
       categories: CATEGORIES,
       endDate: EDITION_DATE,
+      preJudgePool: POOL_SIZE,
     },
   });
   if (!discovery.ok) {
@@ -286,7 +366,9 @@ export default function dailyAiBriefing(input: BriefingInput): BriefingResult {
   }
   print(
     `discovery: source=${discovery.source} scanned=${discovery.scanned} ` +
-      `fresh=${discovery.freshCount} candidates=${discovery.candidates.length} ` +
+      `fresh=${discovery.freshCount} pool=${discovery.candidates.length} ` +
+      `abstractPass fetched=${discovery.abstractPass?.fetched ?? 0} ` +
+      `supplement=${discovery.abstractPass?.promoted.length ?? 0} ` +
       `excludedSeen=${discovery.excludedSeen.length} ` +
       `window=${discovery.earliestScanned || discovery.windowStart}..${discovery.windowEnd}`,
   );
@@ -297,9 +379,59 @@ export default function dailyAiBriefing(input: BriefingInput): BriefingResult {
     );
   }
 
+  // 2b. Consequence judge (job, BRA-124): the LLM judge scores each
+  // pool paper's abstract for consequence 0-10 (jobspec
+  // briefing-judge-consequence). In production a pool worker judges
+  // live; in a trial the recorded verdicts come via judgmentsPath.
+  // The pool is re-ranked consequence-led (consequence * 10 +
+  // topicScore) and cut to the candidate count — the read set below
+  // comes from the judged ranking, not the keyword ranking.
+  // The judge sees the pool PLUS the abstract-pass supplement
+  // (discovery.abstractPass.promoted): abstract-strong title-low
+  // papers the title cut buried. Nobody is displaced — the
+  // supplement can only add to the edition, and only if the judge
+  // finds a promoted paper consequential (see
+  // workflows/library/pool-promotion.ts). The judge fails loudly
+  // upstream on any paper without a verdict, so a trial must carry
+  // verdicts for the supplement too.
+  const judgePapers = [...discovery.candidates, ...(discovery.abstractPass?.promoted ?? [])];
+  const judged = job<JudgeInput, JudgeResult>({
+    spec: "briefing-judge-consequence",
+    input: {
+      papers: judgePapers,
+      judgmentsPath: input.judgmentsPath,
+    },
+  });
+  if (!judged.ok) {
+    throw new Error(`briefing judge failed: ${judged.error}`);
+  }
+  const verdictById = new Map<string, ConsequenceVerdict>();
+  for (const s of judged.scores) verdictById.set(s.id, s);
+  const ranked = rankByConsequence(
+    judgePapers.map((c) => ({
+      ...c,
+      consequence: verdictById.get(c.id)?.consequence ?? null,
+    })),
+  ).map((c) => ({
+    ...c,
+    consequence: c.consequence ?? undefined,
+    combined: combinedScore(c.score, c.consequence),
+  }));
+  const candidates = ranked.slice(0, CANDIDATE_COUNT);
+  print(
+    `judged: pool=${discovery.candidates.length} supplement=${judgePapers.length - discovery.candidates.length} ` +
+      `ranked=${ranked.length} candidates=${candidates.length} ` +
+      `top=${candidates.slice(0, 5).map((c) => `${c.id}(cons ${c.consequence}, combined ${c.combined})`).join(", ")}`,
+  );
+  for (const c of candidates) {
+    print(`candidate ${c.id}: topic ${c.score}, consequence ${c.consequence}, combined ${c.combined} — ${verdictById.get(c.id)?.reasons ?? ""}`);
+  }
+
   // 3. Reads in parallel (all): fetch + verify + extract per paper.
+  // The read set is the judged ranking's top READ_COUNT — consequence
+  // led, not keyword led.
   const readOutcomes: Outcome<PaperRead>[] = all(
-    discovery.candidates.slice(0, READ_COUNT).map(
+    candidates.slice(0, READ_COUNT).map(
       (c) =>
         () =>
           job<ReadInput, PaperRead>({ spec: "briefing-read", input: { paper: c, rubricText } }),
@@ -316,14 +448,17 @@ export default function dailyAiBriefing(input: BriefingInput): BriefingResult {
     throw new Error(`briefing reads: only ${reads.length} papers read, need at least 5`);
   }
 
-  // Rank by topic score (re-scored with the abstract), then number
-  // density, then full-text availability — all computed, no judgement.
-  function rankScore(r: PaperRead): number {
-    return r.score * 10 + Math.min(r.numbers.length, 5) + (r.fullText ? 1 : 0);
-  }
-  reads.sort((a, b) => rankScore(b) - rankScore(a) || a.id.localeCompare(b.id));
-  const selected = reads.slice(0, SELECT_COUNT);
-  print(`selected: ${selected.map((r) => `${r.id}(rank ${rankScore(r)}, ${r.numbers.length} numbers)`).join(", ")}`);
+  // Rank the reads consequence-led (BRA-130): combinedScore orders;
+  // numbers and fullText are tiebreaks only and can never overturn a
+  // consequence point (see compareReads in consequence-rank.ts). An
+  // unjudged read throws loudly here instead of silently falling
+  // back to a topic-fit score — the judge fails loudly upstream and
+  // the read passes consequence through untouched, so this is
+  // unreachable in practice, but a silent fallback in the must-read
+  // path is the wrong shape.
+  const rankedReads = rankReads(reads);
+  const selected = rankedReads.slice(0, SELECT_COUNT);
+  print(`selected: ${selected.map((r) => `${r.id}(consequence ${r.consequence}, ${r.numbers.length} numbers)`).join(", ")}`);
 
   // 4. Prior-work relations in parallel (all): computed against the
   // index of delivered editions.
@@ -358,20 +493,18 @@ export default function dailyAiBriefing(input: BriefingInput): BriefingResult {
     print(`relate ${r.id}: ${(rel?.relations ?? []).length} relations`);
   }
 
-  // 5. Must-read selection (decide): the v0 decision model ratifies the
-  // score-ordered leader — options are ordered by rank, so its
-  // first-option fallback picks the top paper. The ranking is the real
-  // decision; the trap records it.
-  const top = selected[0];
-  const second = selected[1];
-  const must = decide<LoopDecision>({
-    question:
-      `must-read selection: top paper ${top.id} score ${rankScore(top)} threshold 50; ` +
-      `second paper ${second.id} score ${rankScore(second)}. Which paper is the must-read?`,
-    options: [top.id, second.id],
-  });
-  print(`must-read decide: ${JSON.stringify(must)}`);
-  const mustReadId = must.choice === second.id ? second.id : top.id;
+  // 5. Must-read selection (BRA-130): deterministic — the top of the
+  // consequence-led ranking. There is no decide trap here: the v0
+  // decision model cannot judge consequence, so a decide trap would
+  // only ratify the leader (a fake step — see the header note). The
+  // ranking IS the decision; the pick is printed for the journal.
+  // (The old decide question carried a stale threshold calibrated
+  // for the score-times-ten scale. It goes away with the trap;
+  // there is no threshold on the combined scale.)
+  const mustReadId = selected[0].id;
+  print(
+    `must-read: ${mustReadId} consequence ${selected[0].consequence} — top of the consequence-led ranking`,
+  );
 
   // 6. Render (job): dated markdown + meta.json, live format.
   const scopeNote =
@@ -463,8 +596,12 @@ export default function dailyAiBriefing(input: BriefingInput): BriefingResult {
     throw new Error(`briefing html build failed: ${(html.stderr ?? "").slice(0, 300)}`);
   }
 
+  // The week page is named by the week's Monday, not the edition
+  // date (BRA-123) — one value for the print and the return, so they
+  // cannot disagree.
+  const weekHtml = `${FILES_DIR}/ai-briefings-week-${weekMonday(EDITION_DATE)}.html`;
   print(`edition: ${written.markdownPath}`);
-  print(`week page: ${FILES_DIR}/ai-briefings-week-${EDITION_DATE}.html`);
+  print(`week page: ${weekHtml}`);
   print(`index: ${FILES_DIR}/ai-briefings.html`);
   print(`papers: ${rendered.paperCount}, must-read: ${rendered.mustReadId}`);
 
@@ -474,7 +611,7 @@ export default function dailyAiBriefing(input: BriefingInput): BriefingResult {
     selectedIds: selected.map((r) => r.id),
     markdownPath: written.markdownPath,
     metaPath: written.metaPath,
-    htmlPath: `${FILES_DIR}/ai-briefings-week-${EDITION_DATE}.html`,
+    htmlPath: weekHtml,
     indexPath: `${FILES_DIR}/ai-briefings.html`,
     paperCount: rendered.paperCount,
     polishLoops: polished.loops,

@@ -13,10 +13,15 @@
  * Script mode (this file): the work for a spec is a registered Bun
  * worker script (workers config: JSON { spec: scriptPath }), run as
  * `bun <script> '<json {spec, input}>'` with cwd = the per-job
- * workspace. The script's last stdout line is the result JSON. This
- * is the PROOF leg: genuine computation over real inputs by Bun
- * processes. The TRUE leg is a Muse subagent running the same loop
- * by hand (get-job.ts / complete-job.ts + WORKER.md).
+ * workspace — or, for a payload at or above 64KB, as
+ * `bun <script> 'agentts-file:<path>'` (BRA-179: Linux caps any
+ * single argv string at 128KB, so large payloads travel through a
+ * scratch file in the job workspace, read by the worker script and
+ * unlinked after the spawn; small payloads stay inline). The
+ * script's last stdout line is the result JSON. This is the PROOF
+ * leg: genuine computation over real inputs by Bun processes. The
+ * TRUE leg is a Muse subagent running the same loop by hand
+ * (get-job.ts / complete-job.ts + WORKER.md).
  *
  * Per job:
  *   1. GET /get-job?workerId=... — the server picks the job for this
@@ -59,6 +64,7 @@
  * Env: AGENTTS_WORKER_SERVER, AGENTTS_WORKER_ID.
  */
 
+import * as crypto from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
 
@@ -213,9 +219,37 @@ async function runOneJob(job: any): Promise<boolean> {
 
   let result: unknown = null;
   let error: { name: string; message: string } | null = null;
+  // BRA-179: a job payload is passed to the worker script as argv[2]
+  // of the spawn, and Linux caps any single argv string at 128KB
+  // (MAX_ARG_STRLEN = 131072 bytes). Payloads at or above 64KB go
+  // through a scratch file in the job workspace instead (marker
+  // `agentts-file:<path>`, read by the worker script) — same
+  // threshold + marker as the direct adapter
+  // (plugins/direct/src/direct-adapter.ts) and as
+  // RESULT_ARG_INLINE_MAX_BYTES / RESULT_ARG_FILE_PREFIX in
+  // src/host.ts (BRA-171, the output side of this same argv
+  // boundary); keep the three in sync, per the BRA-88 verbatim-copy
+  // rule. The file is unlinked in the finally below, so a dispatched
+  // job never litters the workspace.
+  const JOB_ARG_INLINE_MAX_BYTES = 64 * 1024;
+  const JOB_ARG_FILE_PREFIX = "agentts-file:";
+  let payloadCleanup: () => void = () => {};
   try {
     const payload = JSON.stringify({ spec, input: job.input ?? null });
-    const proc = Bun.spawn([BUN, script, payload], {
+    let payloadArg = payload;
+    if (Buffer.byteLength(payload, "utf8") >= JOB_ARG_INLINE_MAX_BYTES) {
+      const filePath = path.join(workspace, `.agentts-job-payload-${crypto.randomUUID()}.json`);
+      fs.writeFileSync(filePath, payload, "utf8");
+      payloadArg = `${JOB_ARG_FILE_PREFIX}${filePath}`;
+      payloadCleanup = () => {
+        try {
+          fs.unlinkSync(filePath);
+        } catch {
+          /* already gone */
+        }
+      };
+    }
+    const proc = Bun.spawn([BUN, script, payloadArg], {
       cwd: workspace,
       stdout: "pipe",
       stderr: "pipe",
@@ -255,6 +289,7 @@ async function runOneJob(job: any): Promise<boolean> {
     error = { name: "WorkerExit", message: e instanceof Error ? e.message : String(e) };
   } finally {
     clearInterval(timer);
+    payloadCleanup();
   }
   if (cancelled) {
     console.log(`[worker ${WORKER_ID}] ${jobId} cancelled mid-run — abandoning, not completing`);

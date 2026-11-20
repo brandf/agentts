@@ -367,6 +367,159 @@ function calleeName(expr: ts.Expression): string | null {
   return null;
 }
 
+/** BRA-129: native-builtin methods whose C implementation invokes a JS
+ * callback. A trap called while such a callback is on the stack cannot
+ * suspend: `js_can_suspend_from` (quickjs.c) requires every frame to be
+ * a bytecode function entered directly, and a callback entered from C
+ * has entry kind NATIVE — so `JS_SuspendCall` throws "this call cannot
+ * be suspended". Empirically probed Nov 19: every method below fails
+ * at runtime with that TypeError; a plain for loop passes. Promise.then
+ * is NOT listed: its callback runs as a job after the entry returns,
+ * so the trap never executes inside the run at all. findLast /
+ * findLastIndex do not type-check under the gate's lib (TS2550) but are
+ * listed for the `as any` case. The match is by method NAME only: a
+ * user-defined method sharing the name is flagged too — a loud refusal
+ * the author can restructure around, never a silent pass. */
+export const NATIVE_CALLBACK_METHODS: Record<string, string> = {
+  map: "Array.map",
+  forEach: "Array.forEach",
+  filter: "Array.filter",
+  reduce: "Array.reduce",
+  reduceRight: "Array.reduceRight",
+  find: "Array.find",
+  findIndex: "Array.findIndex",
+  findLast: "Array.findLast",
+  findLastIndex: "Array.findLastIndex",
+  some: "Array.some",
+  every: "Array.every",
+  flatMap: "Array.flatMap",
+  sort: "Array.sort",
+  replace: "String.replace",
+  from: "Array.from",
+};
+
+/** The innermost function-like node containing `node` (undefined at
+ * top level). Method declarations count as boundaries — a trap inside
+ * a method is contained by that method — but the taint analysis only
+ * ever marks plain functions, so a method boundary never matches. */
+export function enclosingFunction(node: ts.Node): ts.Node | undefined {
+  let cur: ts.Node | undefined = node.parent;
+  while (cur) {
+    if (
+      ts.isFunctionDeclaration(cur) ||
+      ts.isFunctionExpression(cur) ||
+      ts.isArrowFunction(cur) ||
+      ts.isMethodDeclaration(cur)
+    ) {
+      return cur;
+    }
+    cur = cur.parent;
+  }
+  return undefined;
+}
+
+/** BRA-129: for one source file, the function nodes that may execute
+ * synchronously while a native-builtin callback is on the stack, each
+ * with the callback method that taints it. Seeds are functions passed
+ * as arguments to a native-builtin call (inline or by name); taint
+ * propagates along synchronous call edges (a helper called from
+ * inside a tainted function is tainted too). A function merely
+ * CREATED inside a tainted function — a thunk returned to be invoked
+ * later, e.g. `steps.map((s) => () => job(...))` — is NOT tainted:
+ * it executes after the callback returns, where suspension works.
+ * Limits: name-based resolution within one file (same-name functions
+ * in different scopes share a name; a function passed to a native
+ * builtin in ANOTHER file is not seen); method-call indirection
+ * (`obj.helper()` from inside a callback) is not followed. */
+export function nativeCallbackTaint(sf: ts.SourceFile): Map<ts.Node, string> {
+  // Named functions in this file, by name (first declaration wins).
+  const named = new Map<string, ts.Node>();
+  function collectNamed(node: ts.Node): void {
+    if (ts.isFunctionDeclaration(node) && node.name) {
+      if (!named.has(node.name.text)) named.set(node.name.text, node);
+    }
+    if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name)) {
+      const init = node.initializer;
+      if (init && (ts.isArrowFunction(init) || ts.isFunctionExpression(init))) {
+        if (!named.has(node.name.text)) named.set(node.name.text, init);
+      }
+    }
+    ts.forEachChild(node, collectNamed);
+  }
+  collectNamed(sf);
+
+  // Identifier calls in a function's OWN body: calls inside a nested
+  // function belong to that nested function, not to this one.
+  function ownCalls(fn: ts.Node): Set<string> {
+    const out = new Set<string>();
+    function walk(node: ts.Node): void {
+      if (
+        node !== fn &&
+        (ts.isFunctionDeclaration(node) || ts.isFunctionExpression(node) || ts.isArrowFunction(node))
+      ) {
+        return;
+      }
+      if (ts.isCallExpression(node) && ts.isIdentifier(node.expression)) out.add(node.expression.text);
+      ts.forEachChild(node, walk);
+    }
+    walk(fn);
+    return out;
+  }
+
+  function unwrap(expr: ts.Expression): ts.Expression {
+    while (ts.isParenthesizedExpression(expr) || ts.isAsExpression(expr) || ts.isSatisfiesExpression(expr)) {
+      expr = expr.expression;
+    }
+    return expr;
+  }
+
+  const tainted = new Map<ts.Node, string>();
+  const queue: ts.Node[] = [];
+  function taint(fn: ts.Node, method: string): void {
+    if (!tainted.has(fn)) {
+      tainted.set(fn, method);
+      queue.push(fn);
+    }
+  }
+
+  // Seed: functions passed as arguments to a native-builtin call.
+  function visitSeed(node: ts.Node): void {
+    if (ts.isCallExpression(node)) {
+      let method: string | undefined;
+      const callee = node.expression;
+      if (ts.isPropertyAccessExpression(callee)) {
+        method = NATIVE_CALLBACK_METHODS[callee.name.text];
+      } else if (ts.isElementAccessExpression(callee) && ts.isStringLiteral(callee.argumentExpression)) {
+        method = NATIVE_CALLBACK_METHODS[callee.argumentExpression.text];
+      }
+      if (method) {
+        for (const arg of node.arguments) {
+          const a = unwrap(arg);
+          if (ts.isArrowFunction(a) || ts.isFunctionExpression(a)) taint(a, method);
+          else if (ts.isIdentifier(a)) {
+            const fn = named.get(a.text);
+            if (fn) taint(fn, method);
+          }
+        }
+      }
+    }
+    ts.forEachChild(node, visitSeed);
+  }
+  visitSeed(sf);
+
+  // Propagate: a function called synchronously from a tainted function
+  // also executes while the native callback is on the stack.
+  while (queue.length) {
+    const fn = queue.pop()!;
+    const method = tainted.get(fn)!;
+    for (const name of ownCalls(fn)) {
+      const callee = named.get(name);
+      if (callee) taint(callee, method);
+    }
+  }
+  return tainted;
+}
+
 /** Read a string-literal property off an object literal argument. */
 function literalProp(arg: ts.Expression | undefined, prop: string): string | null {
   if (!arg || !ts.isObjectLiteralExpression(arg)) return null;
@@ -902,6 +1055,10 @@ export function extractWorkflow(
      * is the local binding. */
     wrapperAliases: Map<string, string>;
     localNames: Set<string>;
+    /** BRA-129: function nodes that may execute while a
+     * native-builtin callback is on the stack, with the callback
+     * method — a trap inside one cannot suspend. */
+    callbackTaint: Map<ts.Node, string>;
   }
   function fileCtx(fileAbs: string): FileCtx | null {
     const sf = program.getSourceFile(fileAbs);
@@ -931,7 +1088,7 @@ export function extractWorkflow(
       ts.forEachChild(node, collectLocals);
     }
     collectLocals(sf);
-    return { sf, fileAbs, importedWrappers, wrapperAliases, localNames };
+    return { sf, fileAbs, importedWrappers, wrapperAliases, localNames, callbackTaint: nativeCallbackTaint(sf) };
   }
 
   interface FoundSite {
@@ -1022,6 +1179,24 @@ export function extractWorkflow(
       const resolved = wrapperAliases.get(name ?? "") ?? name ?? "";
       if (name !== null && (name === "trap" || WRAPPER_NAMES.has(resolved))) {
         const where = `${fileAbs}:${loc(sf, node)}`;
+        // BRA-129: a trap inside a native-builtin callback cannot
+        // suspend (the callback runs from C) — refuse at extraction
+        // time, naming the callback and the fix, instead of failing
+        // mid-run with "this call cannot be suspended". Only real
+        // trap calls: a direct trap() or a wrapper imported from the
+        // agentts module (a local helper sharing the name is not a
+        // trap, and a non-imported wrapper name is a different
+        // problem, reported below).
+        if (name === "trap" || importedWrappers.has(name)) {
+          const fn = enclosingFunction(node);
+          const taintMethod = fn ? ctx.callbackTaint.get(fn) : undefined;
+          if (taintMethod) {
+            const label = name === "trap" ? "direct trap() call" : `\`${name}\` trap`;
+            problems.push(
+              `${where}: ${label} sits inside a ${taintMethod} callback — traps cannot suspend from inside a native-builtin callback (the callback runs from C, so dquickts throws "this call cannot be suspended" at runtime). Move the trap out of the callback — use a plain for loop (or a direct call) instead`,
+            );
+          }
+        }
         const args = node.typeArguments ?? [];
         if (name === "trap") {
           // Direct trap() call.

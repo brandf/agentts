@@ -33,8 +33,12 @@ import { spawnSync } from "node:child_process";
 
 const BUN = "/opt/hatch-image/bin/bun";
 
-/** Source entries copied from the target repo into a runnable scratch copy. */
-const REPO_ENTRIES = ["src", "workflows", "tests", "package.json", "bun.lock", "tsconfig.json"];
+/** Source entries copied from the target repo into a runnable scratch copy.
+ * plugins/ is required: src/cli.ts statically imports both adapters
+ * (../plugins/mock/src/mock-adapter, ../plugins/direct/src/direct-adapter),
+ * so a copy without it fails at CLI startup (BRA-143: the direct
+ * reproduce path never worked without it). */
+const REPO_ENTRIES = ["src", "workflows", "tests", "plugins", "package.json", "bun.lock", "tsconfig.json"];
 
 export interface RunOptions {
   simulate: boolean;
@@ -90,7 +94,15 @@ function buildHost(coreDir: string, outDir: string): SpawnResult {
   return spawn("make", ["-C", coreDir, `OUT_DIR=${outDir}`, "durablets"], { timeoutMs: 300_000 });
 }
 
-/** Run the CLI mock path on the JFL workflow from a runnable copy. */
+/** Run the CLI mock path on the JFL workflow from a runnable copy.
+ * The workflow requires a JudgeFixLoopInput — the canonical fixture
+ * (tests/fixtures/judge-fix-loop-input.json, the same input the
+ * mock end-to-end test uses) — so pass it explicitly; without it
+ * the inner run refuses with "workflow run requires an input"
+ * (BRA-143: the direct reproduce path never worked without it).
+ * --wait is required too: a bare `run` only submits and prints
+ * "RUN <id>", so the workflow's `result:` line never appears;
+ * --wait drives the queue and prints the result (same reason). */
 function runCliMock(runnable: string, hostBin: string, workflowRel: string, stateDir: string, runId: string): SpawnResult {
   return spawn(
     BUN,
@@ -104,17 +116,23 @@ function runCliMock(runnable: string, hostBin: string, workflowRel: string, stat
       stateDir,
       "--run-id",
       runId,
+      "--input-file",
+      path.join(runnable, "tests", "fixtures", "judge-fix-loop-input.json"),
+      "--wait",
     ],
     { env: { DURABLETS_HOST: hostBin }, timeoutMs: 300_000 },
   );
 }
 
-/** Parse the JFL workflow's `result: {...}` line out of CLI output. */
+/** Parse the JFL workflow's result out of CLI output. `agentts run
+ * --wait` prints ONLY the pretty-printed result JSON on stdout (no
+ * "RUN <id>" line, no `result:` prefix — the workflow's print()
+ * output stays in the run's output file), so parse the whole stdout
+ * as JSON; the `result: ` line is kept as a fallback for any path
+ * that prints it (BRA-143: the direct reproduce path never worked
+ * with the line-only parse). */
 function parseJflResult(stdout: string): { loops: number; converged: boolean; mean: number; found: boolean } {
-  const line = stdout.split("\n").find((l) => l.startsWith("result: "));
-  if (!line) return { loops: 0, converged: false, mean: 0, found: false };
-  try {
-    const result = JSON.parse(line.slice("result: ".length));
+  const fromResult = (result: any): { loops: number; converged: boolean; mean: number; found: boolean } => {
     const mean = typeof result?.lastAggregate?.meanScore === "number" ? result.lastAggregate.meanScore : 0;
     return {
       loops: typeof result?.loops === "number" ? result.loops : 0,
@@ -122,6 +140,16 @@ function parseJflResult(stdout: string): { loops: number; converged: boolean; me
       mean,
       found: true,
     };
+  };
+  try {
+    return fromResult(JSON.parse(stdout));
+  } catch {
+    // Fall back to the workflow's `result: {...}` print line.
+  }
+  const line = stdout.split("\n").find((l) => l.startsWith("result: "));
+  if (!line) return { loops: 0, converged: false, mean: 0, found: false };
+  try {
+    return fromResult(JSON.parse(line.slice("result: ".length)));
   } catch {
     return { loops: 0, converged: false, mean: 0, found: false };
   }
@@ -404,7 +432,28 @@ export function runBugfix(spec: string, input: any, opts: RunOptions): unknown {
 }
 
 if (import.meta.main) {
-  const payload = JSON.parse(process.argv[2] ?? "{}");
+  /** BRA-179: a job payload over the inline argv cap arrives as
+   * `agentts-file:<path>` (the spawning side writes the JSON to a
+   * scratch file and passes the marker — Linux caps any single argv
+   * string at 128KB). Small payloads still arrive inline. The marker
+   * starts with `a`, which no JSON document starts with, so it can
+   * never collide with an inline payload. A missing or unreadable
+   * file fails LOUDLY (the path named) instead of running with an
+   * empty input. (Marker + 64KB threshold shared with
+   * RESULT_ARG_INLINE_MAX_BYTES / RESULT_ARG_FILE_PREFIX in
+   * src/host.ts — BRA-171; keep the two in sync, per the BRA-88
+   * verbatim-copy rule.) */
+  const readPayloadArg = (raw: string | undefined): any => {
+    const text = raw ?? "{}";
+    if (!text.startsWith("agentts-file:")) return JSON.parse(text);
+    const filePath = text.slice("agentts-file:".length);
+    try {
+      return JSON.parse(fs.readFileSync(filePath, "utf8"));
+    } catch (e) {
+      throw new Error(`bugfix worker: cannot read job payload file ${filePath}: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  };
+  const payload = readPayloadArg(process.argv[2]);
   const spec: string = payload.spec;
   const input: any = payload.input ?? {};
   try {

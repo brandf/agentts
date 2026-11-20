@@ -1,0 +1,695 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="light dark">
+<link rel="icon" href="data:,">
+<title>AgentTS Architecture — How Durable Agent Workflows Actually Run</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600;700&family=Newsreader:opsz,wght@6..72,600;6..72,700&display=swap" rel="stylesheet">
+<style>
+:root{
+  --bg:#f7f5f0; --bg2:#ffffff; --bg3:#eeebe3;
+  --ink:#161a1e; --ink2:#3a424a; --muted:#6b7680;
+  --line:#ddd8cc; --line2:#c9c2b2;
+  --teal:#0f766e; --teal-bg:#e6f4f1; --teal-line:#99d5cc;
+  --slate:#334155; --slate-bg:#eef1f5; --slate-line:#b8c4d6;
+  --amber:#92400e; --amber-accent:#d97706; --amber-bg:#fef3c7; --amber-line:#fcd34d;
+  --rose:#9f1239; --rose-bg:#fff1f2;
+  --green:#166534;
+  --radius:14px; --radius-sm:9px;
+  --shadow:0 1px 3px rgba(0,0,0,.06),0 8px 24px rgba(0,0,0,.06);
+}
+@media (prefers-color-scheme: dark){
+  :root{
+    --bg:#0e1216; --bg2:#161c22; --bg3:#1c242c;
+    --ink:#e8ecef; --ink2:#c2cbd3; --muted:#8a97a3;
+    --line:#2a343e; --line2:#3a4753;
+    --teal:#2dd4bf; --teal-bg:#0f2e2a; --teal-line:#155e52;
+    --slate:#94a3b8; --slate-bg:#1e293b; --slate-line:#334155;
+    --amber:#fbbf24; --amber-accent:#f59e0b; --amber-bg:#2a1f08; --amber-line:#78350f;
+    --rose:#fda4af; --rose-bg:#2a1016;
+    --shadow:0 1px 3px rgba(0,0,0,.4),0 8px 24px rgba(0,0,0,.35);
+  }
+}
+*{box-sizing:border-box}
+html{scroll-behavior:smooth}
+body{margin:0;background:var(--bg);color:var(--ink);font-family:"IBM Plex Sans",system-ui,sans-serif;line-height:1.6;-webkit-font-smoothing:antialiased}
+a{color:var(--teal);text-decoration-color:color-mix(in srgb,var(--teal) 40%,transparent)}
+code,kbd{font-family:"IBM Plex Mono",monospace;font-size:.86em;background:var(--bg3);padding:.12em .38em;border-radius:5px;border:1px solid var(--line)}
+pre{font-family:"IBM Plex Mono",monospace;font-size:.82rem;line-height:1.55;background:#0f172a;color:#e2e8f0;padding:18px 20px;border-radius:12px;overflow:auto}
+@media (prefers-color-scheme: dark){pre{background:#0a0f16;border:1px solid var(--line)}}
+pre .c{color:#94a3b8} pre .k{color:#7dd3fc} pre .s{color:#fde68a} pre .fn{color:#86efac}
+
+.wrap{max-width:1120px;margin:0 auto;padding:0 20px}
+@media(max-width:600px){.wrap{padding:0 16px}}
+
+/* NAV */
+.topnav{position:sticky;top:0;z-index:20;background:color-mix(in srgb,var(--bg) 88%,transparent);backdrop-filter:blur(10px);border-bottom:1px solid var(--line)}
+.topnav-inner{max-width:1120px;margin:0 auto;padding:0 20px;display:flex;align-items:center;gap:18px;overflow-x:auto;scrollbar-width:none}
+.topnav-inner::-webkit-scrollbar{display:none}
+.topnav a{white-space:nowrap;font-size:.83rem;font-weight:500;color:var(--ink2);text-decoration:none;padding:13px 2px;border-bottom:2px solid transparent}
+.topnav a:hover{color:var(--ink);border-bottom-color:var(--teal)}
+.topnav .brand{font-weight:700;color:var(--ink);font-size:.9rem;letter-spacing:-.01em}
+.topnav .brand span{color:var(--teal)}
+
+/* HERO */
+.hero{padding:52px 0 8px}
+.eyebrow{display:inline-flex;align-items:center;gap:8px;font-family:"IBM Plex Mono",monospace;font-size:.72rem;letter-spacing:.12em;text-transform:uppercase;color:var(--teal);border:1px solid var(--teal-line);background:var(--teal-bg);padding:6px 11px;border-radius:999px}
+.eyebrow i{width:7px;height:7px;border-radius:50%;background:var(--teal);display:inline-block}
+.hero h1{font-family:"Newsreader",serif;font-size:clamp(2.4rem,6vw,4.3rem);line-height:.98;letter-spacing:-.02em;margin:18px 0 16px;font-weight:700;max-width:820px}
+.hero h1 em{font-style:italic;color:var(--teal)}
+.hero p.lede{font-size:1.13rem;line-height:1.65;color:var(--ink2);max-width:700px;margin:0}
+.hero-meta{display:flex;flex-wrap:wrap;gap:10px;margin-top:22px}
+.pill{font-size:.82rem;padding:7px 12px;border-radius:999px;border:1px solid var(--line);background:var(--bg2);color:var(--ink2)}
+.pill strong{color:var(--ink)}
+.hero-diagram{margin-top:30px;background:var(--bg2);border:1px solid var(--line);border-radius:18px;padding:22px;box-shadow:var(--shadow)}
+.hero-diagram-label{font-family:"IBM Plex Mono",monospace;font-size:.7rem;letter-spacing:.1em;text-transform:uppercase;color:var(--muted);margin-bottom:14px;display:flex;justify-content:space-between;flex-wrap:wrap;gap:8px}
+
+/* flow nodes */
+.flow{display:flex;align-items:stretch;gap:0;flex-wrap:wrap}
+.fnode{flex:1;min-width:130px;border:1.5px solid var(--line);border-radius:12px;padding:14px 14px 12px;background:var(--bg);position:relative}
+.fnode.teal{border-color:var(--teal-line);background:var(--teal-bg)}
+.fnode.amber{border-color:var(--amber-line);background:var(--amber-bg)}
+.fnode.slate{border-color:var(--slate-line);background:var(--slate-bg)}
+.fnode h4{margin:0 0 4px;font-size:.88rem;line-height:1.3}
+.fnode p{margin:0;font-size:.8rem;line-height:1.5;color:var(--ink2)}
+.fnode .tag{font-family:"IBM Plex Mono",monospace;font-size:.65rem;letter-spacing:.08em;text-transform:uppercase;opacity:.75}
+.farrow{display:flex;align-items:center;justify-content:center;padding:0 4px;color:var(--muted);font-size:1.1rem;flex:0 0 22px}
+@media(max-width:760px){.flow{flex-direction:column}.farrow{transform:rotate(90deg);padding:4px 0;margin:0 auto}}
+
+/* STATS */
+.stats{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin:22px 0 0}
+@media(max-width:760px){.stats{grid-template-columns:1fr 1fr}}
+.stat{background:var(--bg2);border:1px solid var(--line);border-radius:12px;padding:16px}
+.stat b{font-size:1.55rem;line-height:1;display:block;letter-spacing:-.02em}
+.stat span{font-size:.82rem;color:var(--muted);line-height:1.4;display:block;margin-top:6px}
+
+/* SECTIONS */
+section{padding:52px 0 8px}
+.sec-head{max-width:720px;margin-bottom:22px}
+.sec-head h2{font-family:"Newsreader",serif;font-size:clamp(1.7rem,3.5vw,2.3rem);line-height:1.05;letter-spacing:-.02em;margin:8px 0 10px}
+.sec-head p{color:var(--ink2);margin:0;font-size:1rem;line-height:1.65}
+.kicker{font-family:"IBM Plex Mono",monospace;font-size:.7rem;letter-spacing:.13em;text-transform:uppercase;color:var(--teal);font-weight:600}
+.card{background:var(--bg2);border:1px solid var(--line);border-radius:var(--radius);padding:22px;box-shadow:var(--shadow)}
+.card h3{margin:0 0 8px;font-size:1rem}
+.card p{color:var(--ink2);font-size:.92rem;margin:0}
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+.grid3{display:grid;grid-template-columns:repeat(3,1fr);gap:14px}
+@media(max-width:820px){.grid2,.grid3{grid-template-columns:1fr}}
+
+/* LAYERS */
+.layers{display:flex;flex-direction:column;gap:14px}
+.layer{border-radius:16px;padding:0;overflow:hidden;border:1.5px solid var(--line);background:var(--bg2);box-shadow:var(--shadow)}
+.layer-head{display:flex;flex-wrap:wrap;gap:12px;align-items:flex-start;justify-content:space-between;padding:18px 20px 0}
+.layer-num{font-family:"IBM Plex Mono",monospace;font-size:.72rem;letter-spacing:.1em;text-transform:uppercase;font-weight:600;padding:5px 9px;border-radius:999px}
+.layer h3{margin:6px 0 4px;font-size:1.25rem;letter-spacing:-.01em}
+.layer h3 span{font-weight:400;color:var(--muted);font-size:.95rem}
+.layer p.desc{color:var(--ink2);font-size:.92rem;margin:0;max-width:640px}
+.layer-body{padding:16px 20px 20px;display:grid;grid-template-columns:1.3fr .7fr;gap:16px}
+@media(max-width:760px){.layer-body{grid-template-columns:1fr}}
+.chips{display:flex;flex-wrap:wrap;gap:7px}
+.chip{font-family:"IBM Plex Mono",monospace;font-size:.75rem;padding:6px 9px;border-radius:7px;background:var(--bg);border:1px solid var(--line);color:var(--ink2)}
+.layer.l1{border-color:var(--teal-line)} .layer.l1 .layer-num{background:var(--teal-bg);color:var(--teal);border:1px solid var(--teal-line)}
+.layer.l2{border-color:var(--slate-line)} .layer.l2 .layer-num{background:var(--slate-bg);color:var(--slate);border:1px solid var(--slate-line)}
+.layer.l3{border-color:var(--amber-line)} .layer.l3 .layer-num{background:var(--amber-bg);color:var(--amber);border:1px solid var(--amber-line)}
+.does{font-size:.86rem;line-height:1.6;color:var(--ink2);background:var(--bg);border:1px solid var(--line);border-radius:10px;padding:12px 14px}
+.does strong{color:var(--ink);display:block;font-size:.78rem;letter-spacing:.06em;text-transform:uppercase;margin-bottom:6px}
+.does ul{margin:0;padding-left:16px} .does li{margin:3px 0}
+.arrow-down{text-align:center;color:var(--muted);font-size:.85rem;line-height:1;padding:2px 0}
+.arrow-down span{font-family:"IBM Plex Mono",monospace;font-size:.72rem;background:var(--bg2);border:1px solid var(--line);padding:4px 8px;border-radius:999px}
+
+/* LEGEND */
+.legend{display:flex;flex-wrap:wrap;gap:8px;margin:14px 0 0}
+.leg{display:inline-flex;align-items:center;gap:7px;font-size:.8rem;padding:6px 10px;border-radius:999px;border:1px solid var(--line);background:var(--bg2)}
+.dot{width:10px;height:10px;border-radius:50%;flex-shrink:0}
+.dot.teal{background:var(--teal)} .dot.slate{background:#64748b} .dot.amber{background:var(--amber-accent)} .dot.rose{background:#e11d48}
+
+/* STEPPER */
+.stepper{display:grid;grid-template-columns:220px 1fr;gap:0;border:1px solid var(--line);border-radius:16px;overflow:hidden;background:var(--bg2);box-shadow:var(--shadow)}
+@media(max-width:760px){.stepper{grid-template-columns:1fr}}
+.step-list{display:flex;flex-direction:column;background:var(--bg3);border-right:1px solid var(--line)}
+@media(max-width:760px){.step-list{flex-direction:row;overflow-x:auto;border-right:none;border-bottom:1px solid var(--line)}}
+.step-btn{appearance:none;border:none;background:transparent;text-align:left;padding:14px 16px;cursor:pointer;font-family:inherit;border-bottom:1px solid var(--line);min-height:52px}
+@media(max-width:760px){.step-btn{white-space:nowrap;border-bottom:none;border-right:1px solid var(--line)}}
+.step-btn:last-child{border-bottom:none}
+.step-btn small{font-family:"IBM Plex Mono",monospace;font-size:.68rem;letter-spacing:.08em;text-transform:uppercase;color:var(--muted);display:block}
+.step-btn strong{font-size:.9rem;color:var(--ink2)}
+.step-btn.active{background:var(--bg2)} .step-btn.active strong{color:var(--ink)} .step-btn.active small{color:var(--teal)}
+.step-panel{padding:22px}
+.step-panel h3{margin:0 0 8px;font-size:1.15rem}
+.step-panel p{color:var(--ink2);margin:0 0 12px;font-size:.94rem;line-height:1.65}
+.step-panel .where{font-family:"IBM Plex Mono",monospace;font-size:.76rem;background:var(--bg);border:1px solid var(--line);border-radius:8px;padding:10px 12px;color:var(--ink2);line-height:1.6}
+.step-panel .where b{color:var(--ink)}
+
+/* TABLE */
+.tbl-wrap{overflow:auto;border:1px solid var(--line);border-radius:14px;background:var(--bg2);box-shadow:var(--shadow)}
+table{width:100%;border-collapse:collapse;font-size:.9rem;min-width:640px}
+th{text-align:left;font-size:.72rem;letter-spacing:.08em;text-transform:uppercase;color:var(--muted);padding:12px 14px;border-bottom:1px solid var(--line);background:var(--bg3)}
+td{padding:13px 14px;border-bottom:1px solid var(--line);vertical-align:top;color:var(--ink2);line-height:1.55}
+td:first-child{color:var(--ink);font-weight:600;white-space:nowrap}
+tr:last-child td{border-bottom:none}
+.badge{display:inline-flex;padding:3px 8px;border-radius:999px;font-size:.72rem;font-weight:600;letter-spacing:.02em;white-space:nowrap}
+.badge.portable{background:var(--teal-bg);color:var(--teal);border:1px solid var(--teal-line)}
+.badge.host{background:var(--slate-bg);color:var(--slate);border:1px solid var(--slate-line)}
+.badge.muse{background:var(--amber-bg);color:var(--amber);border:1px solid var(--amber-line)}
+.badge.human{background:var(--rose-bg);color:var(--rose);border:1px solid #fecdd3}
+
+/* TABS */
+.tabs{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:14px}
+.tab-btn{appearance:none;border:1px solid var(--line);background:var(--bg2);padding:10px 16px;border-radius:999px;font-family:inherit;font-weight:600;font-size:.88rem;cursor:pointer;min-height:44px;color:var(--ink2)}
+.tab-btn.active{border-color:var(--ink);color:var(--ink);background:var(--bg3)}
+.tab-pane{display:none} .tab-pane.active{display:block}
+
+/* DIAGRAM SVG */
+.diagram{background:var(--bg2);border:1px solid var(--line);border-radius:16px;padding:18px;box-shadow:var(--shadow);overflow:hidden}
+.diagram svg{width:100%;height:auto;display:block}
+.caption{font-size:.83rem;color:var(--muted);margin-top:10px;line-height:1.55;text-align:center}
+
+/* STATE */
+.state-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:10px}
+@media(max-width:820px){.state-grid{grid-template-columns:1fr 1fr}}
+@media(max-width:520px){.state-grid{grid-template-columns:1fr}}
+.state-item{border:1px solid var(--line);border-radius:10px;padding:13px 14px;background:var(--bg2)}
+.state-item code{background:none;border:none;padding:0;font-weight:600;color:var(--ink);display:block;margin-bottom:4px;font-size:.82rem}
+.state-item p{margin:0;font-size:.82rem;color:var(--ink2);line-height:1.5}
+
+/* CALLOUT */
+.callout{border-radius:14px;padding:18px 20px;border:1px solid var(--amber-line);background:var(--amber-bg)}
+.callout.teal{border-color:var(--teal-line);background:var(--teal-bg)}
+.callout h3{margin:0 0 6px;font-size:.95rem}
+.callout p{margin:0;color:var(--ink2);font-size:.92rem;line-height:1.65}
+.callout p+p{margin-top:8px}
+
+/* FOOTER */
+footer{margin-top:56px;border-top:1px solid var(--line);padding:28px 0 40px;color:var(--muted);font-size:.86rem;line-height:1.65}
+footer a{color:var(--ink2)}
+.checklist{list-style:none;padding:0;margin:0;display:grid;gap:8px}
+.checklist li{display:flex;gap:10px;align-items:flex-start;font-size:.92rem;color:var(--ink2);line-height:1.55}
+.checklist li::before{content:"✓";width:22px;height:22px;flex-shrink:0;border-radius:50%;background:var(--teal-bg);color:var(--teal);border:1px solid var(--teal-line);display:grid;place-items:center;font-size:.75rem;font-weight:700;margin-top:1px}
+.xlist li::before{content:"—";background:var(--bg3);color:var(--muted);border-color:var(--line)}
+</style>
+</head>
+<body>
+
+<nav class="topnav" aria-label="Sections">
+  <div class="topnav-inner">
+    <a class="brand" href="#top">Agent<span>TS</span></a>
+    <a href="#idea">The idea</a>
+    <a href="#layers">Three layers</a>
+    <a href="#run">How a run executes</a>
+    <a href="#traps">Traps</a>
+    <a href="#pool">Worker pool</a>
+    <a href="#scheduling">Scheduling</a>
+    <a href="#state">State on disk</a>
+    <a href="#portability">Muse vs. any harness</a>
+    <a href="#limits">Limits</a>
+  </div>
+</nav>
+
+<div class="wrap" id="top">
+
+  <!-- HERO -->
+  <header class="hero">
+    <div class="eyebrow"><i></i> Architecture · Living document · Nov 2026 · BRA-43 → BRA-158</div>
+    <h1>Workflows that can <em>pause for the real world</em> — and resume exactly.</h1>
+    <p class="lede">AgentTS is durable execution for agent workflows, in TypeScript. A workflow is an ordinary function. When it needs a worker, a shell command, a human answer, or a wait, it calls a <strong>trap</strong> — and suspends into a snapshot on disk. Hours later, or after a crash, that snapshot plus the journal make the run resumable exactly where it left off: a completed, journaled trap is re-answered from its record, never re-executed. (One deliberate exception to automatic recovery: a run caught mid-drive by a VM replacement sits in <code>running</code> until the coordinator re-drives it — see §7.)</p>
+    <p style="font-size:.92rem;color:var(--muted);margin-top:14px;max-width:700px"><strong style="color:var(--ink2)">Audience:</strong> a developer evaluating or operating AgentTS. The teal parts assume no Muse knowledge; the amber parts assume this deployment. <strong style="color:var(--ink2)">Prerequisites:</strong> comfort reading TypeScript — no prior knowledge of AgentTS or QuickJS internals is needed.</p>
+    <div class="hero-meta">
+      <span class="pill"><strong>Core:</strong> DurableTS (C, on QuickJS)</span>
+      <span class="pill"><strong>Host:</strong> TypeScript on Bun</span>
+      <span class="pill"><strong>Status:</strong> Public MVP · Host v0</span>
+      <span class="pill"><strong>Source of truth:</strong> the journal</span>
+    </div>
+
+    <div class="hero-diagram" aria-label="Core idea diagram">
+      <div class="hero-diagram-label"><span>Fig. 1 — The whole idea in one line</span><span>snapshot + journal = resumable</span></div>
+      <div class="flow">
+        <div class="fnode teal"><div class="tag">Workflow function</div><h4>Ordinary TypeScript</h4><p><code>export default function …</code><br>One JSON input in, one JSON output out.</p></div>
+        <div class="farrow">→</div>
+        <div class="fnode"><div class="tag">Trap</div><h4><code>job() · exec() · gate() · sleep() · decide()</code></h4><p>The function asks the outside world for something and stops.</p></div>
+        <div class="farrow">→</div>
+        <div class="fnode slate"><div class="tag">Suspend</div><h4>Snapshot blob on disk</h4><p>Entire run state serialised. Process can die. Machine can be replaced.</p></div>
+        <div class="farrow">→</div>
+        <div class="fnode amber"><div class="tag">Outside world</div><h4>Host / worker / human answers</h4><p>Adapter does the work. The journal records it — so on re-drive the answer is re-delivered, not re-done.</p></div>
+        <div class="farrow">→</div>
+        <div class="fnode teal"><div class="tag">Resume</div><h4>Continues at the next line</h4><p>Blob + recorded answer. No replay of completed traps.</p></div>
+      </div>
+      <div class="legend">
+        <span class="leg"><span class="dot teal"></span> Portable — any harness</span>
+        <span class="leg"><span class="dot slate"></span> Host — this implementation, concept travels</span>
+        <span class="leg"><span class="dot amber"></span> Muse-specific — swappable</span>
+        <span class="leg"><span class="dot rose"></span> Human in the loop</span>
+      </div>
+    </div>
+
+    <div class="stats">
+      <div class="stat"><b>3 layers</b><span>Core knows nothing about jobs. Host knows nothing about Muse. Only the adapter knows the environment.</span></div>
+      <div class="stat"><b>1 dispatch point</b><span><code>trap(type, arg)</code> — every outside-world need goes through it, routed by string.</span></div>
+      <div class="stat"><b>50 rounds max</b><span>Drive cap per uninterrupted drive. A guard against infinite trap loops, not a workflow limit.</span></div>
+      <div class="stat"><b>72 sections</b><span>Test-suite chunking: 37 in the fast tier, slowest 125 s in the latest run — <code>run.sh</code> resumes per section, so a VM replacement mid-suite costs at most the section in flight. Workflow runs resume from blobs the same way — with the coordinator caveat in §7.</span></div>
+    </div>
+  </header>
+
+  <!-- IDEA -->
+  <section id="idea">
+    <div class="sec-head">
+      <div class="kicker">01 — Why this exists</div>
+      <h2>Agent work doesn't fit in one process lifetime</h2>
+      <p>A useful agent workflow waits: for a subagent to finish research, for a human to approve a gate, for a cron time, for a test suite. If that wait lives only in memory, any crash, deploy, or VM replacement loses the run. AgentTS moves the wait to disk.</p>
+    </div>
+    <div class="grid3">
+      <div class="card"><h3>❶ The function is the workflow</h3><p>No DAG file, no state-machine JSON. You write a normal TypeScript function with branches, loops, and <code>try/catch</code>. The types <em>are</em> the contracts — the host extracts JSON Schema from them on first run. There are no schemas in author code.</p></div>
+      <div class="card"><h3>❷ Every pause is durable</h3><p>A trap suspends the QuickJS heap into a blob. The host stores the blob (SHA-256 verified, keyframe + delta chain), appends to the run's JSONL journal, and only then dispatches the work. Resume rehydrates real <code>Error</code>s, not strings.</p></div>
+      <div class="card"><h3>❸ The journal decides races</h3><p>Cancel vs. complete, crash vs. failure, dispatched vs. never-dispatched — all decided by journal order. After a crash the host checks the journal before re-dispatching, so a completed job is re-answered from its record, never re-executed.</p></div>
+    </div>
+    <div style="height:14px"></div>
+    <div class="card">
+      <h3>A minimal workflow</h3>
+      <p style="margin-bottom:12px">This is the actual quickstart shape — <code>workflows/library/hello.ts</code> plus the trap wrappers every workflow uses:</p>
+      <pre><span class="k">import</span> { sleep, job, gate, decide, all } <span class="k">from</span> <span class="s">"../src/agentts"</span>;
+
+<span class="k">export interface</span> ReviewInput { draft: string; rubric: Rubric }
+<span class="k">export interface</span> ReviewResult { verdict: string; score: number }
+
+<span class="k">export default function</span> <span class="fn">review</span>(input: ReviewInput): ReviewResult {
+  <span class="c">// fan out: two judges in parallel — all() forks, each branch gets its own blob + journal</span>
+  <span class="k">const</span> [a, b] = all([
+    () =&gt; job&lt;JudgeIn, JudgeOut&gt;({ spec: <span class="s">"judge"</span>, input: { draft: input.draft } }),
+    () =&gt; job&lt;JudgeIn, JudgeOut&gt;({ spec: <span class="s">"judge"</span>, input: { draft: input.draft } }),
+  ]);
+  <span class="k">const</span> d = decide&lt;Decision&gt;({ question: <span class="s">"mean score vs threshold…"</span> });
+  <span class="k">if</span> (d.choice === <span class="s">"needs-human"</span>) gate({ question: <span class="s">"Approve this draft?"</span> }); <span class="c">// ← can hold for days</span>
+  sleep({ ms: 100 });
+  <span class="k">return</span> { verdict: d.choice, score: (a.value.score + b.value.score) / 2 };
+}</pre>
+      <p style="margin-top:10px;font-size:.85rem;color:var(--muted)">Rules that make this work: everything crossing a trap must be clean JSON (checked by <code>toJsonValue()</code> — <code>Date</code> crosses as its ISO string, functions / Maps / cycles throw synchronously at the call site and never dispatch). The entry must be a plain sync function called from global code — module frames cannot suspend, so the host bundles driver + workflow into one global script and refuses any bundle that still contains <code>import</code>/<code>export</code>.</p>
+    </div>
+  </section>
+
+  <!-- LAYERS -->
+  <section id="layers">
+    <div class="sec-head">
+      <div class="kicker">02 — Architecture</div>
+      <h2>Three layers. Nothing skips a layer.</h2>
+      <p>The dependency rule is enforced, not conventional: <code>agentts check --layering</code> runs in the first-run gate and in <code>run.sh</code> on every full run. Layer 1 never talks to Layer 3. Layer 3 never reaches into Layer 1. The swap test proves it — the same workflows run byte-identically under the reference, mock, and real hosts.</p>
+    </div>
+
+    <div class="layers">
+      <!-- L1 -->
+      <article class="layer l1">
+        <div class="layer-head">
+          <div><span class="layer-num">Layer 1 · Portable core</span><h3>DurableTS <span>— C, on patched QuickJS (dquickts) · <code>packages/durablets/</code></span></h3><p class="desc">Snapshot-based durable execution and nothing else. It routes traps by type string and waits for an answer. It does not know what a job, gate, judge, or workflow <em>is</em>.</p></div>
+          <span class="badge portable">Works in any harness</span>
+        </div>
+        <div class="layer-body">
+          <div class="chips"><span class="chip">trap(type, arg)</span><span class="chip">all / any / race</span><span class="chip">suspend → blob</span><span class="chip">resume(blob, value | throw)</span><span class="chip">trapId = runId/trap-N</span><span class="chip">cancellation (sticky, deepest-first)</span><span class="chip">error rehydration</span><span class="chip">JSON boundary check in C</span><span class="chip">entry guard __agentts_begin()</span></div>
+          <div class="does"><strong>Does not do</strong><ul><li>No journal file — emits <code>[durablets] {json}</code> lines on stderr for the host to record</li><li>Never chooses or lists blob paths</li><li>No scheduling, no trap interpretation</li><li>No daemon — spawned once per run-slice</li></ul></div>
+        </div>
+      </article>
+      <div class="arrow-down"><span>↓ &nbsp;blob + JSON over process spawn · exit 0 done · 1 error · 2 suspended at trap · 3 at combinator&nbsp; ↓</span></div>
+      <!-- L2 -->
+      <article class="layer l2">
+        <div class="layer-head">
+          <div><span class="layer-num">Layer 2 · Host</span><h3>AgentTS Host <span>— TypeScript on Bun · <code>apps/agentts/src/host.ts</code></span></h3><p class="desc">The environment-independent brain: interprets traps, owns the journal, queue, clock, and drive loop, freezes workflow source, and validates every input and output against the extracted schemas.</p></div>
+          <span class="badge host">Concept portable · this code is one instance</span>
+        </div>
+        <div class="layer-body">
+          <div class="chips"><span class="chip">submit / queue / drive / result</span><span class="chip">journal (JSONL, source of truth)</span><span class="chip">frozen closures (content-addressed)</span><span class="chip">first-run gate: tsc 5.9.3 + extractor + M2 checker</span><span class="chip">virtual / real clock</span><span class="chip">driver lock + queue repair</span><span class="chip">cost model + profiler</span><span class="chip">delivery outbox + watchdog</span><span class="chip">two-layer scheduling</span></div>
+          <div class="does"><strong>Owns — not the adapter</strong><ul><li><code>sleep</code> / <code>cron</code> / clock (host state, journaled as <code>clock-advance</code>)</li><li>Gate hold queue — answers live on the host</li><li>Format-identity check on resume (BRA-132 — blob-header signature + pin + native names; logic-only engine changes resume)</li><li>Atomic writes + corruption quarantine</li></ul></div>
+        </div>
+      </article>
+      <div class="arrow-down"><span>↓ &nbsp;Adapter interface: <code>answer(type, arg, ctx) → {value} | {throw} | HOLD</code> · answers job / exec / gate / decide only&nbsp; ↓</span></div>
+      <!-- L3 -->
+      <article class="layer l3">
+        <div class="layer-head">
+          <div><span class="layer-num">Layer 3 · Environment adapter</span><h3>Plugins <span>— one folder per environment · <code>apps/agentts/plugins/&lt;name&gt;/</code></span></h3><p class="desc">The <em>only</em> layer that knows about an environment. Swapping it touches no workflow, no host logic, and no core code. Every adapter is loaded the same way — <code>plugins/&lt;name&gt;/src/adapter.ts</code> exporting <code>createAdapter()</code>. There is no built-in fallback; an unknown name is a loud error.</p></div>
+          <span class="badge muse">This is where Muse lives</span>
+        </div>
+        <div class="layer-body">
+          <div>
+            <div class="tbl-wrap" style="box-shadow:none">
+              <table style="min-width:0"><thead><tr><th>Adapter</th><th>What it actually does</th></tr></thead><tbody>
+                <tr><td><code>mock</code></td><td>Canned answers by table. <code>exec echo hi</code> and <code>cat &lt;file&gt;</code> are real; other execs are marked <code>canned: true</code> in the journal (BRA-120) so a simulated success can never masquerade as a real one. Default for scratch state dirs.</td></tr>
+                <tr><td><code>direct</code></td><td>Real execution on this machine: one Bun worker process per <code>job</code>, real <code>exec</code>, gates held for a human, local decision model for <code>decide</code>. Default on the production state dir — a forgotten flag must never silently fake a production run.</td></tr>
+                <tr><td><code>muse</code></td><td>Enqueues each <code>job</code> on the worker-pool queue (below) and blocks until a Muse worker completes it. Auto-starts the pool server if none answers.</td></tr>
+                <tr><td><code>briefing</code></td><td>Worked example plugin: DirectAdapter with the daily-briefing workers registered.</td></tr>
+              </tbody></table>
+            </div>
+          </div>
+          <div class="does"><strong>The seam, in full</strong><pre style="margin:8px 0 0;font-size:.75rem;padding:12px">interface Adapter {
+  readonly name: string;
+  answer(type, arg, ctx):
+    TrapAnswer | typeof HOLD
+}
+// TrapAnswer = {value, worker?, tokens?}
+//             | {throw, worker?, tokens?}
+// v0: answer() is synchronous.
+// Pool adapters block inside it
+// (long-poll). Async is not built.</pre></div>
+        </div>
+      </article>
+    </div>
+
+    <div style="height:14px"></div>
+    <div class="callout teal"><h3>Reading the colours on this page</h3><p><strong>Teal = the idea travels anywhere.</strong> The core, the trap/blob protocol, the <code>agentts</code> module, and the JSON boundary have no Muse knowledge in them at all — the layering lint forbids it. <strong>Amber = Muse-shaped.</strong> Everything amber assumes Muse's subagent model, this VM, and Meroki as coordinator. Another harness keeps teal, re-implements slate in its own idiom, and replaces amber wholesale. §8 spells out the swap, piece by piece.</p></div>
+  </section>
+
+  <!-- RUN LIFECYCLE -->
+  <section id="run">
+    <div class="sec-head">
+      <div class="kicker">03 — Execution</div>
+      <h2>How and where a run executes</h2>
+      <p>There is exactly one way to start a run — there is no in-process drive mode. <code>run --wait</code> is not a second path; it is submit → queue run → result. Tap each stage.</p>
+    </div>
+
+    <div class="stepper" role="tablist" aria-label="Run lifecycle">
+      <div class="step-list">
+        <button class="step-btn active" data-step="0" role="tab"><small>Stage 1</small><strong>Submit</strong></button>
+        <button class="step-btn" data-step="1" role="tab"><small>Stage 2</small><strong>Freeze + gate</strong></button>
+        <button class="step-btn" data-step="2" role="tab"><small>Stage 3</small><strong>Queue</strong></button>
+        <button class="step-btn" data-step="3" role="tab"><small>Stage 4</small><strong>Drive (the loop)</strong></button>
+        <button class="step-btn" data-step="4" role="tab"><small>Stage 5</small><strong>Slice in the C host</strong></button>
+        <button class="step-btn" data-step="5" role="tab"><small>Stage 6</small><strong>Trap dispatch</strong></button>
+        <button class="step-btn" data-step="6" role="tab"><small>Stage 7</small><strong>Result</strong></button>
+      </div>
+      <div class="step-panel" id="stepPanel"></div>
+    </div>
+
+    <div style="height:14px"></div>
+    <div class="grid2">
+      <div class="card"><h3>Where it runs — physically</h3><p>Everything is on one VM today. The host is a Bun process spawned per CLI invocation. The C host is spawned <strong>once per run-slice</strong> (<code>spawnSync</code>, blob + JSON over stdio) — there is no long-lived daemon. Pool jobs run either as Bun worker processes on the same VM or as Muse subagent sessions. State lives under a state dir: production is <code>~/workspace/agentts-state/</code>, tests always use scratch dirs. That single-VM shape is a Muse-harness choice, not a core requirement — the blob protocol doesn't care where the next slice runs, as long as it runs an engine with the same snapshot format identity (BRA-132 — a logic-only engine change resumes).</p></div>
+      <div class="card"><h3>Sub-workflows: <code>run()</code></h3><p>A workflow can call another workflow with <code>run&lt;In, Out&gt;({ workflow, input })</code> (BRA-105). The parent suspends on the run trap; the child gets its own runId (<code>&lt;trapId&gt;/child</code>), its own journal, frozen closure, and checkpoint chain — pinned inside the parent's frozen copy at parent submit, so editing the child afterwards changes nothing. A child failure throws at the parent's call site with the child's error name and message preserved; a child held at a gate holds the parent too.</p></div>
+    </div>
+  </section>
+
+  <!-- TRAPS -->
+  <section id="traps">
+    <div class="sec-head">
+      <div class="kicker">04 — Component view</div>
+      <h2>One trap, end to end</h2>
+      <p>The trap-dispatch split (BRA-75) is the detail that makes crash recovery exact: the host journals <em>intent</em> before dispatch and the <em>answer</em> after, so a re-drive can tell “dispatched” from “never dispatched.”</p>
+    </div>
+    <div class="diagram">
+      <svg viewBox="0 0 980 300" role="img" aria-label="Trap sequence diagram">
+        <defs><marker id="arr" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#64748b"/></marker></defs>
+        <!-- boxes -->
+        <g font-family="IBM Plex Sans, sans-serif" font-size="13">
+          <rect x="10" y="18" width="180" height="52" rx="10" fill="#e6f4f1" stroke="#99d5cc"/><text x="100" y="40" text-anchor="middle" font-weight="700" fill="#0f766e">WORKFLOW</text><text x="100" y="58" text-anchor="middle" fill="#3a424a" font-size="11">job({spec, input})</text>
+          <rect x="270" y="18" width="180" height="52" rx="10" fill="#eef1f5" stroke="#b8c4d6"/><text x="360" y="40" text-anchor="middle" font-weight="700" fill="#334155">C CORE</text><text x="360" y="58" text-anchor="middle" fill="#3a424a" font-size="11">trap() suspends → blob</text>
+          <rect x="530" y="18" width="180" height="52" rx="10" fill="#eef1f5" stroke="#b8c4d6"/><text x="620" y="40" text-anchor="middle" font-weight="700" fill="#334155">HOST</text><text x="620" y="58" text-anchor="middle" fill="#3a424a" font-size="11">journal + dispatch</text>
+          <rect x="790" y="18" width="180" height="52" rx="10" fill="#fef3c7" stroke="#fcd34d"/><text x="880" y="40" text-anchor="middle" font-weight="700" fill="#92400e">ADAPTER</text><text x="880" y="58" text-anchor="middle" fill="#3a424a" font-size="11">job / exec / gate / decide</text>
+          <!-- vertical lines -->
+          <line x1="100" y1="70" x2="100" y2="282" stroke="#c9c2b2" stroke-dasharray="4 4"/><line x1="360" y1="70" x2="360" y2="282" stroke="#c9c2b2" stroke-dasharray="4 4"/><line x1="620" y1="70" x2="620" y2="282" stroke="#c9c2b2" stroke-dasharray="4 4"/><line x1="880" y1="70" x2="880" y2="282" stroke="#c9c2b2" stroke-dasharray="4 4"/>
+          <!-- steps -->
+          <g font-size="11.5" fill="#161a1e">
+            <line x1="100" y1="98" x2="360" y2="98" stroke="#64748b" marker-end="url(#arr)"/><text x="230" y="90" text-anchor="middle">1 · trap("job", arg) — JSON-checked first</text>
+            <line x1="360" y1="128" x2="620" y2="128" stroke="#64748b" marker-end="url(#arr)"/><text x="490" y="120" text-anchor="middle">2 · exit 2 + [durablets] trap event on stderr</text>
+            <line x1="620" y1="158" x2="880" y2="158" stroke="#64748b" marker-end="url(#arr)"/><text x="750" y="150" text-anchor="middle">3 · journal trap-dispatch → adapter.answer()</text>
+            <line x1="880" y1="188" x2="620" y2="188" stroke="#64748b" marker-end="url(#arr)"/><text x="750" y="180" text-anchor="middle">4 · {value} or {throw} (+ worker, wallMs)</text>
+            <line x1="620" y1="218" x2="360" y2="218" stroke="#64748b" marker-end="url(#arr)"/><text x="490" y="210" text-anchor="middle">5 · journal trap-dispatched → resume blob with answer</text>
+            <line x1="360" y1="248" x2="100" y2="248" stroke="#64748b" marker-end="url(#arr)"/><text x="230" y="240" text-anchor="middle">6 · workflow continues at the next line</text>
+          </g>
+          <rect x="530" y="262" width="440" height="26" rx="7" fill="#fff1f2" stroke="#fecdd3"/><text x="750" y="279" text-anchor="middle" font-size="11" fill="#9f1239">Crash between 3 and 5? Journal check re-delivers the recorded answer — never re-executes. (Exec is the one honest exception: its output was lost, so it re-runs, journaled as redispatched: true.)</text>
+        </g>
+      </svg>
+      <p class="caption">Fig. 2 — A single trap's round trip. <code>sleep</code> / <code>cron</code> skip the adapter entirely: the host answers them itself and journals a <code>clock-advance</code> (virtual clock in tests — a 2-hour sleep costs ~0 ms of wall time; real wall clock in production). A <code>gate</code> answered <code>HOLD</code> suspends the run until <code>deliver-gate</code> arrives — minutes or days later, in a different host process.</p>
+    </div>
+
+    <div style="height:14px"></div>
+    <div class="tbl-wrap">
+      <table>
+        <thead><tr><th>Trap wrapper</th><th>Arg</th><th>Answered by</th><th>Result</th></tr></thead>
+        <tbody>
+          <tr><td><code>job&lt;I, O&gt;</code></td><td><code>{ spec, input }</code> — spec name + typed input; extra params belong <em>inside</em> input</td><td>Adapter → worker process / pool worker</td><td><code>O</code> (call-site type, validated)</td></tr>
+          <tr><td><code>exec</code></td><td><code>{ cmd, args?, cwd? }</code></td><td>Adapter</td><td><code>{ stdout, exitCode, stderr? }</code></td></tr>
+          <tr><td><code>gate</code></td><td><code>{ question, options? }</code></td><td>Adapter or <code>HOLD</code> → human via host</td><td><code>{ answer }</code></td></tr>
+          <tr><td><code>decide&lt;O&gt;</code></td><td><code>{ question, options? }</code></td><td>Adapter / local decision model*</td><td><code>O</code></td></tr>
+          <tr><td><code>sleep</code> / <code>cron</code></td><td><code>{ ms }</code> / <code>{ at }</code> (one-shot ISO time)</td><td><strong>Host only</strong></td><td><code>{ sleptMs }</code> / <code>{ scheduled }</code></td></tr>
+          <tr><td><code>all / any / race</code></td><td>Thunks (+ fail-fast flag on <code>all</code>)</td><td><strong>Core builtins</strong> — fork/join, <code>Promise</code>-like semantics</td><td>Values / <code>Outcome[]</code> / <code>AggregateError</code></td></tr>
+          <tr><td><code>run&lt;I, O&gt;</code></td><td><code>{ workflow, input }</code> — path must be a string literal</td><td>Host (child run)</td><td>Child's validated output</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p style="font-size:.85rem;color:var(--muted);margin-top:10px">* <code>decide</code> is narrow by design: the local model parses machine-readable signals out of the question (mean score vs. threshold, misses, keyword scoring) and falls back to the first option at confidence 0.5. It is not a general reasoner. Anything needing real judgment is a <code>job</code>.</p>
+
+    <div class="grid3" style="margin-top:14px">
+      <div class="card"><h3>Combinators fork for real</h3><p><code>all</code> / <code>any</code> / <code>race</code> fork the snapshot: each branch gets a copy of the blob and its own journal. The parent snapshot is untouched (SHA-256 checked before fork vs. before join); a branch's write to fork-time shared state is discarded. <code>race</code> losers are cancelled; cancellation propagates deepest-first and is sticky.</p></div>
+      <div class="card"><h3>Traps can't hide in callbacks — yet</h3><p>A trap inside 15 probed native-builtin callbacks (e.g. inside <code>Array.map</code>) is refused at first run, naming the callback and the fix — use a plain <code>for</code> loop (BRA-129, option b). The snapshot format has no representation for C builtin loop state, so supporting it would be an engine redesign, not a patch.</p></div>
+      <div class="card"><h3>Call sites travel with the trap</h3><p>Wrappers attach <code>{file, line, column}</code> (bundle coordinates) under a reserved key. The host strips it before dispatch — no adapter ever sees it — and journals it as the trap's <code>site</code>, so the profiler can map every trap back to workflow source via the pinned bundle + source map.</p></div>
+    </div>
+  </section>
+
+  <!-- POOL -->
+  <section id="pool">
+    <div class="sec-head">
+      <div class="kicker">05 — The Muse environment</div>
+      <h2>The worker pool, the tick agent, and three roles</h2>
+      <p>This section is the Muse harness. None of it is in the core or the host's contract — it's what the <code>muse</code> adapter plugs into Layer 3. Another harness would build a different version of this whole section.</p>
+    </div>
+
+    <div class="diagram">
+      <svg viewBox="0 0 980 340" role="img" aria-label="Worker pool diagram">
+        <g font-family="IBM Plex Sans, sans-serif" font-size="12.5">
+          <rect x="10" y="14" width="230" height="86" rx="12" fill="#fff1f2" stroke="#fecdd3"/><text x="125" y="38" text-anchor="middle" font-weight="700" fill="#9f1239">COORDINATOR — Meroki</text><text x="125" y="56" text-anchor="middle" fill="#3a424a" font-size="11">the one named agent</text><text x="125" y="72" text-anchor="middle" fill="#3a424a" font-size="11">admits work · writes workflows</text><text x="125" y="88" text-anchor="middle" fill="#3a424a" font-size="11">answers gates · closes issues</text>
+          <rect x="375" y="14" width="230" height="86" rx="12" fill="#fef3c7" stroke="#fcd34d"/><text x="490" y="38" text-anchor="middle" font-weight="700" fill="#92400e">TICK AGENT</text><text x="490" y="56" text-anchor="middle" fill="#3a424a" font-size="11">a role, not a name · one session</text><text x="490" y="72" text-anchor="middle" fill="#3a424a" font-size="11">drives queue · delivers results</text><text x="490" y="88" text-anchor="middle" fill="#3a424a" font-size="11">escalates; never admits, never flips</text>
+          <rect x="740" y="14" width="230" height="86" rx="12" fill="#eef1f5" stroke="#b8c4d6"/><text x="855" y="38" text-anchor="middle" font-weight="700" fill="#334155">WATCHDOG</text><text x="855" y="56" text-anchor="middle" fill="#3a424a" font-size="11">cron, every 30 min</text><text x="855" y="72" text-anchor="middle" fill="#3a424a" font-size="11">tick dead + work pending?</text><text x="855" y="88" text-anchor="middle" fill="#3a424a" font-size="11">→ restart tick agent (exit 2)</text>
+          <rect x="270" y="150" width="440" height="76" rx="12" fill="#eef1f5" stroke="#b8c4d6"/><text x="490" y="174" text-anchor="middle" font-weight="700" fill="#334155">POOL SERVER — loopback HTTP :18741</text><text x="490" y="192" text-anchor="middle" fill="#3a424a" font-size="11">sole writer of the job store · scheduler + quotas live here</text><text x="490" y="208" text-anchor="middle" fill="#3a424a" font-size="11">POST /enqueue · GET /get-job (long-poll) · POST /complete-job · GET /tick · /health</text>
+          <rect x="10" y="268" width="300" height="58" rx="12" fill="#fef3c7" stroke="#fcd34d"/><text x="160" y="290" text-anchor="middle" font-weight="700" fill="#92400e">WORKER — script mode</text><text x="160" y="308" text-anchor="middle" fill="#3a424a" font-size="11">Bun process · worker-loop.ts · the proof leg</text>
+          <rect x="340" y="268" width="300" height="58" rx="12" fill="#fef3c7" stroke="#fcd34d"/><text x="490" y="290" text-anchor="middle" font-weight="700" fill="#92400e">WORKER — subagent mode</text><text x="490" y="308" text-anchor="middle" fill="#3a424a" font-size="11">Muse subagent · WORKER.md · the true leg</text>
+          <rect x="670" y="268" width="300" height="58" rx="12" fill="#e6f4f1" stroke="#99d5cc"/><text x="820" y="290" text-anchor="middle" font-weight="700" fill="#0f766e">WORKER — any other executor</text><text x="820" y="308" text-anchor="middle" fill="#3a424a" font-size="11">same protocol, different harness → §8</text>
+          <g stroke="#64748b" fill="none"><path d="M240 57 H375" marker-end="url(#arr)"/><path d="M605 57 H740" stroke-dasharray="4 4"/><path d="M490 100 V150" marker-end="url(#arr)"/><path d="M380 226 C300 245 220 250 180 268" marker-end="url(#arr)"/><path d="M490 226 V268" marker-end="url(#arr)"/><path d="M600 226 C680 245 760 250 800 268" marker-end="url(#arr)"/></g>
+          <text x="307" y="48" text-anchor="middle" font-size="10.5" fill="#6b7680">spawns</text>
+          <text x="672" y="48" text-anchor="middle" font-size="10.5" fill="#6b7680">checks</text>
+          <text x="502" y="130" font-size="10.5" fill="#6b7680">/tick long-poll + queue/run</text>
+        </g>
+      </svg>
+      <p class="caption">Fig. 3 — The Muse deployment. One protocol file (<code>worker-protocol.ts</code>) is shared by server, adapter, worker loop, and CLI, so the wire shape cannot drift. Enqueue dedupes on <code>trapId</code> — exactly one job per trap, even after a crash.</p>
+    </div>
+
+    <div style="height:14px"></div>
+    <div class="grid3">
+      <div class="card"><h3>Leases keep dead workers honest</h3><p>A running job holds a lease — by default the cost model's p90 for that spec × 2, clamped to [60 s, 30 min] — max 3 attempts. Heartbeats extend it; at half-lease with no completion the server <em>nudges</em> once (post a status note, keep working). Silence → lease expires → job re-queues. A late completion from a worker that lost its lease is a 409: stop, don't retry.</p></div>
+      <div class="card"><h3>Affinity is a cache, not an address</h3><p>The scheduler prefers the worker that most recently completed a spec — its live session context <em>is</em> the cache. A job waits for its warm worker at most ~2 s before falling back to the oldest waiting job, and affinity goes cold after 30 min. <code>workerId</code> is a self-asserted handle for lease ownership, affinity, and debugging only: there is no registry, no enrolment, no way to address a job <em>to</em> a worker. The model is pull — workers ask, the scheduler picks the best queued job <em>for that worker</em>.</p></div>
+      <div class="card"><h3>Memory lives with the spec</h3><p>What survives a worker is not the worker's memory. Workers post durable learnings per spec (<code>POST /note</code> → <code>notes/&lt;spec&gt;.md</code>); the next worker on that spec — possibly a cold one after a context reset — reads them. Jobspecs themselves are prose files, hash-cached: a worker re-reads a spec only when its SHA-256 changed. File effects return as full contents (1 MB cap) and are <strong>never auto-applied</strong> — the coordinator reviews them.</p></div>
+    </div>
+
+    <div style="height:14px"></div>
+    <div class="callout"><h3>The tick agent's one job: keep the machine churning</h3><p>It long-polls <code>GET /tick</code> (60 s, max 120 s; at most one pending — a second is a 409). On <code>run-submitted</code> it drives the queue; on <code>workflow-completed</code>/<code>failed</code> it records a delivery in the outbox (a failed delivery carries <code>needsAttention: true</code> — that <em>is</em> the escalation); on <code>gate-held</code> it escalates and waits. It heartbeats via <code>/tick-beat</code> before and after long actions. On restart it does a catch-up sweep first — queued runs get driven, undelivered terminals get delivered, held runs get escalated, <code>running</code> runs get escalated as stuck. It <strong>never</strong> flips a <code>running</code> entry back to <code>queued</code> and never uses <code>queue repair --force</code>: re-driving could double-execute a side effect that happened but wasn't journaled yet, so that call belongs to the coordinator, who can confirm the holder is actually dead.</p></div>
+  </section>
+
+  <!-- SCHEDULING -->
+  <section id="scheduling">
+    <div class="sec-head">
+      <div class="kicker">06 — Scheduling</div>
+      <h2>Two layers, because the backlog is not the queue</h2>
+      <p>Both schedulers are pure logic — no I/O, decisions returned as data so the caller can journal them. That purity is what makes them testable and portable.</p>
+    </div>
+    <div class="grid2">
+      <div class="card">
+        <h3>Layer 1 — Admittance <span style="color:var(--muted);font-weight:400">· <code>agentts admit</code></span></h3>
+        <p style="margin-bottom:10px"><em>Which backlog tasks become runs?</em></p>
+        <ul class="checklist">
+          <li>Priority order (Linear 1 urgent → 4 low; absent = medium) under a WIP limit, default 3.</li>
+          <li>Each task maps to a library workflow via <code>--map</code>, <code>--workflow</code>, or a <code>workflow:&lt;name&gt;</code> label. No mapping → skipped as <code>needs-workflow</code>, never admitted to nothing.</li>
+          <li>Waiting ages priority one step per 7 days, capped at two steps.</li>
+          <li>In-flight tasks are never re-admitted; a terminal link frees the slot. <code>admit</code> never executes a run itself.</li>
+          <li>Task↔run links are comments (<code>[agentts]</code> on Linear) or rows in <code>task-runs.json</code> — v0 never changes issue state. Closing issues is the coordinator's job.</li>
+        </ul>
+      </div>
+      <div class="card">
+        <h3>Layer 2 — Dispatch <span style="color:var(--muted);font-weight:400">· pool server, at dequeue time</span></h3>
+        <p style="margin-bottom:10px"><em>Which queued job does this asking worker get?</em></p>
+        <ul class="checklist">
+          <li><strong>Effective priority first</strong> — base priority improved one step per 5 min waited, capped at two steps (the starvation guard).</li>
+          <li><strong>Then affinity, inside the tier only</strong> — a warm job never promotes out of its tier.</li>
+          <li><strong>Then estimated cost</strong> — shortest first; unknown costs sort as the tier average, never as zero.</li>
+          <li>Quotas (pool size, CPU slots, decision rate, tokens/hour) are enforced by the server <em>around</em> selection: a blocked pick is excluded, selection re-runs, and the exclusion is journaled (<code>quota-blocked</code>). One blocked job never starves the queue behind it.</li>
+          <li>The cost model behind the estimates is real actuals per call site (<code>cost-actuals.jsonl</code>: mean / variance / p90 / n), not guesses.</li>
+        </ul>
+      </div>
+    </div>
+    <p style="font-size:.88rem;color:var(--muted);margin-top:12px">The host's run queue itself also drives in priority order, FIFO inside a tier — same discipline, one level up. The Muse-specific part here is only the <em>backlog source</em> (Linear, via the coordinator). The two-layer split and the ordering rules would work unchanged over GitHub Issues, a local file, or a database table.</p>
+  </section>
+
+  <!-- STATE -->
+  <section id="state">
+    <div class="sec-head">
+      <div class="kicker">07 — Durability</div>
+      <h2>Everything that matters is a file</h2>
+      <p>No database, no in-memory-only state that matters. One state dir holds the whole system — which is why a VM replacement is survivable: the new VM mounts the same workspace and the journals, blobs, and queue are simply <em>there</em>.</p>
+    </div>
+    <div class="state-grid">
+      <div class="state-item"><code>journals/&lt;run&gt;.journal</code><p>JSONL, append-only, one <code>appendFileSync</code> per event. <strong>The source of truth.</strong> Format v2: every event carries <code>wallTs</code>; trap results carry <code>adapter</code>, <code>worker</code>, <code>wallMs</code>. Branch runs get their own journals.</p></div>
+      <div class="state-item"><code>blobs/ + keyframes/</code><p>Latest keyframe copy + latest delta per run, plus a content-addressed keyframe store (BRA-90) and a checkpoint manifest — written last, so it is the commit point. Blobs are SHA-256 verified on store and on restore.</p></div>
+      <div class="state-item"><code>frozen/&lt;hash&gt;/</code><p>Frozen workflow closures: entry + transitive imports + the <code>agentts</code> module, content-addressed. Built in a temp dir and renamed into place — a crash mid-freeze never leaves a partial copy. A missing frozen copy on resume is a loud refusal, never a fallback to the live file.</p></div>
+      <div class="state-item"><code>queue.json (+ .bak)</code><p>The run queue. Written atomically (tmp + rename); a corrupt file is recovered from the backup and journaled as <code>queue-recovered</code> — never silently treated as empty.</p></div>
+      <div class="state-item"><code>runs/ · slices/ · cache/</code><p>Persisted registry entries, the generated driver + pinned bundle and source map per run, transient slice files (<code>.snap/.out/.log</code>), delivered gate answers, and the extraction cache keyed by content hash.</p></div>
+      <div class="state-item"><code>worker-jobs/ · deliveries/ · tick/</code><p>Pool store (+ backup, <code>jobs.log</code>, <code>scheduler.log</code>), the delivery outbox, tick-agent liveness (<code>tick/state.json</code>), the driver lock, and <code>corruption.log</code> — quarantined bad lines, kept for forensics, deduped, append-only.</p></div>
+    </div>
+
+    <div style="height:14px"></div>
+    <div class="grid2">
+      <div class="card"><h3>Crash recovery, in order</h3><ul class="checklist">
+        <li><strong>C-host crash mid-slice</strong> (exit 1, no lifecycle event) ≠ workflow failure (lifecycle <code>failed</code> in the journal). The former resumes from the last intact blob (<code>host-crash</code> → <code>host-crash-resumed</code>); the latter is never retried.</li>
+        <li><strong>Crash on the first slice</strong> retries from scratch, bounded at 3 — no trap was dispatched, so it's idempotent.</li>
+        <li><strong>Sleep deadlines are durable</strong> (G11): recorded at dispatch; a host killed mid-sleep waits only the remainder on resume.</li>
+        <li><strong>Format-identity mismatch refuses loudly</strong> (BRA-132): a resume under a different snapshot format identity — blob-header signature + dquickts pin + host native names — marks the run failed but leaves the blob, so restoring the matching engine and re-queueing can still resume it. A release that changed only <code>durablets.c</code> logic leaves the identity unchanged, so parked runs resume.</li>
+      </ul></div>
+      <div class="card"><h3>Drive integrity</h3><ul class="checklist">
+        <li><strong>Driver lock:</strong> one driver per state dir (<code>holder.json</code> + 10 s heartbeat). A second driver refuses. Only a human who confirmed the holder PID is dead may break it with <code>--force</code>.</li>
+        <li><strong>Queue repair</strong> runs before every drive: journal says completed → mark done; intact blob after a crash → re-queue to resume; trap activity but no registry entry → leave for a human (re-driving would restart and could double-execute).</li>
+        <li><strong>The test suite proves the chunking:</strong> 72 sections in the inventory (37 in tier 1), slowest tier-1 section 125 s in the latest run, none over five minutes; <code>run.sh</code> resumes per section from markers, and the tier-2 kill test (SIGTERM mid-run → resume → full pass) is a standing test, not a hope.</li>
+        <li><strong>Known gap:</strong> workflow auto-resume after a driver death is detected (watchdog, ~30 min) but not automatic — a <code>running</code> entry waits for the coordinator by design. See §9.</li>
+      </ul></div>
+    </div>
+  </section>
+
+  <!-- PORTABILITY -->
+  <section id="portability">
+    <div class="sec-head">
+      <div class="kicker">08 — The important distinction</div>
+      <h2>What's Muse, what's the harness, what's universal</h2>
+      <p>AgentTS was built inside Muse, so the Muse shape is the one that's proven. But the architecture was designed so the Muse parts are exactly the replaceable parts. Here's the honest split.</p>
+    </div>
+
+    <div class="tabs" role="tablist" aria-label="Harness comparison">
+      <button class="tab-btn active" data-tab="muse">As built: in Muse</button>
+      <button class="tab-btn" data-tab="other">Same system, another harness</button>
+      <button class="tab-btn" data-tab="table">Piece-by-piece table</button>
+    </div>
+
+    <div class="tab-pane active" id="pane-muse">
+      <div class="grid2">
+        <div class="card"><h3>How it works here, concretely</h3><ul class="checklist">
+          <li><strong>Coordinator = Meroki</strong>, a named Muse agent in the main session. It admits Linear tasks, writes workflows, spawns the tick agent and workers as subagents, reads the delivery outbox, answers gates, and closes issues.</li>
+          <li><strong>Workers = Muse subagents</strong> running the get-job loop by hand (<code>get-job.ts</code> / <code>complete-job.ts</code> per <code>WORKER.md</code>), each with a stable <code>workerId</code> and its own workspace directory on this VM. A Bun script worker runs the identical loop as the proof leg.</li>
+          <li><strong>Tick agent = a persistent Muse session</strong> driven by <code>TICK-AGENT.md</code>, restarted by a cron watchdog when it goes silent with work pending.</li>
+          <li><strong>Jobspecs = prose files</strong> a subagent reads and interprets — the “worker” is a full LLM session with tools, not a function call.</li>
+          <li><strong>Everything shares one VM and one filesystem</strong> — state dir, frozen copies, per-worker workspaces, and the pool server on loopback.</li>
+        </ul></div>
+        <div class="card"><h3>What Muse gives this design</h3><ul class="checklist">
+          <li>Subagents that can be spawned on demand and keep a warm session context — which is precisely what affinity exploits.</li>
+          <li>A coordinator with judgment in the loop for the decisions the system deliberately refuses to automate: admitting work, breaking locks, answering gates, closing issues.</li>
+          <li>Long-lived sessions (tick agent, workers) that can block on a 60-second long-poll and act when it returns.</li>
+          <li>Tool access inside jobs: a “judge” job isn't a model call, it's an agent that can read the repo, run tests, and post notes.</li>
+        </ul><p style="margin-top:10px;font-size:.86rem;color:var(--muted)">None of those four are in the core's or host's contract. They're properties of this deployment.</p></div>
+      </div>
+    </div>
+
+    <div class="tab-pane" id="pane-other">
+      <div class="grid2">
+        <div class="card"><h3>What you keep, untouched</h3><ul class="checklist">
+          <li><strong>Layer 1, verbatim.</strong> The C core, blob protocol, combinators, cancellation, JSON boundary. It has never heard of Muse.</li>
+          <li><strong>The <code>agentts</code> module and every workflow.</strong> Workflows import traps, not environments — the swap test is the proof this holds.</li>
+          <li><strong>The journal format, frozen copies, state layout.</strong> A run frozen under Muse can in principle resume under another host build with the same snapshot format identity.</li>
+          <li><strong>The scheduling rules and cost model.</strong> Pure logic; only the backlog source changes.</li>
+        </ul></div>
+        <div class="card"><h3>What you rebuild, in your harness's idiom</h3><ul class="checklist xlist">
+          <li><strong>A new Layer 3 adapter</strong> — the only code you <em>must</em> write. It implements the same 4-trap <code>answer()</code> seam.</li>
+          <li><strong>Workers:</strong> in Claude Code they'd be CLI sessions or API-driven loops; on a server, container jobs or a job queue (BullMQ, Temporal activities, K8s Jobs); for pure model work, direct API calls with no agent session at all.</li>
+          <li><strong>Tick agent:</strong> becomes a cron job, a systemd service, or a small daemon doing the same sweep → drive → deliver → escalate loop. It never needed to be an LLM — it needs judgment only at escalation, which is the coordinator's job anyway.</li>
+          <li><strong>Coordinator:</strong> a human operator, a different orchestrating agent, or a thin control plane. The role (admit, gate-answer, lock-break, close) is the contract; Meroki is one occupant.</li>
+          <li><strong>Pool transport:</strong> loopback HTTP is a single-VM convenience. Multi-machine means the same protocol over real HTTP with auth — <code>workerId</code> would stop being self-asserted, which is the first thing to harden.</li>
+        </ul></div>
+      </div>
+      <div class="callout" style="margin-top:14px"><h3>The test for “is this portable?”</h3><p>Ask: <em>does it appear in a workflow file, the journal format, or the trap/blob protocol?</em> If yes, it's portable — changing it would break existing runs. If it lives in <code>plugins/muse/</code>, a standing-instructions file (<code>WORKER.md</code>, <code>TICK-AGENT.md</code>), or the coordinator's habits, it's harness. The layering lint draws exactly this line in code: core + host may not import anything Muse-specific, and workflows may not import anything under <code>plugins/</code> at all.</p></div>
+    </div>
+
+    <div class="tab-pane" id="pane-table">
+      <div class="tbl-wrap">
+        <table>
+          <thead><tr><th>Piece</th><th>Class</th><th>In Muse (today)</th><th>Elsewhere (would be)</th></tr></thead>
+          <tbody>
+            <tr><td>DurableTS core (C / QuickJS)</td><td><span class="badge portable">Universal</span></td><td>Same</td><td>Same binary; or another engine honouring the trap/blob interface</td></tr>
+            <tr><td><code>agentts</code> module + workflows</td><td><span class="badge portable">Universal</span></td><td>Same</td><td>Same files, unchanged</td></tr>
+            <tr><td>Journal / blobs / frozen copies</td><td><span class="badge portable">Universal</span></td><td>Files in the state dir</td><td>Same formats; storage could be S3/DB behind the same semantics</td></tr>
+            <tr><td>Host drive loop, gate, extractor</td><td><span class="badge host">Host</span></td><td>Bun + TypeScript, CLI-driven</td><td>Re-implementable in any runtime; semantics are the spec</td></tr>
+            <tr><td>Scheduling (admit + dispatch)</td><td><span class="badge host">Host</span></td><td>Linear backlog; loopback pool</td><td>Any backlog source; any transport</td></tr>
+            <tr><td>Adapter seam <code>answer()</code></td><td><span class="badge portable">Universal</span></td><td>mock / direct / muse / briefing</td><td>Your adapter: the one required new component</td></tr>
+            <tr><td><code>muse</code> adapter + pool protocol</td><td><span class="badge muse">Muse</span></td><td>Loopback HTTP, long-poll get-job</td><td>Same protocol shape works; auth + real network needed at scale</td></tr>
+            <tr><td>Subagent workers (<code>WORKER.md</code>)</td><td><span class="badge muse">Muse</span></td><td>Muse subagents, stable workerIds</td><td>CLI agents, API loops, containers, humans for some specs</td></tr>
+            <tr><td>Tick agent (<code>TICK-AGENT.md</code>)</td><td><span class="badge muse">Muse</span></td><td>Persistent Muse session + cron watchdog</td><td>Cron / daemon / orchestrator service</td></tr>
+            <tr><td>Coordinator role</td><td><span class="badge human">Role, not code</span></td><td>Meroki (named Muse agent)</td><td>Human operator or another agent — role contract is what matters</td></tr>
+            <tr><td>Gate answers</td><td><span class="badge human">Human</span></td><td>Coordinator relays Brandon's answer via <code>deliver-gate</code></td><td>Web UI, Slack approval, email link — anything that calls the same host API</td></tr>
+            <tr><td>Jobspecs as prose</td><td><span class="badge muse">Muse-leaning</span></td><td>Markdown a subagent interprets</td><td>Structured prompts / code, if your workers aren't LLM sessions</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <div style="height:14px"></div>
+    <div class="grid3">
+      <div class="card"><h3>Profiler: the journal, rendered</h3><p><code>agentts profile &lt;runId&gt;</code> is read-only — it never constructs a Host and never dispatches. It folds each run's journal (+ branch journals) into a timeline: per-trap-type counts, fork/join counts, gate holds, clock advances, and per-trap wall times (<code>wallMs</code>, or the dispatch/result split the BRA-75 journal makes possible: queue-wait vs. execution). The axis is event order, not time; v1 journals report wall durations as unknown, never invented. <code>--format html</code> emits a single self-contained page.</p></div>
+      <div class="card"><h3>The CLI is the API</h3><p>There is no installed binary and no server API for runs: <code>agentts</code> is <code>bun src/cli.ts</code>. <code>run / result / status / check / deliver-gate / queue list|run|repair / admit / sync-task / cost-model / profile / worker serve|status|cancel / deliver-result / deliveries / escalate / watchdog / version</code>. Exit codes: 0 done, 2 held at a gate, 1 error/refusal. The tick agent's hot path moved to HTTP driver endpoints (BRA-116) because each CLI spawn cost ~400 ms of module loading — submit deliberately stayed CLI.</p></div>
+      <div class="card"><h3>Inline workflows</h3><p><code>agentts run - …</code> reads workflow source from stdin and materialises it, content-addressed, under <code>.agentts-scratch/inline/&lt;hash&gt;.ts</code> — the frozen copy is the durable record, nothing is deleted, and relative imports resolve against that directory. Useful for one-off runs without writing a file into the library.</p></div>
+    </div>
+  </section>
+
+  <!-- LIMITS -->
+  <section id="limits">
+    <div class="sec-head">
+      <div class="kicker">09 — Honest limits</div>
+      <h2>What is not built</h2>
+      <p>From <code>docs/ARCHITECTURE.md §12</code> (the auto-resume rule is §5.3), kept current with the code. A living document earns trust by keeping this section accurate.</p>
+    </div>
+    <div class="grid2">
+      <div class="card"><ul class="checklist xlist">
+        <li><strong>No named workers, no routing to a specific worker, no per-worker memory</strong> — undecided (BRA-50), deliberately. Affinity + per-spec notes are the whole identity story until Brandon decides otherwise.</li>
+        <li><strong>No C-host daemon</strong> — one process spawn per slice. IPC is a later optimisation.</li>
+        <li><strong>No async adapters in v0</strong> — <code>answer()</code> is synchronous; pool adapters block inside it.</li>
+        <li><strong>No general reasoner in <code>decide</code></strong> — by design; judgment is a <code>job</code>.</li>
+        <li><strong>No versioned release or hosted service</strong> — public MVP, host v0.</li>
+      </ul></div>
+      <div class="card"><ul class="checklist xlist">
+        <li><strong>Crash during an <code>exec</code> dispatch re-runs the command</strong> — visible in the journal as a second <code>trap-dispatch</code> marked <code>redispatched: true</code>, not silent, but a duplicate execution.</li>
+        <li><strong>A gate answer can be lost</strong> in the sub-millisecond window between consumption and the <code>trap-dispatched</code> write; recovery is human re-delivery. Unexercised by tests.</li>
+        <li><strong>Workflow runs don't auto-resume after driver death</strong> — state survives and detection is automatic, but a <code>running</code> entry waits for the coordinator (safety rule, §5). The suite, by contrast, resumes automatically per section.</li>
+        <li><strong>Pre-BRA-71 runs</strong> carry no frozen copy or engine version and resume from the live file, unchecked.</li>
+        <li><strong>The bench gate is flaky</strong> (BRA-107) — a green gate is not yet stable evidence; a red one is not yet evidence of a regression.</li>
+      </ul></div>
+    </div>
+  </section>
+
+  <footer>
+    <p><strong style="color:var(--ink)">Keeping this document current.</strong> This page is the visual companion to <code>docs/ARCHITECTURE.md</code> in the AgentTS repo — that file remains the technical reference, and every claim here traces to code cited there (§13 source map). When the architecture changes, update both in the same change: the reference for precision, this page for the diagrams. Last aligned with the code: November 2026, after BRA-158 (verify-fix workflow) — including the BRA-132 format-identity gate, the suite growth to 72 sections, and the audience note this page previously lacked.</p>
+    <p>Key sources: <code>packages/durablets/README.md</code> · <code>packages/durablets/agentts.md</code> · <code>apps/agentts/README.md</code> · <code>apps/agentts/plugins/README.md</code> · <code>apps/agentts/src/host.ts</code> · <code>apps/agentts/src/adapter.ts</code> · <code>plugins/muse/WORKER.md</code> · <code>plugins/muse/TICK-AGENT.md</code></p>
+  </footer>
+
+</div>
+
+<script>
+var steps = [
+  { title: "Submit — one way in", body: "<code>Host.submit</code> (CLI: <code>agentts run</code>) validates the input JSON — JSON-clean first, then against the entry's extracted input schema — enqueues the run with the adapter it was submitted with, and returns the run ID immediately (<code>RUN &lt;id&gt;</code>). It does not execute anything. Submit also posts a <code>run-submitted</code> system event, which is what wakes the tick agent.", where: "<b>Where:</b> CLI process on the VM · <b>Writes:</b> queue.json entry · <b>Returns:</b> run ID, exit 0" },
+  { title: "Freeze + first-run gate", body: "Before the run can start, the host freezes the workflow's closure — entry file + transitive relative imports + the <code>agentts</code> module — into <code>frozen/&lt;closureHash&gt;/</code>, and runs the gate: TypeScript type-check (exact pin 5.9.3; wrong or missing compiler is a refusal, never a skip), type extraction to JSON Schema per trap call site (cached by content hash, pinned with the frozen copy), and the M2 checker (contracts, wiring, layering lint). A resumed run executes and validates against the frozen copy, never the live file — editing or deleting the workflow mid-run changes nothing. Each run also records its engine version (provenance) and stamps the snapshot format identity after each suspension; a mismatch of the format identity on resume refuses loudly (BRA-132).", where: "<b>Where:</b> host, at submit · <b>Writes:</b> frozen/&lt;hash&gt;/, cache/, engine version on the queue entry · <b>Try it:</b> <code>agentts check &lt;workflow&gt;</code> runs the gate without running anything" },
+  { title: "Queue — priority, FIFO inside a tier", body: "Runs wait in <code>queue.json</code> with their adapter, priority, optional task ID, frozen-copy hash, and engine version. Scratch state dirs default to the <code>mock</code> adapter; the production state dir defaults to <code>direct</code>. That asymmetry is deliberate: a forgotten <code>--adapter</code> flag must never silently fake a production run with canned answers.", where: "<b>Where:</b> state dir · <b>Inspect:</b> <code>agentts queue list</code> · <b>Statuses:</b> pending → running → held / done / failed" },
+  { title: "Drive — the synchronous loop", body: "<code>Host.runQueue</code> (CLI: <code>agentts queue run</code>) drives under the driver lock — one driver per state dir. First it repairs stranded entries (see §7), then it drives each queued run in priority order with <em>that run's</em> adapter. Driving is <code>driveToCompletion</code>: spawn the C host per slice, ingest its <code>[durablets]</code> events into the journal, dispatch each trap, resume — until the run completes, holds at a gate, fails, or hits the drive cap of 50 suspensions in one uninterrupted loop (<code>DriveCapError</code>, blob intact; the remedy is fewer traps per drive, never a silent retry). In Muse, the tick agent is what normally issues the drive; a human can too.", where: "<b>Where:</b> host process (Bun) · <b>Lock:</b> driver.lock/ (holder + 10s heartbeat) · <b>Cap:</b> MAX_DRIVE_ROUNDS = 50" },
+  { title: "Slice — one spawn of the C host", body: "Each slice is a fresh <code>durablets</code> process: the host hands it the bundled script (driver + workflow + agentts module, one global script built by <code>Bun.build</code> with its source map pinned alongside the run) or a resume blob plus an answer, and the process runs until it completes (exit 0), fails (1), suspends at a trap (2), or suspends at a combinator (3). Workflow output goes to stdout; lifecycle/trap/fork/join events go to stderr as <code>[durablets] {json}</code> lines for the host to journal. There is no daemon — this spawn-per-slice shape is v0, proven by the experiments it generalised from.", where: "<b>Where:</b> packages/durablets/out/durablets · <b>Boundary:</b> blob + JSON over process spawn · <b>Snapshot:</b> keyframe + delta chain (BRA-90)" },
+  { title: "Trap dispatch — journal first, then answer", body: "For each trap the host writes <code>trap-dispatch</code>, calls the adapter's <code>answer()</code>, then writes <code>trap-dispatched</code> with the answer, the adapter name, the worker (when named), and the measured <code>wallMs</code>. <code>job/exec/gate/decide</code> go to the adapter; <code>sleep/cron</code> are answered by the host itself. A gate that returns <code>HOLD</code> parks the run (<code>held</code>) until <code>deliver-gate</code> supplies a human answer — possibly days later, in a different process, resuming from the blob. With the <code>muse</code> adapter, a <code>job</code> dispatch is an enqueue on the pool queue plus a blocking wait for a worker's completion (§5). Every trap result is validated against its extracted schema before the run resumes — a mismatch throws at the call site.", where: "<b>Where:</b> host → adapter → (pool / process / human) · <b>Journal:</b> trap · trap-dispatch · trap-dispatched · trap-result" },
+  { title: "Result — validated, persisted, deliverable", body: "<code>Host.result</code> reads the run's result file and validates it against the extracted output schema before returning it — output that doesn't match the declared type is a failure, not a result. Results persist: <code>agentts result &lt;runId&gt;</code> works long after the drive that produced them. In Muse, the tick agent records terminal runs in the delivery outbox (<code>deliver-result</code>); the coordinator reads results from there. A failed run delivers its error with <code>needsAttention: true</code>. Re-delivery is idempotent.", where: "<b>Exit codes:</b> 0 done · 2 held at a gate · 1 error / refusal · <b>Inspect:</b> <code>agentts status &lt;runId&gt;</code> (journal tail) · <code>agentts profile &lt;runId&gt;</code> (full timeline)" }
+];
+var panel = document.getElementById('stepPanel');
+function showStep(i){
+  var s = steps[i];
+  panel.innerHTML = '<h3>' + s.title + '</h3><p>' + s.body + '</p><div class="where">' + s.where + '</div>';
+  var btns = document.querySelectorAll('.step-btn');
+  for (var j=0;j<btns.length;j++) btns[j].classList.toggle('active', j===i);
+}
+document.querySelectorAll('.step-btn').forEach(function(b){
+  b.addEventListener('click', function(){ showStep(parseInt(b.getAttribute('data-step'),10)); });
+});
+showStep(0);
+
+document.querySelectorAll('.tab-btn').forEach(function(b){
+  b.addEventListener('click', function(){
+    document.querySelectorAll('.tab-btn').forEach(function(x){ x.classList.remove('active'); });
+    document.querySelectorAll('.tab-pane').forEach(function(x){ x.classList.remove('active'); });
+    b.classList.add('active');
+    document.getElementById('pane-' + b.getAttribute('data-tab')).classList.add('active');
+  });
+});
+</script>
+</body>
+</html>
