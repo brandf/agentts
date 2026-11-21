@@ -173,6 +173,10 @@ transcript, including the journal it left behind, is in
   the workflow-design skill (BRA-70): judgment from our own
   learning — inline vs. by-reference trap data, jobspecs vs.
   inputs, decisions and the (not yet built) cascade.
+- [`docs/skills/agentts-fleet-ops.md`](docs/skills/agentts-fleet-ops.md) —
+  the fleet-operations skill: how to run project work through AgentTS
+  as a fleet — topology, the CPU model, the working loop, the lead
+  sessions, the daily report.
 - [`packages/durablets/README.md`](packages/durablets/README.md) —
   the core: builtins, blob protocol, cancellation, the JSON
   boundary rule.

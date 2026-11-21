@@ -54,6 +54,26 @@ workflow with no token-reporting runs is reported UNKNOWN, never
 scored as zero. Migration: none — the first audit seeds baselines
 from the ledger's recorded runs.
 
+**Merge workflow
+([BRA-159](https://linear.app/brandf/issue/BRA-159/merge-workflow-encode-the-worker-per-copy-merge-as-a-workflow)).**
+The worker-per-copy merge is now a workflow instead of a manual
+procedure: given a worker copy and the claimed files, `mergeCopy`
+(`workflows/library/merge.ts`) refuses loudly, writing nothing,
+when a tier-1 is in flight, when the copy-time manifest
+(`scripts/record-copy-manifest.sh`, recorded at copy time) is
+missing, when the diff is not confined to the claimed files, when
+any file conflicts three-way against the manifest base, or when
+the baselines file differs; otherwise it applies the diff, verifies
+the post-merge diff is empty except live-only files, typechecks,
+and runs tier 1 with a fresh resume dir, reporting the counts
+against the pre-merge baseline. Live-only files are preserved, the
+baselines file is never merged from a copy, and host.ts conflicts
+go to a human. A dry-run mode plans the merge without writing.
+Migration: none — the manual merge procedure still works; the
+workflow is the encoded form of it. The workflow applies the diff
+but never decides acceptance: the PM reviews the merge report and
+closes.
+
 ### Fixed
 
 **Big arXiv list pages fetch over curl again

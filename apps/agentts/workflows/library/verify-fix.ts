@@ -515,8 +515,9 @@ export function buildVerifyReport(args: {
 /** The aggregation script: one /bin/sh -c invocation that greps the
  * on-disk section logs and prints the line-based format
  * parseTier1Aggregation reads. The big outputs stay on disk; only
- * the counts cross the trap boundary. */
-function aggregationScript(logDir: string, doneDir: string): string {
+ * the counts cross the trap boundary. Exported for the merge workflow
+ * (BRA-159), so there is one aggregation rule in the repo. */
+export function tier1AggregationScript(logDir: string, doneDir: string): string {
   return (
     'd="' +
     doneDir +
@@ -645,7 +646,7 @@ export default function verifyFix(input: VerifyFixInput): VerifyReport {
   const doneDir = scoped
     ? input.resumeDir + "/.done"
     : input.resumeDir + "/workflow/tier" + tier + "/resume/.done";
-  const agg = exec({ cmd: "/bin/sh", args: ["-c", aggregationScript(logDir, doneDir)] });
+  const agg = exec({ cmd: "/bin/sh", args: ["-c", tier1AggregationScript(logDir, doneDir)] });
   if (agg.exitCode !== 0) {
     throw new Error(
       "verify-fix: tier log aggregation failed (rc " +

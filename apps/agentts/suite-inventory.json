@@ -410,6 +410,12 @@
    "label": "fix verification workflow suite (BRA-158)"
   },
   {
+   "slug": "bra159",
+   "tier": 1,
+   "estSeconds": 60,
+   "label": "merge workflow suite (BRA-159)"
+  },
+  {
    "slug": "bra175",
    "tier": 1,
    "estSeconds": 60,

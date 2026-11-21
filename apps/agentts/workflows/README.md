@@ -60,6 +60,7 @@ backticked file paths and the `Gate` column.)
 | rubric-review | `library/rubric-review.ts` | workflow | `rubricReview` | check |
 | run-tests | `library/run-tests.ts` | workflow | `runTests` | check |
 | verify-fix | `library/verify-fix.ts` | workflow | `verifyFix` | check |
+| merge | `library/merge.ts` | workflow | `mergeCopy` | check |
 | daily-ai-briefing | `dogfood/daily-ai-briefing.ts` | workflow | `dailyAiBriefing` | check |
 | workflow-bugfix-bra54 | `dogfood/workflow-bugfix-bra54.ts` | workflow | `bugfixBra54` | check |
 | decisionCascade | `../src/agentts.ts` | helper | `decisionCascade` | via `tests/workflows/workflow-bra47-cascade.ts` |
@@ -905,6 +906,100 @@ the CLI on direct). Acceptance: re-verify BRA-132 end to end
 and compare the workflow's report line-by-line against
 Meroki's manual verification of the same fix. Gate: `check` —
 this file passes `agentts check`.
+
+### 1.13 `library/merge.ts` — merge (the worker-per-copy merge workflow, BRA-159)
+
+**What it does.** Encodes the manual worker-per-copy merge as a
+workflow: given a worker copy + the claimed files, it (1) refuses
+loudly, writing nothing, when a tier-1 is in flight (a `run.sh`
+process running against the live tree — its cwd inside the live
+root, or the live root in its command line), when the copy-time manifest is missing or unparsable,
+when the diff is not confined to the claimed files, when any file
+conflicts, or when the baselines file differs; (2) computes the
+three-way diff in-shell (the manifest is read from disk and both
+trees are hashed inside one process, and only the SPARSE diff —
+the files whose base/copy/live hashes are not all equal — crosses
+the trap boundary, because exec-trap stdout caps at ~60KB and a
+full manifest or hash listing would crash the host), classifies every
+claimed file three-way against the manifest base (the copy made the
+change and live did not → apply; both sides changed it differently
+→ conflict, the whole merge refuses; live changed it and the copy
+did not → left alone; copy and live agree → already applied), then
+applies the plan (cp/rm), then re-diffs in-shell and verifies the post-merge diff is
+empty except live-only files and live modifications/deletions the
+copy never touched; (3) typechecks the merged tree (output capped
+at 4000 bytes in-shell);
+(4) runs tier 1 with a fresh `--resume-dir` (its output redirected
+to a file, only the PASS summary line returned — run.sh tees every
+section's full output to its stdout) and greps the on-disk
+section logs for the OK count and the ^PASS count — from the logs,
+never from the runner's summary line (the driver's printed PASS
+line is parsed separately and compared against the independent
+counts; a mismatch fails the verdict) — and compares the measured
+counts against the pre-merge baseline, explaining any delta;
+(5) produces a merge report. It applies the diff — that is its
+job — but it never decides acceptance: Meroki reviews the report
+and closes. A live-only file added after the copy was made is
+preserved, never deleted. The baselines file is never merged from
+a copy (any difference refuses the merge — re-baselining needs a
+human decision). A host.ts conflict carries the note that it needs
+resolution at merge time by a human. Known v0 limits, carried
+verbatim in every report: a partial apply is NOT rolled back
+(applied-so-far is reported instead); the tier-1 guard sees only
+`run.sh` processes running against the live tree; a false pass is not diagnosed (same limit as
+BRA-126).
+
+**Contract.**
+
+- Input: `MergeCopyInput` — `{ mergeId, copyRoot, liveRoot,
+  workDir, resumeDir, claimedFiles, dquicktsPath?, bunPath?,
+  typecheck?, runTier1?, dryRun?, tier?, baseline?,
+  expectedAdditions? }`. `copyRoot` is the worker copy;
+  `liveRoot` is the live tree the merge writes to. The copy-time
+  manifest (`.agentts-copy-manifest.json` at the copy root,
+  recorded by `scripts/record-copy-manifest.sh` at copy time) is
+  the three-way base; without it the merge refuses. `resumeDir`
+  must be fresh (skippedViaResume > 0 fails the verdict).
+  `runTier1: false` skips the suite step with a note (the test's
+  scratch-tree runs use this); `dryRun: true` plans the merge but
+  writes nothing and runs no suite. `baseline` /
+  `expectedAdditions` reuse verify-fix's `SuiteBaseline` /
+  `ExpectedAddition` shapes.
+- Output: `MergeReport` — `{ mergeId, verdict, dryRun,
+  tier1InFlight, applied, deleted, planned, alreadyApplied,
+  liveOnlyPreserved, conflicts, baselinesRefused, confinement,
+  typecheck, suite, baseline, manifestCopiedAt, knownLimit, notes
+  }`, where `verdict` is "merged" (the evidence checks out — NOT
+  acceptance), "dry-run" (the plan is clean, nothing written), or
+  "failed", and `notes` names every discrepancy with its counts
+  (empty when merged). `suite` / `baseline` reuse verify-fix's
+  `SuiteResult` / `BaselineResult` shapes.
+- Shared shapes: `parseCopyManifest(text)` (throws loudly on a
+  malformed manifest), `parseHashOutput(stdout)` (one sha256sum
+  listing → path → hash, throws loudly on a malformed line),
+  `parseSparseDiff(text)` (the in-shell sparse-diff JSON → copiedAt
+  + differing files, throws loudly on malformation),
+  `sparseDiffScript(copyRoot, liveRoot, manifestPath)` (the
+  in-shell diff; exit 0 = sparse JSON, 2 = manifest missing,
+  3 = manifest unparsable), `typecheckScript` / `tier1RunScript`
+  (bounded-output wrappers for the tsc and run.sh traps),
+  `computeChangedFiles({ base, copy, live })` (the copy's changes
+  vs the base + the live-only files), `classifyMergeFile({ file,
+  base?, copy?, live? })` (the three-way rule), `buildMergePlan({
+  claimedFiles, base, copy, live })`, `buildMergeReport(args)`.
+  The parsers and the aggregation are verify-fix's, imported not
+  duplicated (`parseTierSummaryLine`, `parseTier1Aggregation`,
+  `checkDiffConfinement`, `compareBaseline`,
+  `tier1AggregationScript` — one counting rule and one
+  aggregation rule in the repo).
+
+**State.** Tested by `tests/test-bra159.ts` (inventory check,
+`agentts check` on this file, pure unit checks on the three-way
+classification and the manifest parse, and live runs through the
+CLI on direct against scratch trees: apply, dry-run, conflict,
+baselines-refusal). Acceptance: one real merge executed by the
+workflow with tier 1 green after it. Gate: `check` — this file
+passes `agentts check`.
 
 ## 2. Versioning and pinning
 
