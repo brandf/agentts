@@ -492,6 +492,188 @@
    "tier": 3,
    "estSeconds": null,
    "label": "benchmark regression alarms (BRA-93)"
+  },
+  {
+   "slug": "bra211a",
+   "file": "tests/test-bra211a.ts",
+   "tier": 1,
+   "estSeconds": 60,
+   "label": "launch-attribution suite (BRA-211a)"
+  },
+  {
+   "slug": "bra211b",
+   "file": "tests/test-bra211b.ts",
+   "tier": 1,
+   "estSeconds": 120,
+   "label": "owner-resolution suite (BRA-211b)"
+  },
+  {
+   "slug": "bra210a",
+   "file": "tests/test-bra210a.ts",
+   "tier": 1,
+   "estSeconds": 60,
+   "label": "triage suite (BRA-210a)"
+  },
+  {
+   "slug": "bra210b",
+   "file": "tests/test-bra210b.ts",
+   "tier": 1,
+   "estSeconds": 120,
+   "label": "breakdown workflow suite (BRA-210b)"
+  },
+  {
+   "slug": "bra210c",
+   "file": "tests/test-bra210c.ts",
+   "tier": 1,
+   "estSeconds": 120,
+   "label": "breakdown BACKLOG.md fallback suite (BRA-210c)"
+  },
+  {
+   "slug": "lead-loop",
+   "file": "tests/test-lead-loop.ts",
+   "tier": 1,
+   "estSeconds": 180,
+   "label": "lead-loop suite"
+  },
+  {
+   "slug": "daily-brief",
+   "file": "tests/test-bra274.ts",
+   "tier": 1,
+   "estSeconds": 180,
+   "label": "daily-brief suite (BRA-274)"
+  },
+  {
+   "slug": "land-queue",
+   "file": "tests/test-bra261.ts",
+   "tier": 1,
+   "estSeconds": 120,
+   "label": "land-queue suite (BRA-261)"
+  },
+  {
+   "slug": "rebase",
+   "file": "tests/test-bra262.ts",
+   "tier": 1,
+   "estSeconds": 120,
+   "label": "rebase suite (BRA-262)"
+  },
+  {
+   "slug": "test-batching",
+   "file": "tests/test-bra263.ts",
+   "tier": 1,
+   "estSeconds": 120,
+   "label": "test-batching suite (BRA-263)"
+  },
+  {
+   "slug": "bra251",
+   "file": "tests/test-bra251.ts",
+   "tier": 1,
+   "estSeconds": 120,
+   "label": "dependency mapping suite (BRA-251)"
+  },
+  {
+   "slug": "bra252",
+   "file": "tests/test-bra252.ts",
+   "tier": 1,
+   "estSeconds": 120,
+   "label": "daily queue feed suite (BRA-252)"
+  },
+  {
+   "slug": "bra160",
+   "file": "tests/test-bra160.ts",
+   "tier": 1,
+   "estSeconds": 120,
+   "label": "dynamic scheduler suite (BRA-160)"
+  },
+  {
+   "slug": "bra213",
+   "file": "tests/test-bra213.ts",
+   "tier": 1,
+   "estSeconds": 120,
+   "label": "long-lived workers suite (BRA-213)"
+  },
+  {
+   "slug": "bra214",
+   "file": "tests/test-bra214.ts",
+   "tier": 1,
+   "estSeconds": 180,
+   "label": "large trap result suite (BRA-214)"
+  },
+  {
+   "slug": "bra176",
+   "file": "tests/test-bra176.ts",
+   "tier": 1,
+   "estSeconds": 180,
+   "label": "dispatch suite (BRA-176)"
+  },
+  {
+   "slug": "bra178",
+   "file": "tests/test-bra178.ts",
+   "tier": 1,
+   "estSeconds": 120,
+   "label": "garbage collection suite (BRA-178)"
+  },
+  {
+   "slug": "throughput-report",
+   "file": "tests/test-bra247.ts",
+   "tier": 1,
+   "estSeconds": 120,
+   "label": "throughput report suite (BRA-247)"
+  },
+  {
+   "slug": "bottleneck-detect",
+   "file": "tests/test-bra248.ts",
+   "tier": 1,
+   "estSeconds": 120,
+   "label": "bottleneck detection suite (BRA-248)"
+  },
+  {
+   "slug": "server-restart",
+   "file": "tests/test-bra245.ts",
+   "tier": 1,
+   "estSeconds": 180,
+   "label": "server auto-restart suite (BRA-245)"
+  },
+  {
+   "slug": "vm-recovery",
+   "file": "tests/test-bra246.ts",
+   "tier": 1,
+   "estSeconds": 180,
+   "label": "VM-replacement recovery suite (BRA-246)"
+  },
+  {
+   "slug": "push",
+   "file": "tests/test-bra260.ts",
+   "tier": 1,
+   "estSeconds": 180,
+   "label": "push manifest + push suite (BRA-260)"
+  },
+  {
+   "slug": "dual-report",
+   "file": "tests/test-bra256.ts",
+   "tier": 1,
+   "estSeconds": 180,
+   "label": "dual-report verification suite (BRA-256)"
+  },
+  {
+   "slug": "bra217",
+   "file": "tests/test-bra217.ts",
+   "tier": 1,
+   "estSeconds": 120,
+   "label": "verify-fix suite-step trap cap suite (BRA-217)"
+  },
+  {
+   "slug": "bra134",
+   "file": "tests/test-bra134.ts",
+   "tier": 1,
+   "estSeconds": 180,
+   "label": "snapshot convert suite (BRA-134)"
+  },
+  {
+   "slug": "bra153",
+   "file": "tests/test-bra153.ts",
+   "tier": 1,
+   "estSeconds": 120,
+   "label": "direct handler tests suite (BRA-153)"
   }
  ]
 }
