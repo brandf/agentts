@@ -113,6 +113,19 @@
 #include "quickjs.h"
 #include "durablets.h"
 
+/* BRA-214: build-time hash of this file + durablets.h, baked in by
+ * the Makefile (-DENGINE_SOURCE_HASH). `durablets version` prints
+ * it; the TS host verifies it before delivering a file-backed trap
+ * result, so a binary built from different (older) source fails
+ * loudly instead of crashing on resume with a confusing SyntaxError
+ * (the Nov 20 failure: the checked-in binary predated BRA-171's
+ * `agentts-file:` marker, so the C host parsed the marker as JSON).
+ * "unknown" when built without the Makefile flag — the TS side
+ * treats that as a mismatch, never as a pass. */
+#ifndef ENGINE_SOURCE_HASH
+#define ENGINE_SOURCE_HASH "unknown"
+#endif
+
 /* ---- tiny string buffer ---- */
 struct strbuf { char *s; size_t len, cap; };
 static void sb_init(struct strbuf *b)
@@ -2007,6 +2020,14 @@ int main(int argc, char **argv)
     uint8_t *buf;
     size_t len;
 
+    /* BRA-214: report the build-time source hash so the TS host can
+     * verify this binary was built from the source it is driving
+     * against. No runtime needed — print and exit. */
+    if (argc == 2 && !strcmp(argv[1], "version")) {
+        printf("{\"sourceHash\":\"%s\",\"features\":[\"result-file\"]}\n", ENGINE_SOURCE_HASH);
+        return 0;
+    }
+
     if (argc == 4 && !strcmp(argv[1], "run")) {
         buf = load_file(argv[2], &len);
         rt = JS_NewRuntime();
@@ -2978,7 +2999,8 @@ int main(int argc, char **argv)
         return rc;
     }
 
-    fprintf(stderr, "usage: durablets run <workflow.ts> <blob>\n"
+    fprintf(stderr, "usage: durablets version\n"
+            "       durablets run <workflow.ts> <blob>\n"
             "       durablets resume <blob> <result-json>\n"
             "       durablets resume <blob> throw:<json>\n"
             "       durablets cancel <blob> <cancel.json>\n"

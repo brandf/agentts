@@ -209,8 +209,33 @@ export interface QueueEntry {
   runId: string;
   workflowPath: string;
   adapter: string;
-  status: "queued" | "running" | "held" | "done" | "failed";
+  status: "queued" | "running" | "held" | "done" | "failed" | "cancelled";
   taskId?: string;
+  /** Launching session (BRA-211): the session that submitted this
+   * run (e.g. a lead chat id), recorded at submit. Absent for runs
+   * submitted before BRA-211 (legacy: no launcher recorded, never
+   * fabricated). */
+  launchedBy?: string;
+  /** Owning session (BRA-211, addendum): the session that executes
+   * and drives this run — its queue holds the run's jobs, it claims
+   * them and collects the result. Only a job-looping session (a
+   * lead) can be an owner; the engine records the owner as given
+   * and does NOT validate lead-ness — the launcher is responsible
+   * for naming a lead. The Director launches with owner set to the
+   * lead and never owns. Absent = no owner (legacy behavior: the
+   * run works exactly as today, it just cannot use owner-targeting).
+   * The owner OR the launcher may cancel the run
+   * (cancelWorkflowRun). */
+  owner?: string;
+  /** Why a cancelled run was cancelled (BRA-211). Present only on
+   * cancelled entries; `result()` reports it as the error. */
+  cancelReason?: string;
+  /** Keep this run past GC (BRA-178): a kept run is never
+   * collected, at any age. Set at submit via `agentts run --keep`
+   * (default false — absent means not kept). The submitter (the
+   * launcher/owner at submit time) marks a run; the human-mark
+   * verb (`queue keep <runId>`) is a follow-up, not v0. */
+  keep?: boolean;
   /** Run priority, Linear scale (1 urgent … 4 low, default 3).
    * runQueue drives highest priority first (FIFO inside a tier). */
   priority?: number;
@@ -343,7 +368,7 @@ export async function flushNotifications(): Promise<void> {
  * validated output JSON once it is done. */
 export interface RunResult {
   runId: string;
-  status: "pending" | "running" | "held" | "done" | "failed";
+  status: "pending" | "running" | "held" | "done" | "failed" | "cancelled";
   /** The entry function's return value, validated against the
    * extracted Output schema. Present only when done. */
   output?: unknown;
@@ -509,6 +534,20 @@ export const RESULT_ARG_INLINE_MAX_BYTES = 64 * 1024;
  * with `a`, which no JSON document starts with — the marker can
  * never collide with an inline result. */
 export const RESULT_ARG_FILE_PREFIX = "agentts-file:";
+/** BRA-214: the bound on a file-backed trap result. Results at or
+ * above RESULT_ARG_INLINE_MAX_BYTES travel through a scratch file
+ * (BRA-171) instead of argv — the file path is the mechanism that
+ * lets a large result through, and it has no argv limit. But the C
+ * host reads the whole file into memory (read_text_file), so an
+ * unbounded result is a memory hazard: above this many bytes the
+ * host refuses loudly, naming the limit, before the file is written
+ * or the resume is spawned. 16MB is 100x the largest known
+ * legitimate result (the real-tree copy manifest, ~162KB) and the
+ * same bound the spawn-stdout capture already uses
+ * (SPAWN_STDOUT_MAX_BYTES) — far above any result a trap should
+ * carry (bulk data goes through files, per the BRA-159 transport
+ * pattern) and far below any memory hazard. */
+export const RESULT_FILE_MAX_BYTES = 16 * 1024 * 1024;
 
 /** Driver-template version (BRA-94): bump when the driver template
  * in driverFor changes — the bundle cache key includes it, so a
@@ -598,6 +637,25 @@ function hashDurabletsC(): string {
   for (const dir of durabletsPackageDirs()) {
     const p = path.join(dir, "src", "durablets.c");
     if (fs.existsSync(p)) return shaFile(p).slice(0, 16);
+  }
+  return "unknown";
+}
+
+/** BRA-214: the hash of the C host's own sources, in the Makefile's
+ * fixed order (durablets.c then durablets.h) — the same recipe the
+ * Makefile bakes into the binary as ENGINE_SOURCE_HASH, so this is
+ * what a binary built from this source reports via `durablets
+ * version`. Full hex (unlike hashDurabletsC's first-16, which feeds
+ * the engine version). "unknown" when either source is missing: a
+ * binary built without the Makefile flag reports "unknown" too, so
+ * a missing source is a mismatch, never a pass. */
+function engineSourceHash(): string {
+  for (const dir of durabletsPackageDirs()) {
+    const c = path.join(dir, "src", "durablets.c");
+    const h = path.join(dir, "src", "durablets.h");
+    if (fs.existsSync(c) && fs.existsSync(h)) {
+      return shaBuf(Buffer.concat([fs.readFileSync(c), fs.readFileSync(h)]));
+    }
   }
   return "unknown";
 }
@@ -807,6 +865,16 @@ interface RunEntry {
    * so these fields are the readable record, not the identity. */
   parentRunId?: string;
   parentTrapId?: string;
+  /** Launching session (BRA-211): the session that submitted this
+   * run, copied from the queue entry when the run starts (see
+   * startRunFrom); run/call children inherit it from the parent
+   * (see startChildRun). Absent for runs submitted before BRA-211. */
+  launchedBy?: string;
+  /** Owning session (BRA-211, addendum): the session that executes
+   * and drives this run, copied from the queue entry when the run
+   * starts; run/call children and fork branches inherit it from the
+   * parent. Recorded as given, never validated. Absent = no owner. */
+  owner?: string;
   /** Original workflow path (not the bundle): re-extraction on resume
    * reads the same source, so the cache hits and the gate never
    * re-runs for a resumed run. For runs started after BRA-71 this is
@@ -996,6 +1064,11 @@ export function bundleHasModuleSyntax(text: string, outPath: string): boolean {
 
 export class Host {
   readonly hostPath: string;
+  /** BRA-214: whether this Host has verified its C host binary was
+   * built from the source it is driving against (assertEngineSourceHash).
+   * Checked once per Host — the engine cannot change mid-process —
+   * and only on the file-backed delivery path. */
+  private verifiedEngineSourceHash = false;
   /** State dir (blobs, journals, runs, cache, queue). */
   readonly stateDir: string;
   /** Transient slice files (.snap/.out/.log) live here. */
@@ -2171,7 +2244,7 @@ export class Host {
    * second write used to overwrite the first, losing an entry
    * (last writer wins). The lock makes the whole sequence atomic
    * across processes. */
-  enqueue(workflowPath: string, runId: string, opts: { adapter?: string; taskId?: string; priority?: number; input?: unknown; frozenHash?: string; frozenPath?: string; engineVersion?: string; trapPin?: TrapPin } = {}): QueueEntry {
+  enqueue(workflowPath: string, runId: string, opts: { adapter?: string; taskId?: string; priority?: number; launchedBy?: string; owner?: string; keep?: boolean; input?: unknown; frozenHash?: string; frozenPath?: string; engineVersion?: string; trapPin?: TrapPin } = {}): QueueEntry {
     return this.withQueueLock(() => {
     const q = this.readQueue();
     if (q.some((e) => e.runId === runId && (e.status === "queued" || e.status === "running" || e.status === "held"))) {
@@ -2183,6 +2256,9 @@ export class Host {
       adapter: opts.adapter ?? this.adapter.name,
       status: "queued",
       ...(opts.taskId ? { taskId: opts.taskId } : {}),
+      ...(opts.launchedBy ? { launchedBy: opts.launchedBy } : {}),
+      ...(opts.owner ? { owner: opts.owner } : {}),
+      ...(opts.keep ? { keep: true } : {}),
       ...(typeof opts.priority === "number" ? { priority: opts.priority } : {}),
       ...(opts.input !== undefined ? { input: opts.input } : {}),
       ...(opts.frozenHash ? { frozenHash: opts.frozenHash } : {}),
@@ -2780,9 +2856,28 @@ export class Host {
         // stale snapshot. Entries enqueued after the snapshot
         // above are simply not driven this pass; they stay queued
         // for the next drive.
+        // BRA-211 check-then-act (check 1 of 2 — drive start): flip
+        // queued -> running only when the entry is still queued — a
+        // cancel landing between the snapshot read and this flip
+        // must not resurrect the run. A flip that finds the entry
+        // no longer queued skips the drive for it.
+        let flipped = false;
         this.updateQueueEntry(entry.runId, (e) => {
-          e.status = "running";
+          if (e.status === "queued") {
+            e.status = "running";
+            flipped = true;
+          }
         });
+        if (!flipped) continue;
+        // BRA-211 check-then-act (check 2 of 2 — before the first
+        // slice): the flip above and the first slice are separated
+        // by an await (adapterForEntry below), so a cancel from
+        // another process can land in between. Re-read the live
+        // entry and skip the drive when it is cancelled — the run's
+        // state is the source of truth, not this drive's snapshot.
+        // The per-step check inside driveToCompletion covers every
+        // advance after the first.
+        if (this.isRunCancelled(entry.runId)) continue;
         // Fresh heartbeat before a drive that may block the event
         // loop for minutes (a long exec/sleep trap stalls the
         // interval refresh above).
@@ -2869,19 +2964,35 @@ export class Host {
         // flip above — the entry's final status/error are copied
         // onto the current queue, never written back over a
         // snapshot that predates a concurrent submit.
+        // BRA-211 check-then-act (backstop): a cancel landing
+        // mid-drive wins over the drive's outcome — never overwrite
+        // a "cancelled" entry with the slice's done/failed. The
+        // per-step check in driveToCompletion normally stops the
+        // drive before another advance; this flip covers the slice
+        // already in flight when the cancel landed. The cancelled
+        // run is never driven again; its slice result is discarded,
+        // not reported.
         const finalStatus = entry.status;
         const finalError = entry.error;
         this.updateQueueEntry(entry.runId, (e) => {
-          e.status = finalStatus;
-          if (finalError !== undefined) e.error = finalError;
+          if (e.status !== "cancelled") {
+            e.status = finalStatus;
+            if (finalError !== undefined) e.error = finalError;
+          }
         });
+        // BRA-211: re-read the live entry — a cancel landing
+        // mid-drive suppresses the completion/failure notification
+        // and the ledger record. A cancelled run is neither done
+        // nor failed; like a held run it leaves no ledger entry.
+        const liveStatus = this.readQueue().find((e) => e.runId === entry.runId)?.status;
+        const terminalStatus = liveStatus === "cancelled" ? "cancelled" : entry.status;
         // The state above is durable (queue.json written) before the
         // event fires: a tick agent woken by it reads the new status.
-        if (entry.status === "done") {
+        if (terminalStatus === "done") {
           this.notifyEvent("workflow-completed", { runId: entry.runId });
-        } else if (entry.status === "failed") {
+        } else if (terminalStatus === "failed") {
           this.notifyEvent("workflow-failed", { runId: entry.runId, detail: { error: entry.error ?? null } });
-        } else if (entry.status === "held") {
+        } else if (terminalStatus === "held") {
           this.notifyEvent("gate-held", { runId: entry.runId });
         }
         // BRA-165: a terminal run leaves one ledger record (wall
@@ -2890,11 +3001,11 @@ export class Host {
         // failure cannot fail the run it measures. Held runs get no
         // entry — they are not terminal; the entry lands when the
         // resumed run completes.
-        if (entry.status === "done" || entry.status === "failed") {
+        if (terminalStatus === "done" || terminalStatus === "failed") {
           recordRunLedger(this.stateDir, {
             runId: entry.runId,
             workflow: entry.workflowPath,
-            status: entry.status,
+            status: terminalStatus,
             adapter: entry.adapter,
             ...(entry.error ? { error: entry.error } : {}),
           });
@@ -4253,6 +4364,18 @@ export class Host {
       adapter?: string;
       taskId?: string;
       priority?: number;
+      /** Launching session (BRA-211): recorded on the queue entry
+       * and, at start, on the run entry. Absent = legacy, no
+       * launcher recorded. */
+      launchedBy?: string;
+      /** Owning session (BRA-211, addendum): the session that
+       * executes and drives the run. Recorded as given, never
+       * validated. Absent = no owner (legacy behavior). */
+      owner?: string;
+      /** Keep this run past GC (BRA-178): recorded on the queue
+       * entry at submit via `agentts run --keep`. Absent/false =
+       * not kept (the default). */
+      keep?: boolean;
     } = {},
   ): { runId: string } {
     const runId = opts.runId ?? `run-${path.basename(workflowPath, ".ts")}-${Date.now()}`;
@@ -4275,6 +4398,9 @@ export class Host {
       adapter: opts.adapter,
       taskId: opts.taskId,
       priority: opts.priority,
+      launchedBy: opts.launchedBy,
+      owner: opts.owner,
+      keep: opts.keep,
       input: this.inputs.get(runId),
       frozenHash: frozen.hash,
       frozenPath: frozen.entryPath,
@@ -4306,6 +4432,12 @@ export class Host {
       }
       if (queued.status === "failed") {
         return { runId, status: "failed", error: queued.error ?? `run ${runId} failed` };
+      }
+      // BRA-211: a cancelled run reports cancelled, never pending or
+      // running — the queue entry is the record, even when the run
+      // was cancelled mid-drive and its slice wrote more afterwards.
+      if (queued.status === "cancelled") {
+        return { runId, status: "cancelled", error: queued.cancelReason ?? `run ${runId} was cancelled` };
       }
       return { runId, status: queued.status === "held" ? "held" : queued.status === "running" ? "running" : "pending" };
     }
@@ -4746,6 +4878,14 @@ export class Host {
       engineVersion: this.engineVersion(),
     };
     this.registry.set(runId, entry);
+    // BRA-211: stamp the launching session and the owner from the
+    // queue entry, so a fresh process resuming this run finds them
+    // on the run entry without the queue. (A terminal-first-slice
+    // run deletes the entry below; its attribution lives on the
+    // queue entry.)
+    const launchEntry = this.readQueue().find((e) => e.runId === runId);
+    if (launchEntry?.launchedBy) entry.launchedBy = launchEntry.launchedBy;
+    if (launchEntry?.owner) entry.owner = launchEntry.owner;
     this.refresh(entry);
     if (rc === 2 || rc === 3) this.storeBlob(runId, entry.snap);
     else {
@@ -4933,9 +5073,72 @@ export class Host {
         if (delivered.found) return { value: delivered.value };
         return this.adapter.answer(type, arg, { runId, trapId, ordinal });
       }
-      default:
-        return this.adapter.answer(type, arg, { runId, trapId, ordinal });
+      default: {
+        // BRA-211: resolve an owner-targeted job trap before the
+        // adapter sees it (see resolveJobTarget) — the host is the
+        // only layer that knows the run's owner, and the resolved
+        // session rides the trap arg as `targetSession` so the
+        // enqueueing adapter can stamp it on the Job record.
+        const jobArg = type === "job" ? this.resolveJobTarget(runId, trapId, arg) : arg;
+        return this.adapter.answer(type, jobArg, { runId, trapId, ordinal });
+      }
     }
+  }
+
+  /**
+   * BRA-211: resolve a job trap's dispatch target. The host is the
+   * only layer that knows the run's owner (the registry entry,
+   * stamped at start, or the queue entry via runAttribution), so
+   * resolution lives here, in the job-trap path, before the adapter
+   * enqueues — never in the adapter, never on the server.
+   *
+   * - No `target` on the arg: untargeted, today's behavior — the arg
+   *   passes through unchanged, no event, no tag.
+   * - `target: "owner"`: the pseudo-name resolves to the run's
+   *   `owner` field — the session that executes and drives the run,
+   *   NOT `launchedBy` (owner and launcher are different fields;
+   *   the Director launches with owner set to the lead). The
+   *   resolution is re-derived from the run on EVERY dispatch
+   *   (nothing is cached on the run, and no value is ever adopted
+   *   from a stale record), journaled as `job-owner-resolved`
+   *   (runId, trapId, the resolved session), and carried on the
+   *   trap arg as `targetSession` so the enqueueing adapter stamps
+   *   it on the Job record — the owner tag on the shared queue,
+   *   which BRA-160's enforcement reads. A run with no `owner`
+   *   recorded refuses loudly: an owner-targeted job from it has
+   *   nowhere to go, and there is NO fallback to `launchedBy` (a
+   *   fallback would let the Director own by accident).
+   * - Any other `target` value: a named target, refused loudly —
+   *   named targets belong to BRA-50.
+   *
+   * The direct adapter runs the job in-process and ignores the tag,
+   * and the mock adapter canned-answers it — in both cases the
+   * resolution is still recorded in the journal; there is no
+   * dispatch choice to enforce there, and no second enforcement
+   * path is built. This issue records the tag; BRA-160 enforces it.
+   */
+  private resolveJobTarget(runId: string, trapId: string, arg: any): any {
+    const target = arg?.target;
+    if (target === undefined || target === null) return arg;
+    if (target !== "owner") {
+      throw new Error(
+        `job trap ${trapId} for run ${runId} targets "${target}" — only "owner" is a target today (named targets belong to BRA-50)`,
+      );
+    }
+    const owner = this.runAttribution(runId)?.owner;
+    if (!owner) {
+      throw new Error(
+        `job trap ${trapId} for run ${runId} targets "owner" but the run has no owner recorded — submit with --owner <session> (the Director launches with owner set to the lead); there is no fallback to launchedBy, so a run with no owner cannot use owner-targeting`,
+      );
+    }
+    this.journalEvent(runId, {
+      event: "job-owner-resolved",
+      runId,
+      trapId,
+      target: "owner",
+      targetSession: owner,
+    });
+    return { ...arg, targetSession: owner };
   }
 
   // ------------------------------------------------- run/call (BRA-105)
@@ -5107,6 +5310,13 @@ export class Host {
     if (entry) {
       entry.parentRunId = parentRunId;
       entry.parentTrapId = trapId;
+      // BRA-211: a run/call child inherits the launching session
+      // and the owner of its parent — the child is part of the
+      // parent's tree, so the launching session and the owning
+      // session own the whole tree and can cancel it.
+      const parentEntry = this.registry.get(parentRunId);
+      if (parentEntry?.launchedBy) entry.launchedBy = parentEntry.launchedBy;
+      if (parentEntry?.owner) entry.owner = parentEntry.owner;
       this.saveRunEntry(childRunId);
     }
   }
@@ -5687,6 +5897,42 @@ export class Host {
   }
 
   /**
+   * BRA-214: verify the C host binary was built from the source this
+   * host is driving against, before the first file-backed trap
+   * result is delivered. The binary reports its build-time source
+   * hash (`durablets version`); it must equal engineSourceHash().
+   * A mismatch — including "unknown" (built without the Makefile
+   * flag) and a `version` subcommand that fails (a binary predating
+   * the hash, e.g. the checked-in Nov 18 build) — throws a loud,
+   * named error: the run fails with the mismatch named, never as a
+   * pass, and the stale binary never receives an `agentts-file:`
+   * marker it would parse as JSON and crash on (the Nov 20 failure:
+   * SyntaxError: unexpected token: 'agentts', three retries, then
+   * failure). Checked once per Host and only on the file-backed
+   * path — small results travel inline and never needed the marker,
+   * so they keep working on an old binary.
+   */
+  private assertEngineSourceHash(): void {
+    if (this.verifiedEngineSourceHash) return;
+    const expected = engineSourceHash();
+    let reported: string | null = null;
+    try {
+      const r = spawnSync(this.hostPath, ["version"], { encoding: "utf8", maxBuffer: 1024 * 1024 });
+      if (r.status === 0) {
+        reported = (JSON.parse(r.stdout) as { sourceHash?: unknown }).sourceHash as string ?? null;
+      }
+    } catch {
+      reported = null;
+    }
+    if (typeof reported !== "string" || reported !== expected) {
+      throw new Error(
+        `BRA-214 engine source-hash mismatch: the C host binary at ${this.hostPath} reports sourceHash ${JSON.stringify(reported)} but the source it is driving against hashes to ${expected} — rebuild it with make -C <core> durablets (DQUICKTS=$HOME/workspace/dquickts-build-minimal) or set $DURABLETS_HOST to a current build; a binary built from different source cannot deliver a file-backed trap result`,
+      );
+    }
+    this.verifiedEngineSourceHash = true;
+  }
+
+  /**
    * BRA-171: argv-safe form of a trap-result JSON string for the C
    * host's `resume` command. Small results go inline, exactly as
    * before. A result at or above RESULT_ARG_INLINE_MAX_BYTES is
@@ -5702,9 +5948,25 @@ export class Host {
    * sync, per the BRA-88 verbatim-copy rule.)
    */
   private resultArg(runId: string, json: string): { arg: string; cleanup: () => void } {
-    if (Buffer.byteLength(json, "utf8") < RESULT_ARG_INLINE_MAX_BYTES) {
+    const bytes = Buffer.byteLength(json, "utf8");
+    if (bytes < RESULT_ARG_INLINE_MAX_BYTES) {
       return { arg: json, cleanup: () => {} };
     }
+    // BRA-214: a result over the file-backed bound fails loudly
+    // with the limit named — before the file is written or the
+    // resume is spawned, so the C host never sees it and never
+    // crashes on it. Return a summary or a file reference instead
+    // of bulk output through the trap.
+    if (bytes > RESULT_FILE_MAX_BYTES) {
+      throw new Error(
+        `BRA-214 trap result of ${bytes} bytes exceeds the file-backed result bound of ${RESULT_FILE_MAX_BYTES} bytes — return a summary or a file reference instead of bulk output through the trap`,
+      );
+    }
+    // BRA-214: the file-backed path needs a binary that understands
+    // the `agentts-file:` marker (BRA-171) — verify it once, before
+    // the first such delivery, so a stale binary fails loudly here
+    // instead of crashing on resume with a confusing SyntaxError.
+    this.assertEngineSourceHash();
     const filePath = path.join(this.workdir, `${prefixFor(runId)}.trap-result-${crypto.randomUUID()}.json`);
     fs.writeFileSync(filePath, json, "utf8");
     return {
@@ -5861,6 +6123,12 @@ export class Host {
       workflowPath: this.workflowPaths.get(parentRunId) ?? this.registry.get(parentRunId)?.workflowPath,
     };
     this.registry.set(child, entry);
+    // BRA-211: a fork branch inherits the launching session and the
+    // owner of its parent run, like a run/call child (see
+    // startChildRun).
+    const branchParent = this.registry.get(parentRunId);
+    if (branchParent?.launchedBy) entry.launchedBy = branchParent.launchedBy;
+    if (branchParent?.owner) entry.owner = branchParent.owner;
     this.refresh(entry);
     const parentExtraction = this.extractions.get(parentRunId);
     if (parentExtraction) this.extractions.set(child, parentExtraction);
@@ -6311,6 +6579,21 @@ export class Host {
     let rc = entry.rc!;
     let rounds = 0;
     while (rc === 2 || rc === 3) {
+      // BRA-211 check-then-act: before EACH advance, re-read the
+      // run's cancelled flag from the live queue. A cancel landing
+      // mid-drive (from another process — the CLI `agentts cancel`
+      // flips the entry while this drive is between steps) stops
+      // the drive at the next step boundary: the run stays suspended
+      // with its blob intact (rc 2), and runQueue's final flip
+      // preserves "cancelled" over the drive's outcome, so nothing
+      // is driven after the cancel and no completion/failure is
+      // reported. The run's state is the source of truth — this
+      // drive's snapshot never overrides it. The check comes before
+      // the cap below, so a cancelled run stops quietly instead of
+      // throwing a drive-cap error. A run with no queue entry (a
+      // child, driven as part of its parent's step) has no flag to
+      // check — see isRunCancelled.
+      if (this.isRunCancelled(runId)) return 2;
       rounds++;
       if (rounds > MAX_DRIVE_ROUNDS) {
         // G12 (BRA-76): the cap is a loud, named error — not a
@@ -6551,5 +6834,212 @@ export class Host {
     const rc = this.cancelRun(runId, reason, trigger, direct);
     if (rc !== null) cancelled.push(runId);
     return cancelled;
+  }
+
+  /**
+   * Launch attribution (BRA-211): who launched a run and who owns
+   * it — the queue entry first (the submit-time record) and the
+   * registry entry second (stamped at start, inherited by run/call
+   * children and fork branches). Returns null when the run is
+   * unknown to both.
+   */
+  runAttribution(runId: string): { launchedBy?: string; owner?: string } | null {
+    const qe = this.readQueue().find((e) => e.runId === runId);
+    if (qe)
+      return {
+        ...(qe.launchedBy ? { launchedBy: qe.launchedBy } : {}),
+        ...(qe.owner ? { owner: qe.owner } : {}),
+      };
+    const entry = this.registry.get(runId);
+    if (entry)
+      return {
+        ...(entry.launchedBy ? { launchedBy: entry.launchedBy } : {}),
+        ...(entry.owner ? { owner: entry.owner } : {}),
+      };
+    return null;
+  }
+
+  /**
+   * Reassign a run to a new owner (BRA-160) — the Director's
+   * supervisor operation, called by the worker server's
+   * POST /reassign-run. Updates the owner on BOTH records the host
+   * reads for owner resolution, because runAttribution reads the
+   * queue entry FIRST and the registry entry second: updating only
+   * one would leave the next dispatch resolving the old owner from
+   * the other. `launchedBy` is provenance and never changes.
+   *
+   * Both writes happen under the queue lock (one read-modify-write
+   * for the queue entry; the registry entry is written through
+   * saveRunEntry's atomic + .bak mirror protocol). Returns the old
+   * owner (null when the run had none recorded) and which records
+   * were updated. Throws when the run has NO record at all (no
+   * queue entry and no registry entry — there is nothing to
+   * reassign) or when newOwner is empty.
+   *
+   * Known limit, stated plainly: a live Host that already loaded
+   * the run's registry entry keeps resolving the old owner from its
+   * in-memory copy until it reloads (a fresh Host construction
+   * re-reads from disk). Reassignment is defined for dead or
+   * unresponsive owners, whose Hosts are not driving — so no live
+   * drive is racing this write in the defined case. A live owner
+   * being reassigned anyway would keep resolving the old owner for
+   * new dispatches until its Host reloads; the server-side retag
+   * still covers every already-enqueued job.
+   *
+   * The registry read is disk-backed, not memory-only: this Host
+   * is the long-lived server, and the run's registry entry is
+   * typically created on disk by a CLI drive AFTER this Host
+   * started — so the entry is not in the in-memory registry. When
+   * it is absent from memory, the entry is loaded from disk with
+   * the same parse rule the startup load applies (rc 1/2/3 only)
+   * and registered before mutating. Without this, the registry
+   * update silently no-ops (registryUpdated false) for every run
+   * driven after the server started, while the response still says
+   * ok — the queue record would say the new owner and the
+   * registry record the old one. (Found by tests/test-bra160.ts
+   * W1: the registry assertion failed until this load was added.)
+   */
+  reassignRunOwner(
+    runId: string,
+    newOwner: string,
+  ): { oldOwner: string | null; queueUpdated: boolean; registryUpdated: boolean } {
+    if (typeof runId !== "string" || !runId) {
+      throw new Error("reassign: runId must be a non-empty string");
+    }
+    if (typeof newOwner !== "string" || !newOwner) {
+      throw new Error("reassign: newOwner must be a non-empty string");
+    }
+    return this.withQueueLock(() => {
+      const q = this.readQueue();
+      const qe = q.find((e) => e.runId === runId);
+      let entry = this.registry.get(runId);
+      if (!entry) {
+        const { entry: disk } = this.parseRunEntryFile(this.runEntryPath(runId));
+        if (disk) {
+          this.registerLoadedRunEntry(disk);
+          entry = this.registry.get(runId) ?? disk;
+        }
+      }
+      if (!qe && !entry) {
+        throw new Error(`reassign: no run ${runId} — no queue entry and no registry entry in ${this.stateDir}`);
+      }
+      const oldOwner = qe?.owner ?? entry?.owner ?? null;
+      let queueUpdated = false;
+      if (qe) {
+        qe.owner = newOwner;
+        this.writeQueueLocked(q);
+        queueUpdated = true;
+      }
+      let registryUpdated = false;
+      if (entry) {
+        entry.owner = newOwner;
+        this.saveRunEntry(runId);
+        registryUpdated = true;
+      }
+      return { oldOwner, queueUpdated, registryUpdated };
+    });
+  }
+
+  /**
+   * Check-then-act (BRA-211): the driver's cancelled-flag check.
+   * Re-reads the LIVE queue entry (a fresh disk read, never this
+   * drive's snapshot) and reports whether the run is cancelled.
+   * The run's state is the source of truth: a cancel from another
+   * process (the CLI `agentts cancel`) lands on the queue entry,
+   * and the driver checks it before each advance — before the first
+   * slice in runQueue, and before each drive step in
+   * driveToCompletion — so a cancelled run stops at the next step
+   * boundary instead of driving on and having its outcome
+   * discarded at the final flip. A run with no queue entry (a
+   * child run, driven as part of its parent's step) has no flag to
+   * check and is never stopped by this — the parent's own check
+   * stops the tree at the parent's next step boundary.
+   */
+  private isRunCancelled(runId: string): boolean {
+    return this.readQueue().find((e) => e.runId === runId)?.status === "cancelled";
+  }
+
+  /**
+   * Cancel a workflow run by id (BRA-211) — the CLI `agentts cancel`
+   * path. This is the run-level cancel: it flips the queue entry to
+   * "cancelled" (under the enqueue lock, so it serializes with the
+   * driver's status flips) and journals a `run-cancelled` event.
+   * It does NOT drive the C host (cancelRun/cancelTree above cancel
+   * an in-flight slice or a branch inside a run) and does NOT cancel
+   * the run's server jobs (the CLI does that after this returns, via
+   * /cancel-job): a slice already executing finishes, then the run
+   * stops — the driver never drives a cancelled entry again, and a
+   * cancel landing mid-drive wins over the drive's outcome (see
+   * runQueue). No system event is emitted: "run-cancelled" is not a
+   * SystemEventType (worker-protocol.ts owns that enum, and this
+   * change does not touch it); a cancel needs no wake — the next
+   * drive skips the entry, and the tick agent's periodic sweep
+   * covers it.
+   *
+   * Check-then-act (BRA-211): this method is the ACT half — it
+   * marks the flag. The CHECK half lives in the driver: runQueue
+   * checks before the first slice, driveToCompletion checks before
+   * each step. The flag is the contract between them; nothing else
+   * stops a drive.
+   *
+   * Refusals (loud, nothing written): the run is unknown (no queue
+   * entry — stepwise runs without one cannot be cancelled this way);
+   * the run is already terminal (done/failed/cancelled); the run has
+   * an owner or a launcher recorded and the caller identifies as
+   * neither — cancelledBy must equal the owner or the launcher
+   * (BRA-211 addendum: the driving session must be able to stop its
+   * own work, and the launching session keeps its cancel), so an
+   * anonymous caller cannot cancel an attributed run. A run with
+   * neither recorded takes the legacy operator path: any caller may
+   * cancel it. A cancelled runId may be re-submitted: the enqueue
+   * duplicate check only bars queued/running/held entries, so the
+   * new run starts fresh — its first slice writes a new lifecycle
+   * "started" event, which starts a fresh status segment (see
+   * runStatusFromJournal), so the old cancel does not stick to the
+   * new run. The journal file itself is per run id and is appended
+   * to, never wiped, by a re-submit.
+   */
+  cancelWorkflowRun(
+    runId: string,
+    opts: { reason?: string; cancelledBy?: string } = {},
+  ): { runId: string; status: "cancelled"; reason: string } {
+    const reason = opts.reason ?? "cancelled";
+    const qe = this.readQueue().find((e) => e.runId === runId);
+    if (!qe) throw new Error(`no run ${runId} in ${this.stateDir}`);
+    if (qe.status === "done" || qe.status === "failed" || qe.status === "cancelled") {
+      throw new Error(`run ${runId} is already ${qe.status} — cannot cancel a terminal run`);
+    }
+    // BRA-211 addendum: the owner OR the launcher may cancel. A
+    // caller that is neither is refused, naming both recorded
+    // sessions so the refusal says who may cancel.
+    const mayCancel = !qe.launchedBy && !qe.owner ? true : opts.cancelledBy !== undefined && (opts.cancelledBy === qe.launchedBy || opts.cancelledBy === qe.owner);
+    if (!mayCancel) {
+      const who: string[] = [];
+      if (qe.launchedBy) who.push(`launched by ${qe.launchedBy}`);
+      if (qe.owner) who.push(`owned by ${qe.owner}`);
+      const hint = [
+        ...(qe.launchedBy ? [`--launched-by ${qe.launchedBy}`] : []),
+        ...(qe.owner ? [`--owner ${qe.owner}`] : []),
+      ].join(" or ");
+      throw new Error(
+        opts.cancelledBy
+          ? `run ${runId} was ${who.join(" and ")} — ${opts.cancelledBy} may not cancel it`
+          : `run ${runId} was ${who.join(" and ")} — pass ${hint} to cancel it`,
+      );
+    }
+    this.updateQueueEntry(runId, (e) => {
+      e.status = "cancelled";
+      e.cancelReason = reason;
+    });
+    this.journalEvent(runId, {
+      event: "run-cancelled",
+      runId,
+      reason,
+      trigger: "cli-cancel",
+      ...(opts.cancelledBy ? { cancelledBy: opts.cancelledBy } : {}),
+      ...(qe.launchedBy ? { launchedBy: qe.launchedBy } : {}),
+      ...(qe.owner ? { owner: qe.owner } : {}),
+    });
+    return { runId, status: "cancelled", reason };
   }
 }

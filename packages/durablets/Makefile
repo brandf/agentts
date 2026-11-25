@@ -18,6 +18,13 @@ OUT_DIR ?= out
 CC ?= cc
 CFLAGS ?= -g -O2 -Wall
 
+# BRA-214: the engine source hash baked into the binary
+# (`durablets version` prints it). The TS host verifies it before
+# delivering a file-backed trap result, so a binary built from
+# different (older) source fails loudly instead of crashing on
+# resume. Hash of the C host's own sources, in a fixed order.
+ENGINE_SOURCE_HASH := $(shell cat src/durablets.c src/durablets.h | sha256sum | cut -d' ' -f1)
+
 durablets: check-engine $(OUT_DIR)/durablets
 
 # Fail fast with instructions when the vendored engine tree is absent
@@ -34,7 +41,7 @@ check-engine:
 
 $(OUT_DIR)/durablets: src/durablets.c src/durablets.h
 	mkdir -p "$(OUT_DIR)"
-	$(CC) $(CFLAGS) -Isrc -I$(DQUICKTS) src/durablets.c $(DQUICKTS)/libquickjs.a -lm -lpthread -ldl -o "$@"
+	$(CC) $(CFLAGS) -DENGINE_SOURCE_HASH='"$(ENGINE_SOURCE_HASH)"' -Isrc -I$(DQUICKTS) src/durablets.c $(DQUICKTS)/libquickjs.a -lm -lpthread -ldl -o "$@"
 
 clean:
 	rm -f $(OUT_DIR)/durablets durablets

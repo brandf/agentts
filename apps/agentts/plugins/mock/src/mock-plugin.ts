@@ -188,6 +188,15 @@ export const RESULT_ARG_INLINE_MAX_BYTES = 64 * 1024;
  * with `a`, which no JSON document starts with — the marker can
  * never collide with an inline result. */
 export const RESULT_ARG_FILE_PREFIX = "agentts-file:";
+/** BRA-214: the bound on a file-backed trap result (verbatim copy
+ * of the host.ts constant — keep the two in sync, per the BRA-88
+ * verbatim-copy rule). Results at or above the inline bound travel
+ * through a scratch file (BRA-171) instead of argv; above this many
+ * bytes the host refuses loudly, naming the limit, before the file
+ * is written or the resume is spawned. 16MB is 100x the largest
+ * known legitimate result (the real-tree copy manifest, ~162KB) and
+ * the same bound the spawn-stdout capture already uses. */
+export const RESULT_FILE_MAX_BYTES = 16 * 1024 * 1024;
 
 interface RunEntry {
   runId: string;
@@ -232,6 +241,38 @@ function resolveHostPath(): string {
   throw new Error(
     `C host binary not found (tried ${candidates.join(", ")}); build it with make -C <core> durablets or set $DURABLETS_HOST`,
   );
+}
+
+/** Candidate DurableTS package dirs (same layouts as
+ * resolveHostPath's binary candidates): the staged repo and the
+ * working-dir layout. $AGENTTS_DURABLETS_DIR comes first when set.
+ * (Mirror of the host.ts helper — the mock plugin drives runs
+ * through the same C host, so it verifies the same source hash.) */
+function durabletsPackageDirs(): string[] {
+  const here = path.dirname(new URL(import.meta.url).pathname);
+  return [
+    ...(process.env.AGENTTS_DURABLETS_DIR ? [process.env.AGENTTS_DURABLETS_DIR] : []),
+    path.resolve(here, "..", "..", "..", "..", "..", "packages", "durablets"),
+    path.resolve(here, "..", "..", "..", "..", "agentts-repo", "packages", "durablets"),
+  ];
+}
+
+/** BRA-214: the hash of the C host's own sources, in the Makefile's
+ * fixed order (durablets.c then durablets.h) — the same recipe the
+ * Makefile bakes into the binary as ENGINE_SOURCE_HASH. "unknown"
+ * when either source is missing: a binary built without the
+ * Makefile flag reports "unknown" too, so a missing source is a
+ * mismatch, never a pass. (Mirror of the host.ts helper — keep the
+ * two in sync, per the BRA-88 verbatim-copy rule.) */
+function engineSourceHash(): string {
+  for (const dir of durabletsPackageDirs()) {
+    const c = path.join(dir, "src", "durablets.c");
+    const h = path.join(dir, "src", "durablets.h");
+    if (fs.existsSync(c) && fs.existsSync(h)) {
+      return shaBuf(Buffer.concat([fs.readFileSync(c), fs.readFileSync(h)]));
+    }
+  }
+  return "unknown";
 }
 
 // Shared improve-loop mock logic (identical in both mock copies —
@@ -441,6 +482,11 @@ function mockImproveWrite(arg: any): any {
 
 export class MockPlugin {
   readonly hostPath: string;
+  /** BRA-214: whether this plugin has verified its C host binary was
+   * built from the source it is driving against (assertEngineSourceHash).
+   * Checked once per plugin — the engine cannot change mid-process —
+   * and only on the file-backed delivery path. */
+  private verifiedEngineSourceHash = false;
   readonly workdir: string;
   readonly cacheDir: string;
   readonly gates: "auto" | "hold";
@@ -1295,6 +1341,43 @@ export class MockPlugin {
   }
 
   /**
+   * BRA-214: verify the C host binary was built from the source this
+   * plugin is driving against, before the first file-backed trap
+   * result is delivered. The binary reports its build-time source
+   * hash (`durablets version`); it must equal engineSourceHash().
+   * A mismatch — including "unknown" (built without the Makefile
+   * flag) and a `version` subcommand that fails (a binary predating
+   * the hash, e.g. the checked-in Nov 18 build) — throws a loud,
+   * named error: the run fails with the mismatch named, never as a
+   * pass, and the stale binary never receives an `agentts-file:`
+   * marker it would parse as JSON and crash on. Checked once per
+   * plugin and only on the file-backed path — small results travel
+   * inline and never needed the marker, so they keep working on an
+   * old binary. (Mirror of the Host.assertEngineSourceHash in
+   * src/host.ts — keep the two in sync, per the BRA-88
+   * verbatim-copy rule.)
+   */
+  private assertEngineSourceHash(): void {
+    if (this.verifiedEngineSourceHash) return;
+    const expected = engineSourceHash();
+    let reported: string | null = null;
+    try {
+      const r = spawnSync(this.hostPath, ["version"], { encoding: "utf8", maxBuffer: 1024 * 1024 });
+      if (r.status === 0) {
+        reported = (JSON.parse(r.stdout) as { sourceHash?: unknown }).sourceHash as string ?? null;
+      }
+    } catch {
+      reported = null;
+    }
+    if (typeof reported !== "string" || reported !== expected) {
+      throw new Error(
+        `BRA-214 engine source-hash mismatch: the C host binary at ${this.hostPath} reports sourceHash ${JSON.stringify(reported)} but the source it is driving against hashes to ${expected} — rebuild it with make -C <core> durablets (DQUICKTS=$HOME/workspace/dquickts-build-minimal) or set $DURABLETS_HOST to a current build; a binary built from different source cannot deliver a file-backed trap result`,
+      );
+    }
+    this.verifiedEngineSourceHash = true;
+  }
+
+  /**
    * BRA-171: argv-safe form of a trap-result JSON string for the C
    * host's `resume` command. Small results go inline, exactly as
    * before. A result at or above RESULT_ARG_INLINE_MAX_BYTES is
@@ -1311,9 +1394,25 @@ export class MockPlugin {
    * sync, per the BRA-88 verbatim-copy rule.)
    */
   private resultArg(runId: string, json: string): { arg: string; cleanup: () => void } {
-    if (Buffer.byteLength(json, "utf8") < RESULT_ARG_INLINE_MAX_BYTES) {
+    const bytes = Buffer.byteLength(json, "utf8");
+    if (bytes < RESULT_ARG_INLINE_MAX_BYTES) {
       return { arg: json, cleanup: () => {} };
     }
+    // BRA-214: a result over the file-backed bound fails loudly
+    // with the limit named — before the file is written or the
+    // resume is spawned, so the C host never sees it and never
+    // crashes on it. Return a summary or a file reference instead
+    // of bulk output through the trap.
+    if (bytes > RESULT_FILE_MAX_BYTES) {
+      throw new Error(
+        `BRA-214 trap result of ${bytes} bytes exceeds the file-backed result bound of ${RESULT_FILE_MAX_BYTES} bytes — return a summary or a file reference instead of bulk output through the trap`,
+      );
+    }
+    // BRA-214: the file-backed path needs a binary that understands
+    // the `agentts-file:` marker (BRA-171) — verify it once, before
+    // the first such delivery, so a stale binary fails loudly here
+    // instead of crashing on resume with a confusing SyntaxError.
+    this.assertEngineSourceHash();
     const filePath = path.join(this.workdir, `${prefixFor(runId)}.trap-result-${crypto.randomUUID()}.json`);
     fs.writeFileSync(filePath, json, "utf8");
     return {
