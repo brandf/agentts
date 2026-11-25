@@ -66,6 +66,18 @@
 // 6. The direct-test verdict parser is run-tests'
 //    parseSectionOutput (one counting rule, imported, not
 //    duplicated) plus a ^PASS-line count of its own.
+// 7. The suite step never hauls run.sh's full stdout through a
+//    trap (BRA-217): a full tier-1's stdout is megabytes, far
+//    over the ~60KB exec-trap cap, and the old code
+//    (`summaryLine = r.stdout`) crashed the C host on resume.
+//    The run goes through suiteRunScript / scopedSuiteRunScript,
+//    which redirect run.sh's stdout to a file in-shell and return
+//    only the PASS summary line (unscoped) or a one-line exit
+//    marker (scoped) — the merge workflow's tier1RunScript
+//    pattern, applied in place here rather than imported: merge
+//    already imports from this file, so importing its transport
+//    back would cycle. The bulk output stays on disk under
+//    workDir (run-sh.out / run-sh-<section>.out).
 //
 // Known v0 limit, recorded not fixed (same limit as BRA-126): a
 // false pass — a test that passes for the wrong reason — is NOT
@@ -536,6 +548,81 @@ export function tier1AggregationScript(logDir: string, doneDir: string): string 
   );
 }
 
+/** Single-quote a string for /bin/sh. Pure. Mirrors merge's
+ * shellQuote (merge.ts) — duplicated here, not imported: merge
+ * already imports from this file, so importing it back would cycle. */
+export function shellQuote(s: string): string {
+  return "'" + s.replace(/'/g, "'\\''") + "'";
+}
+
+/** The full-suite run script: run run.sh with the suite env, its
+ * output redirected to a file, and return only the PASS summary
+ * line. run.sh tees every section's full output to its stdout, so
+ * a full tier-1 run's stdout is megabytes — returning it through
+ * the trap would crash the host (BRA-217; the old code carried
+ * r.stdout as the summary line). The exit code is run.sh's; when
+ * there is no PASS line (the run died before the summary) the trap
+ * returns empty stdout, parseTierSummaryLine finds nothing, and
+ * the verdict fails loudly. Pure — the script's shape is
+ * unit-tested. Mirrors merge's tier1RunScript. */
+export function suiteRunScript(args: {
+  dquickts: string;
+  tmpdir: string;
+  runSh: string;
+  resumeDir: string;
+  outPath: string;
+}): string {
+  return [
+    "env DQUICKTS=" +
+      shellQuote(args.dquickts) +
+      " TMPDIR=" +
+      shellQuote(args.tmpdir) +
+      " " +
+      shellQuote(args.runSh) +
+      " --resume-dir " +
+      shellQuote(args.resumeDir) +
+      " > " +
+      shellQuote(args.outPath) +
+      " 2>&1; rc=$?",
+    "grep -E '^PASS tier [0-9]+ \\(' " + shellQuote(args.outPath) + " 2>/dev/null | tail -1 || true",
+    "exit $rc",
+  ].join("\n");
+}
+
+/** The scoped-suite run script: run one run.sh --only section with
+ * its output redirected to a file, and return only a one-line exit
+ * marker. The section's stdout is discarded by the workflow (only
+ * its exit code matters), but the trap still captures it — a
+ * verbose section would blow the ~60KB cap the same way the full
+ * run did (BRA-217). The exit code is run.sh's. Pure — the
+ * script's shape is unit-tested. */
+export function scopedSuiteRunScript(args: {
+  dquickts: string;
+  tmpdir: string;
+  runSh: string;
+  section: string;
+  resumeDir: string;
+  outPath: string;
+}): string {
+  return [
+    "env DQUICKTS=" +
+      shellQuote(args.dquickts) +
+      " TMPDIR=" +
+      shellQuote(args.tmpdir) +
+      " " +
+      shellQuote(args.runSh) +
+      " --bash --only " +
+      shellQuote(args.section) +
+      " --resume-dir " +
+      shellQuote(args.resumeDir) +
+      " > " +
+      shellQuote(args.outPath) +
+      " 2>&1; rc=$?",
+    'echo "run.sh exit $rc"',
+    "exit $rc",
+  ].join("\n");
+}
+
 export default function verifyFix(input: VerifyFixInput): VerifyReport {
   const bun = input.bunPath ?? "/opt/hatch-image/bin/bun";
   const dquickts = input.dquicktsPath ?? "/home/hatch/workspace/dquickts-build-minimal";
@@ -545,8 +632,10 @@ export default function verifyFix(input: VerifyFixInput): VerifyReport {
   const onlySections = input.onlySections ?? [];
   const scoped = onlySections.length > 0;
 
-  // 0. Scratch dir for the host build.
-  const mk = exec({ cmd: "mkdir", args: ["-p", input.workDir] });
+  // 0. Scratch dir for the host build (+ a tmp dir for the suite
+  //    run scripts' TMPDIR — the run goes through suiteRunScript,
+  //    which sets it explicitly).
+  const mk = exec({ cmd: "mkdir", args: ["-p", input.workDir, input.workDir + "/tmp"] });
   if (mk.exitCode !== 0) {
     throw new Error("verify-fix: cannot create workDir " + input.workDir + " (rc " + mk.exitCode + ")");
   }
@@ -622,19 +711,47 @@ export default function verifyFix(input: VerifyFixInput): VerifyReport {
     };
   }
 
-  // 4. Suite run + log greps.
+  // 4. Suite run + log greps. run.sh's stdout NEVER crosses a trap
+  //    boundary: the full run goes through suiteRunScript (stdout to
+  //    a file, only the PASS line returns) and each scoped section
+  //    through scopedSuiteRunScript (stdout to a file, only a
+  //    one-line exit marker returns) — BRA-217. The bulk output
+  //    stays on disk under workDir.
   const suiteStarted = Date.now();
   let suiteAllPassed = true;
   let summaryLine = "";
   if (!scoped) {
-    const r = exec({ cmd: runSh, args: ["--resume-dir", input.resumeDir], cwd: appsDir });
+    const r = exec({
+      cmd: "/bin/sh",
+      args: [
+        "-c",
+        suiteRunScript({
+          dquickts,
+          tmpdir: input.workDir + "/tmp",
+          runSh,
+          resumeDir: input.resumeDir,
+          outPath: input.workDir + "/run-sh.out",
+        }),
+      ],
+      cwd: appsDir,
+    });
     summaryLine = r.stdout;
     if (r.exitCode !== 0) suiteAllPassed = false;
   } else {
     for (let i = 0; i < onlySections.length; i++) {
       const r = exec({
-        cmd: runSh,
-        args: ["--bash", "--only", onlySections[i], "--resume-dir", input.resumeDir],
+        cmd: "/bin/sh",
+        args: [
+          "-c",
+          scopedSuiteRunScript({
+            dquickts,
+            tmpdir: input.workDir + "/tmp",
+            runSh,
+            section: onlySections[i],
+            resumeDir: input.resumeDir,
+            outPath: input.workDir + "/run-sh-" + onlySections[i] + ".out",
+          }),
+        ],
         cwd: appsDir,
       });
       if (r.exitCode !== 0) suiteAllPassed = false;
