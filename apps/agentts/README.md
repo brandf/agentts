@@ -99,7 +99,24 @@ bun src/cli.ts worker serve --state-dir ./.agentts-state [--port 18741] [--max-p
 bun src/cli.ts worker status [--server http://127.0.0.1:18741]
 bun src/cli.ts worker get-job --worker-id W [--server URL]
 bun src/cli.ts worker complete-job --job-id J --worker-id W (--result JSON | --result-file F | --error MSG) [--server URL]
+bun src/cli.ts snapshot convert --state-dir DIR --run-id ID --dquickts TREE --new-sig-snap SNAP [--durablets-c PATH]
 ```
+
+`snapshot convert` (BRA-134) converts a suspended run's snapshot from
+one dquickts engine build to another, so a parked run survives an
+engine upgrade instead of being stranded. It validates the checkpoint
+up front (it must exist and be a base), recompiles the snapshot's
+bytecode cells from their recorded sources with the new engine's
+compile helper, re-links the new code into the old snapshot, and
+rewrites the state dir under the new engine version + format identity
+(computed from the target tree + durablets.c, never taken on faith).
+`--dquickts` is the target engine tree (its `VENDORED_FROM` pin,
+`quickjs-opcode.h`, and `libquickjs.a`); `--new-sig-snap` is a snapshot
+written by the new engine (its build signature + class table). A
+snapshot already at the target version is reported as
+already-converted, not rewritten. A converter refusal exits 2 with
+`CONVERT REFUSED:` on stderr and no output written and no state
+touched.
 
 ## Worker pool (BRA-48) + the Muse adapter
 

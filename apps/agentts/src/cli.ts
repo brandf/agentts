@@ -65,9 +65,27 @@
  *           (--result JSON | --result-file F | --error MSG)
  *           [--files-dir D] [--server URL]
  *   agentts version
+ *   agentts snapshot convert --state-dir DIR --run-id ID
+ *           --dquickts TREE --new-sig-snap SNAP [--durablets-c PATH]
+ *           (BRA-134: convert a suspended run's snapshot from one
+ *           dquickts engine build to another by strip-and-recompile,
+ *           then rewrite the state dir under the new engine version +
+ *           format identity so the run resumes under the new engine
+ *           with the same result. --dquickts is the target engine
+ *           tree (its VENDORED_FROM pin + quickjs-opcode.h +
+ *           libquickjs.a); --new-sig-snap is a snapshot written by the
+ *           new engine (its build signature + class table); the new
+ *           engine version and format identity are computed from the
+ *           target tree + durablets.c, never taken on faith.
+ *           --durablets-c overrides the durablets.c the version and
+ *           identity are computed from, for an upgrade that also
+ *           changes it. A snapshot already at the target version is
+ *           reported as already-converted, not rewritten. A converter
+ *           refusal exits 2 with CONVERT REFUSED: on stderr and no
+ *           output written and no state touched.)
  *
  * Exit codes: 0 done, 2 held at a gate (run again after delivering
- * an answer), 1 error / refusal. State defaults to ./.agentts-state
+ * an answer) or converter refusal (snapshot convert), 1 error / refusal. State defaults to ./.agentts-state
  * (or $AGENTTS_STATE_DIR). The journal under stateDir/journals is the
  * source of truth; blobs under stateDir/blobs let a later process
  * resume a held gate.
@@ -96,6 +114,11 @@ import {
   syncRunToTask,
 } from "./task-backend";
 import { compilerVersion, CHECKER_VERSION, GateError } from "./gate";
+import {
+  ConvertRefusalError,
+  convertStateDir,
+  makeConvertWorkDir,
+} from "./snapshot-convert";
 import { checkWorkflowFile, checkLayeringFiles, CheckerError, type CheckerDiagnostic } from "./checker";
 import { ExtractionError } from "./extract";
 import { decideLocal } from "./decision-model";
@@ -115,9 +138,12 @@ import {
 
 function usage(): never {
   console.error(`usage:
-  agentts run <workflow> [--run-id ID] [--input-file FILE | --input JSON] [--wait] [--adapter mock|direct] [--clock virtual|real] [--state-dir DIR] [--task TASK] [--gates auto|hold] [--workers-config workers.json] [--mock-answers answers.json]
+  agentts run <workflow> [--run-id ID] [--input-file FILE | --input JSON] [--wait] [--adapter mock|direct] [--clock virtual|real] [--state-dir DIR] [--task TASK] [--gates auto|hold] [--workers-config workers.json] [--mock-answers answers.json] [--launched-by SESSION] [--owner SESSION] [--keep]
   agentts run - [--input-file FILE | --input JSON] [--wait] [...] (BRA-112: "-" reads the workflow source from stdin; materialized content-addressed to .agentts-scratch/inline/<hash>.ts under the cwd; relative imports resolve against .agentts-scratch/inline/)
   (--adapter default: direct on the production state dir ~/workspace/agentts-state, mock elsewhere)
+  (--launched-by default: $AGENTTS_LAUNCHED_BY; --owner default: $AGENTTS_OWNER. BRA-211: launchedBy is provenance — the session that submitted the run; owner is the session that executes and drives it. Only a job-looping session (a lead) can be an owner; the engine records the owner as given and does not validate lead-ness. The Director launches with owner set to the lead and never owns. Either field absent = legacy, nothing recorded. The owner OR the launcher may cancel the run; 'agentts runs --owner' lists the runs a lead drives, '--launched-by' the runs a session submitted. BRA-178: --keep marks the run kept past GC — a kept run is never collected, at any age; default false.)
+  agentts runs [--owner SESSION] [--launched-by SESSION] [--limit N] [--json]
+  agentts cancel <runId> [--reason R] [--launched-by SESSION | --owner SESSION] [--server URL]
   (--gates default auto: the mock adapter answers gates "yes" at once and logs GATE AUTO-ANSWERED; a real human checkpoint needs --gates hold on BOTH run/submit and queue run — run and queue run build separate Hosts (BRA-119). The direct and muse adapters always hold.)
   agentts result <runId> [--state-dir DIR]
   agentts check <workflow> [--state-dir DIR] [--json]
@@ -141,7 +167,9 @@ function usage(): never {
   agentts worker cancel <jobId> [--reason R] [--server URL]
   agentts worker get-job --worker-id W [--server URL]
   agentts worker complete-job --job-id J --worker-id W (--result JSON | --result-file F | --error MSG) [--files-dir D] [--server URL]
-  agentts version`);
+  agentts version
+  agentts snapshot convert --state-dir DIR --run-id ID --dquickts TREE --new-sig-snap SNAP [--durablets-c PATH]
+  (BRA-134: convert a suspended run's snapshot to a new dquickts engine build and rewrite the state dir under the new engine version + format identity; exit 2 with CONVERT REFUSED: on a converter refusal, no output and no state touched; an already-converted snapshot is reported, not rewritten)`);
   process.exit(1);
 }
 
@@ -312,6 +340,17 @@ async function cmdRun(args: string[]): Promise<number> {
   }
   runId ??= `run-${path.basename(workflow, ".ts")}-${Date.now()}`;
   const taskId = flag(args, "--task");
+  // BRA-211: the launching session (provenance) and the owning
+  // session (the one that executes and drives the run). Flags win,
+  // $AGENTTS_LAUNCHED_BY / $AGENTTS_OWNER are the fallbacks (a lead's
+  // long-lived worker sets them once); absent = legacy, nothing
+  // recorded. The engine records the owner as given and does not
+  // validate lead-ness — the launcher names a lead as owner.
+  const launchedBy = flag(args, "--launched-by") ?? process.env.AGENTTS_LAUNCHED_BY ?? undefined;
+  const owner = flag(args, "--owner") ?? process.env.AGENTTS_OWNER ?? undefined;
+  // BRA-178: --keep marks the run kept past GC — a kept run is
+  // never collected, at any age. Default false (absent = not kept).
+  const keep = has(args, "--keep");
   const host = await makeHost(args);
   const inputFile = flag(args, "--input-file");
   const inputInline = flag(args, "--input");
@@ -337,9 +376,12 @@ async function cmdRun(args: string[]): Promise<number> {
     }
   }
   try {
-    const { runId: submitted } = host.submit(workflow, { runId, input, taskId });
+    const { runId: submitted } = host.submit(workflow, { runId, input, taskId, launchedBy, owner, keep: keep ? true : undefined });
     if (!has(args, "--wait")) {
       console.log(`RUN ${submitted}`);
+      if (launchedBy) console.log(`launched by: ${launchedBy}`);
+      if (owner) console.log(`owner: ${owner}`);
+      if (keep) console.log(`kept: true`);
       return 0;
     }
     // --wait: submit, then drive the queue, then fetch the result —
@@ -377,6 +419,12 @@ function printResult(host: Host, runId: string): number {
     console.log(`GATE PENDING ${runId} — deliver an answer with:`);
     console.log(`  agentts deliver-gate ${runId} '{"answer":"yes"}' --state-dir ${host.stateDir}`);
     return 2;
+  }
+  // BRA-211: a cancelled run is a settled outcome, not a failure —
+  // report it and exit 0, like pending/running.
+  if (res.status === "cancelled") {
+    console.log(`run ${runId}: cancelled${res.error ? ` (${res.error})` : ""}`);
+    return 0;
   }
   console.log(`run ${runId}: ${res.status}`);
   return 0;
@@ -523,10 +571,119 @@ async function cmdStatus(args: string[]): Promise<number> {
     console.log(`no journal for ${runId} in ${host.stateDir}`);
     return 1;
   }
+  const attribution = host.runAttribution(runId);
   console.log(`run: ${runId}`);
   console.log(`status: ${runStatusFromJournal(events)}`);
+  console.log(`launchedBy: ${attribution?.launchedBy ?? "(none)"}`);
+  console.log(`owner: ${attribution?.owner ?? "(none)"}`);
   console.log(`events: ${events.length}`);
   for (const e of events.slice(-8)) console.log(`  ${JSON.stringify(e)}`);
+  return 0;
+}
+
+/** List runs in the state dir (BRA-211): newest first, default 50
+ * rows — the list is bounded, so a state dir with years of runs
+ * cannot blow the ~60KB exec-trap stdout cap through a caller.
+ * --owner filters to the runs a session drives (the primary query
+ * for a lead checking its own work); --launched-by filters to the
+ * runs a session submitted (provenance). The two filters combine
+ * (AND). --json prints the same rows as JSON. Status is
+ * journal-derived, as `status` does it, falling back to the queue
+ * entry's status when the run has no journal yet. Visibility is
+ * pull-only: no push/notification path, no long-poll watch. */
+async function cmdRuns(args: string[]): Promise<number> {
+  const host = await makeHost(args);
+  const ownerFilter = flag(args, "--owner") ?? process.env.AGENTTS_OWNER ?? undefined;
+  const launchedByFilter = flag(args, "--launched-by") ?? process.env.AGENTTS_LAUNCHED_BY ?? undefined;
+  const limitRaw = flag(args, "--limit");
+  const limit = limitRaw === undefined ? 50 : Math.max(0, Number.parseInt(limitRaw, 10) || 0);
+  const asJson = has(args, "--json");
+  const entries = host
+    .readQueue()
+    .filter((e) => (!ownerFilter || e.owner === ownerFilter) && (!launchedByFilter || e.launchedBy === launchedByFilter))
+    .sort((a, b) => (a.enqueuedAt < b.enqueuedAt ? 1 : a.enqueuedAt > b.enqueuedAt ? -1 : 0));
+  const total = entries.length;
+  const rows = entries.slice(0, limit).map((e) => {
+    const events = host.journal(e.runId);
+    const status = events.length ? runStatusFromJournal(events) : e.status;
+    return {
+      runId: e.runId,
+      status,
+      launchedBy: e.launchedBy ?? null,
+      owner: e.owner ?? null,
+      workflow: e.workflowPath,
+      enqueuedAt: e.enqueuedAt,
+    };
+  });
+  if (asJson) {
+    console.log(JSON.stringify(rows, null, 2));
+    return 0;
+  }
+  if (!rows.length) {
+    const filterDesc = [
+      ...(ownerFilter ? [`owned by ${ownerFilter}`] : []),
+      ...(launchedByFilter ? [`launched by ${launchedByFilter}`] : []),
+    ].join(", ");
+    console.log(
+      total === 0
+        ? filterDesc
+          ? `no runs ${filterDesc} in ${host.stateDir}`
+          : `no runs in ${host.stateDir}`
+        : `no runs shown (limit ${limit} of ${total} run(s))`,
+    );
+    return 0;
+  }
+  for (const r of rows) {
+    console.log(`${r.status} ${r.runId} launchedBy=${r.launchedBy ?? "-"} owner=${r.owner ?? "-"} ${r.workflow}`);
+  }
+  return 0;
+}
+
+/** Cancel a workflow run (BRA-211): flip the queue entry (the Host
+ * enforces the attribution rule — the owner OR the launcher may
+ * cancel an attributed run; any other session is refused), then
+ * cancel the run's queued/running server jobs, best-effort. The run
+ * cancel itself is the authority: a worker server that cannot be
+ * reached is a warning on stderr, not a failure of the cancel —
+ * the run will never drive again, and a cancelled job's late
+ * completion is a 409. The caller identifies as one session:
+ * --launched-by wins, then --owner, then the env fallbacks — the
+ * identity is one session either way, and the Host checks it
+ * against owner-or-launcher. */
+async function cmdCancel(args: string[]): Promise<number> {
+  const runId = args[0];
+  if (!runId) usage();
+  const host = await makeHost(args);
+  const reason = flag(args, "--reason") ?? "cancelled via CLI";
+  const cancelledBy =
+    flag(args, "--launched-by") ??
+    flag(args, "--owner") ??
+    process.env.AGENTTS_LAUNCHED_BY ??
+    process.env.AGENTTS_OWNER ??
+    undefined;
+  try {
+    host.cancelWorkflowRun(runId, { reason, cancelledBy });
+  } catch (e) {
+    console.error(`cancel: ${e instanceof Error ? e.message : String(e)}`);
+    return 1;
+  }
+  const serverUrl = (flag(args, "--server") ?? workerServerUrl()).replace(/\/$/, "");
+  let jobsCancelled = 0;
+  try {
+    const jobsRes = await httpAsync("GET", `${serverUrl}/jobs`);
+    if (jobsRes.status !== 200) throw new Error(`GET /jobs returned HTTP ${jobsRes.status}`);
+    const list: any[] = Array.isArray(jobsRes.body?.jobs) ? jobsRes.body.jobs : [];
+    const mine = list.filter((j) => j.runId === runId && (j.status === "queued" || j.status === "running"));
+    for (const j of mine) {
+      const r = await httpAsync("POST", `${serverUrl}/cancel-job`, { jobId: j.jobId, reason });
+      if (r.status === 200) jobsCancelled += 1;
+    }
+  } catch (e) {
+    console.error(
+      `warning: worker server ${serverUrl} unreachable — the run is cancelled but its server jobs were not: ${e instanceof Error ? e.message : String(e)}`,
+    );
+  }
+  console.log(`CANCELLED ${runId} (${jobsCancelled} job(s) cancelled)`);
   return 0;
 }
 
@@ -925,6 +1082,68 @@ async function cmdCheck(args: string[]): Promise<number> {
   }
 }
 
+async function cmdSnapshot(args: string[]): Promise<number> {
+  const [sub, ...rest] = args;
+  if (sub !== "convert") {
+    console.error("usage: agentts snapshot convert --state-dir DIR --run-id ID --dquickts TREE --new-sig-snap SNAP [--durablets-c PATH]");
+    return 1;
+  }
+  return cmdSnapshotConvert(rest);
+}
+
+async function cmdSnapshotConvert(args: string[]): Promise<number> {
+  const stateDirArg = flag(args, "--state-dir");
+  const runId = flag(args, "--run-id");
+  const dquicktsDir = flag(args, "--dquickts");
+  const newSigSnap = flag(args, "--new-sig-snap");
+  const durabletsC = flag(args, "--durablets-c");
+  const missing = [
+    ["--state-dir", stateDirArg],
+    ["--run-id", runId],
+    ["--dquickts", dquicktsDir],
+    ["--new-sig-snap", newSigSnap],
+  ].filter(([, v]) => !v).map(([name]) => name);
+  if (missing.length) {
+    console.error(`snapshot convert: missing required ${missing.join(", ")}`);
+    console.error("usage: agentts snapshot convert --state-dir DIR --run-id ID --dquickts TREE --new-sig-snap SNAP [--durablets-c PATH]");
+    return 1;
+  }
+  const workDir = makeConvertWorkDir();
+  try {
+    const result = convertStateDir({
+      stateDir: stateDirArg!,
+      runId: runId!,
+      dquicktsDir: dquicktsDir!,
+      newSigSnapPath: newSigSnap!,
+      durabletsCPath: durabletsC,
+      workDir,
+      onProgress: (line) => console.log(line),
+    });
+    if (result.alreadyConverted) {
+      console.log(
+        `ALREADY CONVERTED: ${runId} is already at ${result.newVersion}${result.recordUpdated ? " (record updated)" : ""} — snapshot not rewritten`,
+      );
+      return 0;
+    }
+    console.log(
+      `CONVERT OK: ${runId} converted to ${result.newVersion} (${result.bytesLength} bytes, sig=0x${result.newSignature.toString(16)}, ${result.convertedCells} bytecode cells, ${result.framesRemapped} frames remapped, ${result.atomsAppended} atoms appended)`,
+    );
+    return 0;
+  } catch (e) {
+    if (e instanceof ConvertRefusalError) {
+      console.error(`CONVERT REFUSED: ${e.message}`);
+      return 2;
+    }
+    throw e;
+  } finally {
+    try {
+      fs.rmSync(workDir, { recursive: true, force: true });
+    } catch {
+      /* scratch cleanup is best-effort */
+    }
+  }
+}
+
 async function main(): Promise<number> {
   const [cmd, ...args] = process.argv.slice(2);
   try {
@@ -947,6 +1166,10 @@ async function main(): Promise<number> {
         return await cmdWatchdog(args);
       case "status":
         return await cmdStatus(args);
+      case "runs":
+        return await cmdRuns(args);
+      case "cancel":
+        return await cmdCancel(args);
       case "queue":
         return await cmdQueue(args);
       case "sync-task":
@@ -959,6 +1182,8 @@ async function main(): Promise<number> {
         return await cmdProfile(args);
       case "worker":
         return await cmdWorker(args);
+      case "snapshot":
+        return await cmdSnapshot(args);
       case "version":
         console.log(`agentts-host v0 (BRA-44), typescript ${compilerVersion()}`);
         return 0;
