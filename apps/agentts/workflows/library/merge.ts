@@ -14,27 +14,37 @@
 // 2. Copy the changed files to live; confirm the post-merge diff is
 //    empty (or exactly the intended delta).
 // 3. Never merge while a tier-1 runs against the live tree.
-// 4. Fresh live tier-1 with a fresh --resume-dir; independently count
-//    via parseSectionOutput over the raw section logs and compare with
-//    the driver's PASS line (a resume-skipped run proves nothing). The
-//    delta vs the previous baseline is exactly the new section's checks.
+// 4. Live tier-1 with a fresh --resume-dir by default; independently
+//    count via parseSectionOutput over the raw section logs and
+//    compare with the driver's PASS line (an unverified
+//    resume-skipped run proves nothing). A re-drive of a killed
+//    merge may carry the resume dir forward instead (input
+//    carryForwardResume): the journal is validated pre-apply (every
+//    resumed section needs its progress.jsonl row + .done marker),
+//    the resumed count is report data (`resumedSections`), and a
+//    clean verified resumed run merges like a fresh one. The delta
+//    vs the previous baseline is exactly the new section's checks.
 // 5. Baselines byte-identical; never re-baseline without a human
 //    decision. host.ts conflicts need resolution at merge time.
 //
 // The workflow's steps (exec traps, direct adapter):
 //
 // 0. Refuse loudly, writing nothing, when a tier-1 is in flight
-//    (a run.sh process running against the live tree), when the
-//    copy-time manifest is missing or unparsable, when the diff is
-//    not confined to the claimed files, when any file conflicts, or
-//    when the baselines file differs.
+//    (a run.sh process running against the live tree), when a real
+//    (non-dry-run) merge carries no Landing authorization or a malformed
+//    one (the authorization guard — landings go through Landing first),
+//    when the copy-time manifest is missing or unparsable, when the
+//    diff is not confined to the claimed files, when any file
+//    conflicts, or when the baselines file differs, or when the
+//    resume dir is not fresh and the run did not ask to carry it
+//    forward (carryForwardResume).
 // 1. Compute the three-way diff IN SHELL (sparseDiffScript): the
 //    manifest is read from disk and both trees are hashed inside one
 //    python process, and only the SPARSE diff crosses the trap
 //    boundary — the files whose base/copy/live hashes are not all
 //    equal, plus the manifest's copiedAt. A full manifest (~162KB
 //    for the real tree) or a full hash listing would crash the C
-//    host: exec-trap stdout caps at ~60KB (QA probe: 59,561 B
+//    host: exec-trap stdout caps at ~60KB (Quality probe: 59,561 B
 //    passes, 64,111 B crashes). Classify every claimed file
 //    three-way against the manifest base (see classifyMergeFile),
 //    plan the apply, then apply it (cp/rm), then re-diff in-shell
@@ -43,7 +53,8 @@
 // 2. Typecheck the merged tree (bun x tsc --noEmit), its output
 //    redirected to a file in workDir with only the first 4000 bytes
 //    returned — the same trap-stdout cap.
-// 3. Run tier 1 with a fresh --resume-dir, its output redirected to
+// 3. Run tier 1 with a fresh --resume-dir (or the carried-forward
+//    dir on a re-drive — see point 4), its output redirected to
 //    a file with only the PASS summary line returned, and grep the
 //    on-disk section logs for the OK count and the ^PASS count — from
 //    the logs, never from the runner's summary line (the driver's
@@ -95,7 +106,7 @@
 //    tier 1. A suite driven without run.sh in its command line
 //    would not be seen — recorded as a known limit, not papered
 //    over.
-// 7. Trap-stdout budget: exec-trap stdout caps at ~60KB (QA probe:
+// 7. Trap-stdout budget: exec-trap stdout caps at ~60KB (Quality probe:
 //    59,561 B passes, 64,111 B crashes — the manifest cat died
 //    deterministically at trap-2 on the real tree). Every exec
 //    trap's stdout is therefore bounded IN SHELL, never by slicing
@@ -110,6 +121,71 @@
 //    aggregation returns one line per section log (~1KB for 47
 //    sections). No trap returns a full listing, a full manifest, a
 //    full tsc log, or a full suite log.
+// 8. The merge report carries the Landing authorization in its schema
+//    (MergeAuthorization on the input, authorization on the report,
+//    carried verbatim, null when absent) so the record itself proves
+//    the landing went through Landing first. The fallback and loop
+//    landings wrote the field post-hoc from the driver; this build
+//    makes it structural, and the landing driver passes the
+//    authorization as workflow input instead of writing the field
+//    post-hoc. A real merge without an authorization refuses before
+//    the diff step (brief decision 1) — a dry-run without one is
+//    fine, because Landing needs the dry-run plan to verify before
+//    authorizing, and requiring one there would be circular.
+//    Validation is light (brief decision 2): authorizer and
+//    authorizedAt must be non-empty strings; channel,
+//    verificationSummary, and expectedNewBaseline must be strings
+//    (empty allowed — a terse authorization is still an
+//    authorization); note, when present, must be a string. A
+//    malformed authorization is refused loudly at the same guard.
+// 9. Tier-1 resume (merge tier-1 resume fix): a re-drive of a killed
+//    merge carries the resume dir AND the copy forward (input
+//    carryForwardResume; the driver reads the killed run from the
+//    previous probe dir's merge-state queue.json + its
+//    input-<runId>.json and passes the same copyRoot + resumeDir).
+//    The journal is validated pre-apply — a resumed section counts
+//    only when its progress.jsonl row + .done marker both exist —
+//    and the count is report data (`resumedSections`), never a note,
+//    so a clean verified resumed run merges. The verdict rule (any
+//    note → "failed") is untouched; an unverified resume (sections
+//    skipped via resume, nothing verified) still fails exactly as
+//    before. Reconciliation is resumed + fresh == total, checked
+//    three ways: the summary line (driven chunks + reused chunks),
+//    the log aggregation (markers), and the journal (section rows
+//    before vs after the run). A missing/corrupt carried-forward
+//    journal, or a run.sh fingerprint refusal, falls back to a fresh
+//    tier-1, recorded as fresh in `resumeFallback` — data, never a
+//    note. A run that did not ask to carry a resume forward refuses
+//    a non-fresh resume dir loudly before anything is written.
+//    run.sh itself is untouched: its resume mechanism is proven and
+//    the workflow only chooses which dir to pass. The verify-fix
+//    parallel (its note rule + flip) is out of scope.
+//    Replay-robustness (fix round): the engine may re-execute the
+//    workflow after the tier-1 has grown the journal, so the
+//    pre-check count and the first invocation's summary are pinned
+//    durably at the resume dir's top level — `resume-pre.json`
+//    (the pre-run journal count) and `resume-tier1-summary.json`
+//    (the first completed invocation's summary counts + PASS line)
+//    — each with the journal lineage (the first `lines` lines of
+//    progress.jsonl, verified by sha256; progress.jsonl is
+//    append-only) and the run key (mergeId + workDir): a replay of
+//    the same run reuses the pin, while a NEW drive against the
+//    same resume dir derives fresh from the grown journal (its
+//    journal has legitimately accumulated since the last drive).
+//    A stale pin (a different journal or a different run) is
+//    overwritten; a torn pin is treated as absent. run.sh never
+//    reads these files (it only writes `fingerprint` at the top
+//    level), so they cannot confuse its resume or the journal
+//    validation.
+//    No date parsing — the field is a record, not a clock. The
+//    guard's refusal records authorization null in its report:
+//    there is no valid authorization of record, and carrying a
+//    malformed object verbatim would violate the report's type and
+//    misrepresent it as the authorization the merge ran under (the
+//    brief's "every call site passes input.authorization ?? null"
+//    is read as the validated authorization, null when absent or
+//    refused — the one place the literal wording does not hold).
+//    No other behavior changes (brief decision 3).
 //
 // Known v0 limits, carried verbatim in every report:
 //
@@ -159,10 +235,20 @@ export interface MergeCopyInput {
   /** Absolute scratch dir (work files, TMPDIR for the suite run).
    * Created by the workflow. */
   workDir: string;
-  /** Fresh --resume-dir for the tier-1 run. Must be fresh: a resumed
+  /** --resume-dir for the tier-1 run. Fresh by default: a resumed
    * run that skips sections proves nothing (skippedViaResume > 0
-   * fails the verdict). */
+   * fails the verdict) unless the resume is verified — see
+   * carryForwardResume. */
   resumeDir: string;
+  /** Carry forward the resume dir from a killed merge's run instead
+   * of requiring it fresh. Set by the driver when it re-drives a
+   * killed run (the same copyRoot + the same resumeDir as the killed
+   * run): the pre-run journal validation verifies each resumed
+   * section (a progress.jsonl row + a .done marker), the resumed
+   * count is reported as data in `resumedSections`, and a verified
+   * resumed run merges. Default false — a run that did not ask for
+   * carry-forward still requires a fresh resume dir. */
+  carryForwardResume?: boolean;
   /** Files the merge claims the copy changes (repo-relative paths). */
   claimedFiles: string[];
   /** dquickts tree for the C host build inside the suite run
@@ -186,6 +272,35 @@ export interface MergeCopyInput {
   /** Growth the merge itself is expected to add (the merged fix's
    * own new section and checks). Absent means no growth expected. */
   expectedAdditions?: ExpectedAddition[];
+  /** The Landing authorization for this landing (optional in the input
+   * — a dry-run plans without one; a real merge without one is
+   * refused loudly before the diff step, brief decision 1). The
+   * landing driver passes the authorization Landing sent it; the
+   * report carries it verbatim. */
+  authorization?: MergeAuthorization;
+}
+
+/** The Landing authorization for a landing: who authorized it, when,
+ * through what channel, and what the authorization rested on. A
+ * record, not a clock — authorizedAt is carried as a string, never
+ * parsed. */
+export interface MergeAuthorization {
+  /** e.g. "Landing". Must be a non-empty string. */
+  authorizer: string;
+  /** ISO 8601, e.g. "2026-11-21T22:47:00Z". Must be a non-empty string. */
+  authorizedAt: string;
+  /** Where the authorization arrived, e.g. "LBR lead chat
+   * (a25045a8-6678-417c-bcae-d1248594384a), direct to the
+   * Implementation lead". Must be a string (empty allowed). */
+  channel: string;
+  /** What the authorization rested on — copy manifest, diff, legs,
+   * tier-1 recount, Quality verdict. Must be a string (empty allowed). */
+  verificationSummary: string;
+  /** e.g. "58 sections / 3,551 OK". Must be a string (empty allowed). */
+  expectedNewBaseline: string;
+  /** e.g. no Linear issue exists for the build. Optional; when
+   * present it must be a string. */
+  note?: string;
 }
 
 /** One file's three-way classification. */
@@ -238,6 +353,13 @@ export interface MergePlan {
 /** The merge report — the workflow's output, for Meroki's review + close. */
 export interface MergeReport {
   mergeId: string;
+  /** The Landing authorization this merge ran under, carried verbatim
+   * from the input — null when the input carried none (a dry-run,
+   * or a merge refused before the diff step for a missing or
+   * malformed authorization). The field is present on every report
+   * (never omitted), so a re-check reads it without guessing
+   * whether the workflow version knows about it. */
+  authorization: MergeAuthorization | null;
   /** "merged" means the apply + typecheck + tier-1 evidence checks
    * out. It is NOT acceptance: Meroki reviews this report and closes.
    * "dry-run" means the plan is clean and nothing was written.
@@ -262,6 +384,17 @@ export interface MergeReport {
   typecheck: TypecheckResult;
   suite: SuiteResult;
   baseline: BaselineResult;
+  /** Sections verified as resumed from the carried-forward resume
+   * dir's journal (a progress.jsonl row + a .done marker each),
+   * counted before the tier-1 run. 0 on a fresh run and on a
+   * fallback to fresh. Data, never a note: a verified resumed run
+   * merges. */
+  resumedSections: number;
+  /** Why a requested carried-forward resume fell back to a fresh
+   * tier-1 run (missing/corrupt journal, fingerprint refusal, the
+   * copy gone or different) — null when no fallback happened. A
+   * fallback is data, never a note, so it never flips the verdict. */
+  resumeFallback: string | null;
   /** When the manifest was recorded ("" when no manifest was read). */
   manifestCopiedAt: string;
   /** The known v0 limits, carried verbatim in every report. */
@@ -272,6 +405,35 @@ export interface MergeReport {
 
 export const MERGE_KNOWN_LIMIT =
   "v0 limit: a partial apply is NOT rolled back - applied-so-far is reported instead, and the tree must be repaired by hand; the tier-1 guard sees only run.sh processes running against the live tree; a false pass - a test that passes for the wrong reason - is NOT diagnosed by this workflow (same limit as BRA-126/verify-fix).";
+
+/** Refusal for a real merge with no Landing authorization in its input
+ * (brief decision 1). The exact string is asserted verbatim in the
+ * test. */
+export const MERGE_MISSING_AUTHORIZATION =
+  "merge: no Landing authorization in the run input — landings go through Landing first";
+/** Refusal for a real merge whose authorization is malformed
+ * (brief decision 2). One fixed string for every malformed shape —
+ * the exact string is asserted verbatim in the test. */
+export const MERGE_MALFORMED_AUTHORIZATION =
+  "merge: malformed Landing authorization in the run input — authorizer and authorizedAt must be non-empty strings, channel, verificationSummary, and expectedNewBaseline must be strings";
+
+/** Validate the Landing authorization on the merge input. Pure —
+ * unit-tested directly. Returns null when the authorization is
+ * valid, the exact refusal string otherwise: the missing string
+ * when the input carries none (undefined or null), the malformed
+ * string when it carries one of the wrong shape. */
+export function validateMergeAuthorization(auth: unknown): string | null {
+  if (auth === undefined || auth === null) return MERGE_MISSING_AUTHORIZATION;
+  if (typeof auth !== "object" || Array.isArray(auth)) return MERGE_MALFORMED_AUTHORIZATION;
+  const a = auth as Record<string, unknown>;
+  if (typeof a.authorizer !== "string" || a.authorizer === "") return MERGE_MALFORMED_AUTHORIZATION;
+  if (typeof a.authorizedAt !== "string" || a.authorizedAt === "") return MERGE_MALFORMED_AUTHORIZATION;
+  for (const k of ["channel", "verificationSummary", "expectedNewBaseline"] as const) {
+    if (typeof a[k] !== "string") return MERGE_MALFORMED_AUTHORIZATION;
+  }
+  if (a.note !== undefined && typeof a.note !== "string") return MERGE_MALFORMED_AUTHORIZATION;
+  return null;
+}
 
 /** Single-quote a string for /bin/sh. Pure. */
 export function shellQuote(s: string): string {
@@ -497,7 +659,7 @@ export function sparseDiffScript(copyRoot: string, liveRoot: string, manifestPat
  * paths have none; the parser throws loudly if one ever appears.
  * The prune is -name-based (any depth): the junk dirs live under
  * apps/agentts/, so a top-level -path prune never fired and the
- * manifest held 3,279 node_modules entries (QA FAIL). */
+ * manifest held 3,279 node_modules entries (Quality FAIL). */
 export function hashScript(root: string): string {
   return (
     "cd " +
@@ -722,6 +884,450 @@ export function parseAppliedLines(stdout: string): string[] {
   return out;
 }
 
+/** The result of validating a tier-1 resume journal: the strict
+ * row↔marker correspondence at `<resumeDir>/workflow/tier<tier>/resume/`
+ * (every `section`-event row with rc=0 has a `.done/<slug>` marker AND
+ * every marker has a section row). Pure — parsed from one bounded line. */
+export interface ResumeJournalResult {
+  /** "valid": the journal proves `resumed` sections; "missing": no
+   * progress.jsonl; "invalid": the journal is corrupt, with `reason`. */
+  status: "valid" | "missing" | "invalid";
+  /** Unique verified sections (row + marker). 0 unless valid. */
+  resumed: number;
+  /** Unique section-event rows (deduplicated) — equals resumed on a
+   * valid journal. 0 unless valid. */
+  rows: number;
+  /** Why the journal is invalid (null unless status is "invalid"). */
+  reason: string | null;
+}
+
+/** The resume-journal validation script: one in-shell python, one
+ * bounded output line — `valid <resumed> <rows>`, `missing`, or
+ * `invalid: <reason>`. Strict row↔marker correspondence: a section
+ * row without its marker (a kill between the marker write and the
+ * row append) or a marker without its row is corrupt, never
+ * silently trusted. Only `section` rows are counted — a skipped
+ * section re-encountered on a re-drive appends a `skip` row for a
+ * slug that already has its section row, so counting skips would
+ * double-count resumed sections. Agreeing duplicate section rows
+ * (same slug, same ok, rc=0 — a run-tests lost-result retry re-runs
+ * the section, forced by `--only`, and the leaf appends a second
+ * row) are deduplicated and counted once (the brief's X1b: no
+ * section is counted twice); a conflicting duplicate (a different
+ * ok for the same slug, or any row with rc != 0) is corrupt. An
+ * empty-but-present journal is valid with 0 resumed (a fresh run
+ * through the same dir). Pure — the script's shape is unit-tested. */
+export function resumeJournalScript(journalDir: string): string {
+  return [
+    "python3 - " + shellQuote(journalDir) + " <<'PYEOF'",
+    "import json, os, sys",
+    "d = sys.argv[1]",
+    "pj = os.path.join(d, 'progress.jsonl')",
+    "done = os.path.join(d, '.done')",
+    "if not os.path.isfile(pj):",
+    "    if os.path.isdir(done) and os.listdir(done):",
+    "        print('invalid: .done markers without progress.jsonl')",
+    "    else:",
+    "        print('missing')",
+    "    sys.exit(0)",
+    "try:",
+    "    rows = []",
+    "    with open(pj) as f:",
+    "        for line in f:",
+    "            line = line.strip()",
+    "            if line:",
+    "                rows.append(json.loads(line))",
+    "except Exception as e:",
+    "    print('invalid: progress.jsonl unparsable: ' + str(e)[:120])",
+    "    sys.exit(0)",
+    "sections = {}",
+    "for r in rows:",
+    "    if not isinstance(r, dict) or 'event' not in r:",
+    "        print('invalid: row without event')",
+    "        sys.exit(0)",
+    "    if r['event'] == 'section':",
+    "        slug = r.get('section')",
+    "        if not isinstance(slug, str) or not slug:",
+    "            print('invalid: section row without slug')",
+    "            sys.exit(0)",
+    "        if r.get('rc', 0) != 0:",
+    "            print('invalid: section row with rc != 0: ' + slug)",
+    "            sys.exit(0)",
+    "        if slug in sections:",
+    "            if r.get('ok') != sections[slug]:",
+    "                print('invalid: duplicate section row: ' + slug)",
+    "                sys.exit(0)",
+    "            continue",
+    "        sections[slug] = r.get('ok')",
+    "markers = set(os.listdir(done)) if os.path.isdir(done) else set()",
+    "for slug in sections:",
+    "    if slug not in markers:",
+    "        print('invalid: section row without .done marker: ' + slug)",
+    "        sys.exit(0)",
+    "for m in markers:",
+    "    if m not in sections:",
+    "        print('invalid: .done marker without section row: ' + m)",
+    "        sys.exit(0)",
+    "print('valid %d %d' % (len(sections), len(sections)))",
+    "PYEOF",
+  ].join("\n");
+}
+
+/** Parse one line of resume-journal script output. Pure — unit-tested
+ * directly. Unrecognized output is invalid, never a crash: a journal
+ * the workflow cannot read is a fallback to fresh, not a throw. */
+export function parseResumeJournalOutput(stdout: string): ResumeJournalResult {
+  const line = (stdout.split("\n").find((l) => l.trim() !== "") ?? "").trim();
+  if (line === "missing") return { status: "missing", resumed: 0, rows: 0, reason: null };
+  if (line.startsWith("invalid: ")) {
+    return { status: "invalid", resumed: 0, rows: 0, reason: line.slice("invalid: ".length) };
+  }
+  const m = /^valid (\d+) (\d+)$/.exec(line);
+  if (m !== null) {
+    return { status: "valid", resumed: Number(m[1]), rows: Number(m[2]), reason: null };
+  }
+  return { status: "invalid", resumed: 0, rows: 0, reason: "journal script produced unrecognized output" };
+}
+
+/** The replay-robust resume pin (fix round): the engine may
+ * re-execute this workflow (slice replay / chunk repair) after the
+ * tier-1 has grown the journal, so a re-executed pre-check must
+ * report the count from the invocation that first saw this journal
+ * lineage, not the grown journal — otherwise the report's
+ * resumedSections records the replayed invocation's counts, not the
+ * killed run's journal. The pin lives at the resume dir's top level
+ * (`resume-pre.json`), outside run.sh's journal subtree
+ * (`workflow/tier<T>/resume/`): run.sh only writes `fingerprint`
+ * there, so the pin never confuses run.sh's resume or the journal
+ * validation. Lineage is the journal's first `lines` lines
+ * (progress.jsonl is append-only), verified by sha256: a pin whose
+ * prefix no longer matches is stale (a different journal) and is
+ * overwritten with the current values. A torn or unparsable pin is
+ * treated as absent, never a crash. */
+export const RESUME_PRE_FILE = "resume-pre.json";
+export const RESUME_TIER1_SUMMARY_FILE = "resume-tier1-summary.json";
+
+/** A pinned pre-run journal count: the unique verified sections at
+ * the pre-check that first saw this journal lineage, plus the
+ * journal's line count and content hash at that moment (the
+ * lineage), plus the run that pinned it. The run key (mergeId +
+ * workDir) is load-bearing: a NEW drive against the same resume
+ * dir must derive fresh from the grown journal (its journal has
+ * legitimately accumulated since the last drive), while a
+ * REPLAY of the same drive (the engine re-executing the same run
+ * with the same input) must reuse the pin. Pure — the shape is
+ * unit-tested. */
+export interface ResumePreRecord {
+  resumed: number;
+  lines: number;
+  journalHash: string;
+  mergeId: string;
+  workDir: string;
+}
+
+/** Parse a resume-pre pin file's JSON. Returns null when the text
+ * is missing or malformed, or the shape is wrong — a bad pin is
+ * absent, never a crash. Pure — unit-tested directly. */
+export function parseResumePreRecord(text: string): ResumePreRecord | null {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    return null;
+  }
+  if (typeof parsed !== "object" || parsed === null) return null;
+  const r = parsed as Record<string, unknown>;
+  if (typeof r.resumed !== "number" || !Number.isInteger(r.resumed) || r.resumed < 0) return null;
+  if (typeof r.lines !== "number" || !Number.isInteger(r.lines) || r.lines < 0) return null;
+  if (typeof r.journalHash !== "string" || !/^[0-9a-f]{64}$/.test(r.journalHash)) return null;
+  if (typeof r.mergeId !== "string" || r.mergeId === "") return null;
+  if (typeof r.workDir !== "string" || r.workDir === "") return null;
+  return { resumed: r.resumed, lines: r.lines, journalHash: r.journalHash, mergeId: r.mergeId, workDir: r.workDir };
+}
+
+/** Format a resume-pre pin record for disk. Pure — unit-tested
+ * directly (round-trips through parseResumePreRecord). */
+export function formatResumePreRecord(record: ResumePreRecord): string {
+  return JSON.stringify({ resumed: record.resumed, lines: record.lines, journalHash: record.journalHash, mergeId: record.mergeId, workDir: record.workDir }) + "\n";
+}
+
+/** The resume-pre pin script: pin the pre-run journal count, or
+ * reuse an existing pin when this run pinned it and the current
+ * journal still starts with the pinned lines. Prints one bounded
+ * line: `pinned <n>` (this invocation's count, just written),
+ * `reused <n>` (this run's earlier pin — the journal grew since it
+ * was pinned), or `missing` (no progress.jsonl to pin against). A
+ * pin from a different run (another drive against the same resume
+ * dir) is NOT reused — a new drive derives fresh from the grown
+ * journal. A torn or unparsable pin is treated as absent and
+ * overwritten. The write is atomic (temp file + rename) so a kill
+ * mid-write leaves either the old pin or the new one, never a torn
+ * file. Pure — the script's shape is unit-tested, and it is
+ * executed against fixture journals. */
+export function resumePreScript(args: { resumeDir: string; journalDir: string; resumed: number; mergeId: string; workDir: string }): string {
+  return [
+    "python3 - " + shellQuote(args.resumeDir) + " " + shellQuote(args.journalDir) + " " + String(args.resumed) + " " + shellQuote(args.mergeId) + " " + shellQuote(args.workDir) + " <<'PYEOF'",
+    "import hashlib, json, os, sys",
+    "resume_dir, journal_dir, resumed, merge_id, work_dir = sys.argv[1], sys.argv[2], int(sys.argv[3]), sys.argv[4], sys.argv[5]",
+    "pin_path = os.path.join(resume_dir, '" + RESUME_PRE_FILE + "')",
+    "pj = os.path.join(journal_dir, 'progress.jsonl')",
+    "def journal_lines():",
+    "    try:",
+    "        with open(pj, 'rb') as f:",
+    "            data = f.read()",
+    "    except Exception:",
+    "        return None",
+    "    lines = data.splitlines(keepends=True)",
+    "    return lines, hashlib.sha256(b''.join(lines)).hexdigest()",
+    "def prefix_matches(record):",
+    "    cur = journal_lines()",
+    "    if cur is None:",
+    "        return False",
+    "    lines, _ = cur",
+    "    if len(lines) < record['lines']:",
+    "        return False",
+    "    head = b''.join(lines[:record['lines']])",
+    "    return hashlib.sha256(head).hexdigest() == record['journalHash']",
+    "try:",
+    "    with open(pin_path) as f:",
+    "        record = json.load(f)",
+    "    if (isinstance(record, dict) and isinstance(record.get('resumed'), int)",
+    "            and isinstance(record.get('lines'), int) and isinstance(record.get('journalHash'), str)",
+    "            and record.get('mergeId') == merge_id and record.get('workDir') == work_dir",
+    "            and prefix_matches(record)):",
+    "        print('reused %d' % record['resumed'])",
+    "        sys.exit(0)",
+    "except Exception:",
+    "    pass",
+    "cur = journal_lines()",
+    "if cur is None:",
+    "    print('missing')",
+    "    sys.exit(0)",
+    "lines, digest = cur",
+    "record = {'resumed': resumed, 'lines': len(lines), 'journalHash': digest, 'mergeId': merge_id, 'workDir': work_dir}",
+    "tmp = pin_path + '.tmp'",
+    "with open(tmp, 'w') as f:",
+    "    f.write(json.dumps(record, sort_keys=True) + '\\n')",
+    "os.replace(tmp, pin_path)",
+    "print('pinned %d' % resumed)",
+    "PYEOF",
+  ].join("\n");
+}
+
+/** Parse one line of resume-pre script output. Pure — unit-tested
+ * directly. Unrecognized output is invalid, never a crash: a pin
+ * the workflow cannot read degrades to the derived count. */
+export function parseResumePreOutput(stdout: string): { action: "pinned" | "reused" | "missing" | "invalid"; resumed: number } {
+  const line = (stdout.split("\n").find((l) => l.trim() !== "") ?? "").trim();
+  if (line === "missing") return { action: "missing", resumed: 0 };
+  const m = /^(pinned|reused) (\d+)$/.exec(line);
+  if (m !== null) return { action: m[1] as "pinned" | "reused", resumed: Number(m[2]) };
+  return { action: "invalid", resumed: 0 };
+}
+
+/** A pinned first-invocation tier-1 summary: the tier-1 step may be
+ * re-executed (slice replay) after the journal is complete, and the
+ * replayed invocation's summary (0 ran, all skipped) must not
+ * replace the counts from the invocation that did the work. The
+ * pin records the first completed invocation's summary counts plus
+ * its raw PASS line, with the journal lineage at that moment and
+ * the run that pinned it (mergeId + workDir — a new drive pins its
+ * own summary; only a replay of the same run reuses). Pure — the
+ * shape is unit-tested. */
+export interface ResumeTier1SummaryRecord {
+  sectionsRan: number;
+  skippedViaResume: number;
+  ok: number;
+  summaryLine: string;
+  lines: number;
+  journalHash: string;
+  mergeId: string;
+  workDir: string;
+}
+
+/** Parse a resume-tier-1-summary pin file's JSON. Returns null when
+ * the text is missing or malformed, or the shape is wrong. Pure —
+ * unit-tested directly. */
+export function parseResumeTier1SummaryRecord(text: string): ResumeTier1SummaryRecord | null {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    return null;
+  }
+  if (typeof parsed !== "object" || parsed === null) return null;
+  const r = parsed as Record<string, unknown>;
+  if (typeof r.sectionsRan !== "number" || !Number.isInteger(r.sectionsRan) || r.sectionsRan < 0) return null;
+  if (typeof r.skippedViaResume !== "number" || !Number.isInteger(r.skippedViaResume) || r.skippedViaResume < 0) return null;
+  if (typeof r.ok !== "number" || !Number.isInteger(r.ok) || r.ok < 0) return null;
+  if (typeof r.summaryLine !== "string" || r.summaryLine === "") return null;
+  if (typeof r.lines !== "number" || !Number.isInteger(r.lines) || r.lines < 0) return null;
+  if (typeof r.journalHash !== "string" || !/^[0-9a-f]{64}$/.test(r.journalHash)) return null;
+  if (typeof r.mergeId !== "string" || r.mergeId === "") return null;
+  if (typeof r.workDir !== "string" || r.workDir === "") return null;
+  return {
+    sectionsRan: r.sectionsRan,
+    skippedViaResume: r.skippedViaResume,
+    ok: r.ok,
+    summaryLine: r.summaryLine,
+    lines: r.lines,
+    journalHash: r.journalHash,
+    mergeId: r.mergeId,
+    workDir: r.workDir,
+  };
+}
+
+/** The tier-1 summary pin script: pin the first completed
+ * invocation's summary, or reuse an existing pin when this run
+ * pinned it and the current journal still starts with the pinned
+ * lines. Prints one bounded line: `pinned <ran> <skipped> <ok>
+ * <PASS line>` (this invocation's summary, just written), `reused
+ * <ran> <skipped> <ok> <PASS line>` (this run's earlier summary —
+ * the journal grew since it was pinned), `none` (this invocation
+ * produced no summary, e.g. it was killed or refused — nothing is
+ * pinned and any existing pin is kept), or `missing` (no
+ * progress.jsonl to pin against). A pin from a different run is
+ * NOT reused — a new drive pins its own summary. A torn or
+ * unparsable pin is treated as absent and overwritten; the write
+ * is atomic (temp file + rename). Pure — the script's shape is
+ * unit-tested, and it is executed against fixture journals. */
+export function resumeTier1SummaryScript(args: {
+  resumeDir: string;
+  journalDir: string;
+  mergeId: string;
+  workDir: string;
+  summary: { sectionsRan: number; skippedViaResume: number; ok: number; summaryLine: string } | null;
+}): string {
+  const s = args.summary;
+  const summaryArgs =
+    s === null
+      ? "0 0 0 ''"
+      : String(s.sectionsRan) + " " + String(s.skippedViaResume) + " " + String(s.ok) + " " + shellQuote(s.summaryLine);
+  return [
+    "python3 - " + shellQuote(args.resumeDir) + " " + shellQuote(args.journalDir) + " " + shellQuote(args.mergeId) + " " + shellQuote(args.workDir) + " " + summaryArgs + " <<'PYEOF'",
+    "import hashlib, json, os, sys",
+    "resume_dir, journal_dir, merge_id, work_dir = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]",
+    "ran, skipped, ok, summary_line = int(sys.argv[5]), int(sys.argv[6]), int(sys.argv[7]), sys.argv[8]",
+    "pin_path = os.path.join(resume_dir, '" + RESUME_TIER1_SUMMARY_FILE + "')",
+    "pj = os.path.join(journal_dir, 'progress.jsonl')",
+    "if summary_line == '':",
+    "    print('none')",
+    "    sys.exit(0)",
+    "def journal_lines():",
+    "    try:",
+    "        with open(pj, 'rb') as f:",
+    "            data = f.read()",
+    "    except Exception:",
+    "        return None",
+    "    lines = data.splitlines(keepends=True)",
+    "    return lines, hashlib.sha256(b''.join(lines)).hexdigest()",
+    "def prefix_matches(record):",
+    "    cur = journal_lines()",
+    "    if cur is None:",
+    "        return False",
+    "    lines, _ = cur",
+    "    if len(lines) < record['lines']:",
+    "        return False",
+    "    head = b''.join(lines[:record['lines']])",
+    "    return hashlib.sha256(head).hexdigest() == record['journalHash']",
+    "try:",
+    "    with open(pin_path) as f:",
+    "        record = json.load(f)",
+    "    if (isinstance(record, dict) and isinstance(record.get('sectionsRan'), int)",
+    "            and isinstance(record.get('skippedViaResume'), int) and isinstance(record.get('ok'), int)",
+    "            and isinstance(record.get('summaryLine'), str) and isinstance(record.get('lines'), int)",
+    "            and isinstance(record.get('journalHash'), str)",
+    "            and record.get('mergeId') == merge_id and record.get('workDir') == work_dir",
+    "            and prefix_matches(record)):",
+    "        print('reused %d %d %d %s' % (record['sectionsRan'], record['skippedViaResume'], record['ok'], record['summaryLine']))",
+    "        sys.exit(0)",
+    "except Exception:",
+    "    pass",
+    "cur = journal_lines()",
+    "if cur is None:",
+    "    print('missing')",
+    "    sys.exit(0)",
+    "lines, digest = cur",
+    "record = {'sectionsRan': ran, 'skippedViaResume': skipped, 'ok': ok, 'summaryLine': summary_line, 'lines': len(lines), 'journalHash': digest, 'mergeId': merge_id, 'workDir': work_dir}",
+    "tmp = pin_path + '.tmp'",
+    "with open(tmp, 'w') as f:",
+    "    f.write(json.dumps(record, sort_keys=True) + '\\n')",
+    "os.replace(tmp, pin_path)",
+    "print('pinned %d %d %d %s' % (ran, skipped, ok, summary_line))",
+    "PYEOF",
+  ].join("\n");
+}
+
+/** Parse one line of tier-1 summary pin script output. Pure —
+ * unit-tested directly. Unrecognized output is invalid, never a
+ * crash: a pin the workflow cannot read degrades to this
+ * invocation's summary. */
+export function parseResumeTier1SummaryOutput(stdout: string): {
+  action: "pinned" | "reused" | "none" | "missing" | "invalid";
+  summary: { sectionsRan: number; skippedViaResume: number; ok: number; summaryLine: string } | null;
+} {
+  const line = (stdout.split("\n").find((l) => l.trim() !== "") ?? "").trim();
+  if (line === "none") return { action: "none", summary: null };
+  if (line === "missing") return { action: "missing", summary: null };
+  const m = /^(pinned|reused) (\d+) (\d+) (\d+) (.*)$/.exec(line);
+  if (m !== null) {
+    return {
+      action: m[1] as "pinned" | "reused",
+      summary: { sectionsRan: Number(m[2]), skippedViaResume: Number(m[3]), ok: Number(m[4]), summaryLine: m[5] },
+    };
+  }
+  return { action: "invalid", summary: null };
+}
+
+/** The three-number reconciliation for a resumed tier-1: sections
+ * resumed from the journal + sections run fresh in this drive ==
+ * sections total (the aggregation's marker count). Pure — unit-tested
+ * directly. `resumedPost` is the journal's section-row count after
+ * the run; `resumedPost - resumedPre` is the fresh part. The
+ * summary-line check (driven chunks + reused chunks == total) is the
+ * same shape at chunk granularity; this one is section-granular
+ * against the journal. */
+export function reconcileResumeCounts(args: {
+  resumedPre: number;
+  resumedPost: number;
+  sectionsRan: number;
+}): boolean {
+  return args.resumedPre + (args.resumedPost - args.resumedPre) === args.sectionsRan;
+}
+
+/** The failed-sections script: extract the slugs run.sh reports as
+ * failed from a tier-1 output file — the workflow driver's
+ * `FAILED: a, b` line, falling back to the section runner's
+ * `section <slug> FAILED` lines (the bash driver). Bounded in-shell
+ * (at most 5 lines back), so a megabyte tier-1 output never reaches
+ * the trap. Pure — the script's shape is unit-tested. */
+export function failedSectionsScript(outPath: string): string {
+  return (
+    "grep -E '^FAILED: |^section [^ ]+ FAILED' " +
+    shellQuote(outPath) +
+    " 2>/dev/null | tail -5 || true"
+  );
+}
+
+/** Parse the failed-sections script output into slugs, in order,
+ * deduplicated. Pure — unit-tested directly. */
+export function parseFailedSectionsOutput(stdout: string): string[] {
+  const out: string[] = [];
+  for (const raw of stdout.split("\n")) {
+    const line = raw.trim();
+    if (line.startsWith("FAILED: ")) {
+      for (const slug of line.slice("FAILED: ".length).split(",")) {
+        const s = slug.trim();
+        if (s !== "" && !out.includes(s)) out.push(s);
+      }
+    } else {
+      const m = /^section ([^ ]+) FAILED/.exec(line);
+      if (m !== null && !out.includes(m[1])) out.push(m[1]);
+    }
+  }
+  return out;
+}
+
 /** The typecheck script: run tsc in the live apps dir, its output
  * redirected to a file, and return only the first 4000 bytes. A
  * failing tsc can print thousands of error lines — returning the
@@ -794,9 +1400,27 @@ export function buildMergeReport(args: {
   suite: SuiteResult;
   baseline: BaselineResult;
   manifestCopiedAt: string;
+  /** Sections verified as resumed from the carried-forward journal
+   * (0 on a fresh run or a fallback to fresh). Optional; absent
+   * means 0. Data, never a note — see the resumedSections report
+   * field. */
+  resumedSections?: number;
+  /** Why a requested carried-forward resume fell back to fresh
+   * (null when no fallback happened). Optional; absent means null.
+   * A fallback is data, never a note. */
+  resumeFallback?: string | null;
+  /** The slugs run.sh reported as failed, each labeled with the run
+   * kind — e.g. "bra123 (resumed run)". Optional; absent means no
+   * failed section was named. Only used in the suite-failure note. */
+  failedSectionLabels?: string[];
   /** Refusal reasons from before the diff step (guard, manifest) —
    * carried verbatim at the head of notes. */
   extraNotes?: string[];
+  /** The Landing authorization to carry verbatim into the report —
+   * the validated authorization, null when absent (a dry-run, or
+   * a merge refused for a missing or malformed authorization).
+   * Optional for callers that predate the field; absent means null. */
+  authorization?: MergeAuthorization | null;
 }): MergeReport {
   const notes: string[] = [...(args.extraNotes ?? [])];
   if (args.tier1InFlight) {
@@ -833,15 +1457,27 @@ export function buildMergeReport(args: {
     );
   }
   if (args.suite.mode === "full" && !args.suite.allPassed) {
+    const failed = args.failedSectionLabels ?? [];
     notes.push(
       "suite did not pass cleanly: " +
         args.suite.sectionsRan +
         " sections ran, " +
         args.suite.totalOk +
-        " OK, allPassed=false — the tree was already merged",
+        " OK, allPassed=false" +
+        (failed.length > 0 ? " — failed sections: " + failed.join(", ") : "") +
+        " — the tree was already merged",
     );
   }
-  if (args.suite.mode === "full" && args.suite.skippedViaResume !== 0) {
+  // The resume note fires only for an UNVERIFIED resume: sections
+  // skipped via resume with nothing verified in the carried-forward
+  // journal. A verified resume (resumedSections > 0) is data on the
+  // report, never a note — the verdict rule (any note → "failed")
+  // otherwise could never let a clean resumed merge land.
+  if (
+    args.suite.mode === "full" &&
+    args.suite.skippedViaResume !== 0 &&
+    (args.resumedSections ?? 0) === 0
+  ) {
     notes.push(
       "suite skipped " +
         args.suite.skippedViaResume +
@@ -856,6 +1492,7 @@ export function buildMergeReport(args: {
   }
   return {
     mergeId: args.mergeId,
+    authorization: args.authorization ?? null,
     verdict: args.verdict,
     dryRun: args.dryRun,
     tier1InFlight: args.tier1InFlight,
@@ -870,6 +1507,8 @@ export function buildMergeReport(args: {
     typecheck: args.typecheck,
     suite: args.suite,
     baseline: args.baseline,
+    resumedSections: args.resumedSections ?? 0,
+    resumeFallback: args.resumeFallback ?? null,
     manifestCopiedAt: args.manifestCopiedAt,
     knownLimit: MERGE_KNOWN_LIMIT,
     notes,
@@ -928,9 +1567,20 @@ export default function mergeCopy(input: MergeCopyInput): MergeReport {
   if (mk.exitCode !== 0) {
     throw new Error("merge: cannot create workDir " + input.workDir + " (rc " + mk.exitCode + ")");
   }
-  const refused = (extraNotes: string[], tier1InFlight = false): MergeReport =>
+  const refused = (
+    extraNotes: string[],
+    tier1InFlight = false,
+    // The authorization of record for a refusal. Defaults to the
+    // input's (validated) authorization; the authorization guard
+    // passes null explicitly — a merge refused for a missing or
+    // malformed authorization ran under no valid authorization, and
+    // carrying a malformed object verbatim would violate the
+    // report's type (see header decision 8).
+    authorization: MergeAuthorization | null = input.authorization ?? null,
+  ): MergeReport =>
     buildMergeReport({
       mergeId: input.mergeId,
+      authorization,
       verdict: "failed",
       dryRun,
       tier1InFlight,
@@ -948,6 +1598,20 @@ export default function mergeCopy(input: MergeCopyInput): MergeReport {
       manifestCopiedAt: "",
       extraNotes,
     });
+
+  // 0b. Authorization guard (brief decisions 1–2): a real merge
+  // without an Landing authorization — or with a malformed one —
+  // refuses before the diff step, before anything is written. A
+  // dry-run without one is fine: Landing needs the dry-run plan to
+  // verify before authorizing, and requiring one there would be
+  // circular. The refusal records authorization null: there is no
+  // valid authorization of record.
+  if (!dryRun) {
+    const authError = validateMergeAuthorization(input.authorization);
+    if (authError !== null) {
+      return refused([authError], false, null);
+    }
+  }
 
   // 1. Tier-1-in-flight guard: a run.sh process running against the
   // live tree means a suite is running against it — writing the
@@ -1033,6 +1697,7 @@ export default function mergeCopy(input: MergeCopyInput): MergeReport {
   if (plan.baselinesRefused.length > 0 || !plan.confinement.confined || plan.conflicts.length > 0) {
     const r = buildMergeReport({
       mergeId: input.mergeId,
+      authorization: input.authorization ?? null,
       verdict: "failed",
       dryRun,
       tier1InFlight: false,
@@ -1057,6 +1722,7 @@ export default function mergeCopy(input: MergeCopyInput): MergeReport {
   if (dryRun) {
     return buildMergeReport({
       mergeId: input.mergeId,
+      authorization: input.authorization ?? null,
       verdict: "dry-run",
       dryRun: true,
       tier1InFlight: false,
@@ -1073,6 +1739,71 @@ export default function mergeCopy(input: MergeCopyInput): MergeReport {
       baseline: uncomparedBaseline(input.baseline, "dry run — no suite run"),
       manifestCopiedAt,
     });
+  }
+
+  // 5b. Resume pre-check (runTier1 only — otherwise no resume dir is
+  // used). Decides the effective resume dir BEFORE the apply, so a
+  // refusal here writes nothing to live. Two branches:
+  // - carryForwardResume: validate the carried-forward journal. A
+  //   valid journal verifies `resumedPre` sections (row + marker
+  //   each) and the run resumes from it. A missing/corrupt journal
+  //   falls back to a fresh dir `<workDir>/tier1-fresh-resume`,
+  //   recorded as fresh in `resumeFallback` — loud in the report,
+  //   never silent, never claiming resumed sections it cannot prove.
+  // - otherwise: the resume dir must be fresh. Any journal content
+  //   (section rows, markers, or a corrupt journal) refuses loudly
+  //   before anything is written — the contract says the dir "must
+  //   be fresh", and a stale journal would silently resume sections
+  //   this merge did not ask to resume.
+  let effectiveResumeDir = input.resumeDir;
+  let resumedPre = 0;
+  let resumeFallback: string | null = null;
+  if (runTier1) {
+    const journalDir = input.resumeDir + "/workflow/tier" + tier + "/resume";
+    const journal = parseResumeJournalOutput(
+      exec({ cmd: "/bin/sh", args: ["-c", resumeJournalScript(journalDir)] }).stdout ?? "",
+    );
+    if (input.carryForwardResume ?? false) {
+      if (journal.status === "valid") {
+        resumedPre = journal.resumed;
+        // Replay-robust pin: the engine may re-execute this
+        // workflow after the tier-1 has grown the journal, and a
+        // re-executed pre-check must report the count from the
+        // invocation that first saw this journal lineage, not the
+        // grown journal — otherwise resumedSections records the
+        // replayed invocation's counts, not the killed run's
+        // journal. The pin is keyed to this run (mergeId +
+        // workDir): a NEW drive against the same resume dir
+        // derives fresh from the grown journal, while a replay of
+        // the same run reuses the pin. A pin failure degrades to
+        // the derived value (correct for a single execution; only
+        // a replay loses the pin).
+        const pin = parseResumePreOutput(
+          exec({ cmd: "/bin/sh", args: ["-c", resumePreScript({ resumeDir: input.resumeDir, journalDir, resumed: journal.resumed, mergeId: input.mergeId, workDir: input.workDir })] }).stdout ?? "",
+        );
+        if (pin.action === "pinned" || pin.action === "reused") resumedPre = pin.resumed;
+      } else {
+        const reason =
+          journal.status === "missing"
+            ? "carried-forward resume dir has no progress.jsonl"
+            : "carried-forward resume journal corrupt: " + (journal.reason ?? "unknown reason");
+        resumeFallback = reason + " — ran a fresh tier-1 instead";
+        effectiveResumeDir = input.workDir + "/tier1-fresh-resume";
+      }
+    } else if (journal.status === "missing" || (journal.status === "valid" && journal.resumed === 0)) {
+      // Fresh (or empty) dir — run.sh starts from section 1.
+    } else if (journal.status === "valid") {
+      throw new Error(
+        "merge: resume dir " + input.resumeDir + " is not fresh (" + journal.resumed +
+          " sections already in its journal) — a merge that did not ask to carry a resume forward refuses a stale dir; pass carryForwardResume to resume it",
+      );
+    } else {
+      throw new Error(
+        "merge: resume dir " + input.resumeDir + " is not fresh (journal corrupt: " +
+          (journal.reason ?? "unknown reason") +
+          ") — refusing before anything is written",
+      );
+    }
   }
 
   // 6. Apply, in claimed-file order (plannedApply then plannedDelete
@@ -1177,19 +1908,38 @@ export default function mergeCopy(input: MergeCopyInput): MergeReport {
     };
   }
 
-  // 9. Tier-1 on the merged tree, fresh resume dir. Counts come from
-  // the on-disk logs; the driver's PASS line is parsed separately and
-  // compared against the independent counts. The run's output is
-  // bounded in-shell (tier1RunScript redirects it to a file and
-  // returns only the PASS summary line — run.sh tees every section's
-  // full output to its stdout, megabytes for a full tier-1, which
-  // would blow the trap cap). An empty summary line means the run
-  // died before its summary, and the verdict fails loudly.
+  // 9. Tier-1 on the merged tree, in the effective resume dir (the
+  // carried-forward dir when the pre-check verified it, else fresh).
+  // Counts come from the on-disk logs; the driver's PASS line is
+  // parsed separately and compared against the independent counts.
+  // The run's output is bounded in-shell (tier1RunScript redirects
+  // it to a file and returns only the PASS summary line — run.sh
+  // tees every section's full output to its stdout, megabytes for a
+  // full tier-1, which would blow the trap cap). An empty summary
+  // line means the run died before its summary, and the verdict
+  // fails loudly.
+  //
+  // Reconciliation is three numbers, all against the independent
+  // counts: sections run fresh in this drive + sections resumed from
+  // the journal == sections total. The summary line's sectionsRan
+  // counts driven chunks and its skippedViaResume counts reused
+  // chunks (chunk-granular); the journal counts sections
+  // (section-granular) — the two are never equated, only reconciled
+  // against the aggregation, which counts markers.
   let suite: SuiteResult = skippedSuite(tier);
+  // The slugs run.sh reported as failed, each labeled with the run
+  // kind — [] when the tier-1 run passed.
+  let failedSectionLabels: string[] = [];
   if (runTier1) {
     const suiteStarted = Date.now();
     let suiteAllPassed = true;
-    const r = exec({
+    // Run tier-1 once in the effective resume dir. A fingerprint
+    // refusal ("refusing to resume") means the carried-forward dir
+    // belongs to a different copy: retry ONCE with a fresh dir,
+    // recorded as fresh. Any other failure is not retried — the
+    // suite fails as today.
+    let runDir = effectiveResumeDir;
+    let r = exec({
       cmd: "/bin/sh",
       args: [
         "-c",
@@ -1197,16 +1947,45 @@ export default function mergeCopy(input: MergeCopyInput): MergeReport {
           dquickts,
           tmpdir: input.workDir + "/tmp",
           runSh,
-          resumeDir: input.resumeDir,
+          resumeDir: runDir,
           outPath: input.workDir + "/tier1.out",
         }),
       ],
       cwd: liveApps,
     });
+    if (r.exitCode !== 0 && runDir === input.resumeDir) {
+      const refusedCount = exec({
+        cmd: "/bin/sh",
+        args: [
+          "-c",
+          "grep -c 'refusing to resume' " + shellQuote(input.workDir + "/tier1.out") + " 2>/dev/null || true",
+        ],
+      }).stdout ?? "";
+      if (Number(refusedCount.trim()) > 0) {
+        resumeFallback =
+          "carried-forward resume dir refused by run.sh (tree fingerprint changed) — ran a fresh tier-1 instead";
+        resumedPre = 0;
+        runDir = input.workDir + "/tier1-fresh-resume";
+        r = exec({
+          cmd: "/bin/sh",
+          args: [
+            "-c",
+            tier1RunScript({
+              dquickts,
+              tmpdir: input.workDir + "/tmp",
+              runSh,
+              resumeDir: runDir,
+              outPath: input.workDir + "/tier1.out",
+            }),
+          ],
+          cwd: liveApps,
+        });
+      }
+    }
     const summaryLine = r.stdout;
     if (r.exitCode !== 0) suiteAllPassed = false;
-    const logDir = input.resumeDir + "/workflow/tier" + tier + "/resume/logs";
-    const doneDir = input.resumeDir + "/workflow/tier" + tier + "/resume/.done";
+    const logDir = runDir + "/workflow/tier" + tier + "/resume/logs";
+    const doneDir = runDir + "/workflow/tier" + tier + "/resume/.done";
     const agg = exec({ cmd: "/bin/sh", args: ["-c", tier1AggregationScript(logDir, doneDir)] });
     if (agg.exitCode !== 0) {
       throw new Error(
@@ -1226,17 +2005,66 @@ export default function mergeCopy(input: MergeCopyInput): MergeReport {
       if (!verdictPresent) suiteAllPassed = false;
       suiteSections.push({ slug: s.slug, ok: s.ok, passLines: s.passLines, verdictPresent });
     }
+    // The failed slugs, named for the report note: run.sh prints
+    // `FAILED: a, b` (workflow driver) or `section <slug> FAILED`
+    // (bash driver). A section that fails ran fresh in this drive —
+    // a resumed section is skipped, never run — so the label names
+    // the run kind: a failed section in a resumed run vs a fresh run.
+    if (!suiteAllPassed) {
+      const failedOut = exec({
+        cmd: "/bin/sh",
+        args: ["-c", failedSectionsScript(input.workDir + "/tier1.out")],
+      }).stdout ?? "";
+      const runKind = resumedPre > 0 ? "resumed run" : "fresh run";
+      failedSectionLabels = parseFailedSectionsOutput(failedOut).map(
+        (slug) => slug + " (" + runKind + ")",
+      );
+    }
+    // Post-run journal reconciliation: the journal after the run
+    // must still be valid, and resumed + fresh == total — the
+    // journal's section rows after the run must equal the
+    // aggregation's marker count, with the pre-run count as the
+    // resumed part. A kill between a marker write and its row
+    // append, or a dropped row, fails this check loudly.
+    const journalAfter = parseResumeJournalOutput(
+      exec({ cmd: "/bin/sh", args: ["-c", resumeJournalScript(runDir + "/workflow/tier" + tier + "/resume")] }).stdout ?? "",
+    );
     let skippedViaResume = 0;
     let summaryMatchesIndependent = true;
     const summary = parseTierSummaryLine(summaryLine);
-    if (summary === null) {
+    // Replay-robust summary pin: the tier-1 step may be re-executed
+    // (slice replay) after the journal is complete, and the replayed
+    // invocation's summary (0 ran, all skipped) must not replace the
+    // counts from the invocation that did the work. The first
+    // completed invocation's summary is pinned at the effective
+    // resume dir's top level (resume-tier1-summary.json) with its
+    // journal lineage and this run's key (mergeId + workDir); a
+    // replay of the same run reuses it, a new drive pins its own.
+    // A pin failure degrades to this invocation's summary.
+    let effectiveSummaryLine = summaryLine;
+    let effectiveSummary = summary;
+    if (summary !== null) {
+      const summaryPin = parseResumeTier1SummaryOutput(
+        exec({ cmd: "/bin/sh", args: ["-c", resumeTier1SummaryScript({ resumeDir: runDir, journalDir: runDir + "/workflow/tier" + tier + "/resume", mergeId: input.mergeId, workDir: input.workDir, summary: { sectionsRan: summary.sectionsRan, skippedViaResume: summary.skippedViaResume, ok: summary.ok, summaryLine } })] }).stdout ?? "",
+      );
+      if (summaryPin.action === "reused" && summaryPin.summary !== null) {
+        effectiveSummary = { sectionsRan: summaryPin.summary.sectionsRan, skippedViaResume: summaryPin.summary.skippedViaResume, ok: summaryPin.summary.ok, wallSeconds: summary.wallSeconds };
+        effectiveSummaryLine = summaryPin.summary.summaryLine;
+      }
+    }
+    if (effectiveSummary === null) {
       summaryMatchesIndependent = false;
     } else {
-      skippedViaResume = summary.skippedViaResume;
-      if (summary.sectionsRan !== aggParsed.sectionsRan) summaryMatchesIndependent = false;
-      if (summary.ok !== aggParsed.totalOk) summaryMatchesIndependent = false;
-      if (summary.skippedViaResume !== 0) summaryMatchesIndependent = false;
+      skippedViaResume = effectiveSummary.skippedViaResume;
+      // Fresh (driven chunks) + resumed (reused chunks) == total markers.
+      if (effectiveSummary.sectionsRan + effectiveSummary.skippedViaResume !== aggParsed.sectionsRan) summaryMatchesIndependent = false;
+      if (effectiveSummary.ok !== aggParsed.totalOk) summaryMatchesIndependent = false;
+      // An unverified resume still fails exactly as before: sections
+      // skipped via resume with nothing verified pre-run prove nothing.
+      if (effectiveSummary.skippedViaResume !== 0 && resumedPre === 0) summaryMatchesIndependent = false;
     }
+    if (journalAfter.status !== "valid") summaryMatchesIndependent = false;
+    else if (!reconcileResumeCounts({ resumedPre, resumedPost: journalAfter.resumed, sectionsRan: aggParsed.sectionsRan })) summaryMatchesIndependent = false;
     suite = {
       mode: "full",
       tier,
@@ -1246,7 +2074,7 @@ export default function mergeCopy(input: MergeCopyInput): MergeReport {
       sections: suiteSections,
       allPassed: suiteAllPassed,
       skippedViaResume,
-      summaryLine,
+      summaryLine: effectiveSummaryLine,
       summaryMatchesIndependent,
       elapsedMs: Date.now() - suiteStarted,
     };
@@ -1269,6 +2097,7 @@ export default function mergeCopy(input: MergeCopyInput): MergeReport {
   // 11. Report. The verdict is evidence, not acceptance.
   const report = buildMergeReport({
     mergeId: input.mergeId,
+    authorization: input.authorization ?? null,
     verdict: "merged",
     dryRun: false,
     tier1InFlight: false,
@@ -1283,6 +2112,9 @@ export default function mergeCopy(input: MergeCopyInput): MergeReport {
     typecheck,
     suite,
     baseline,
+    resumedSections: resumedPre,
+    resumeFallback,
+    failedSectionLabels,
     manifestCopiedAt,
   });
   if (report.notes.length > 0) report.verdict = "failed";
