@@ -42,6 +42,14 @@
 //    in the report). The driver's printed PASS line is parsed
 //    separately and COMPARED against the independent counts; a
 //    mismatch fails the verdict instead of being trusted.
+//    sectionsRan counts section LOGS (defect 6): a log exists for
+//    every section that ran, pass or fail, but a marker exists only
+//    for a passing section — counting markers made a failed section
+//    appear in the per-section lines but not in sectionsRan, so the
+//    aggregation threw and the failure was masked instead of
+//    reported. The report names the failed slugs (from
+//    report-tier1.json's failedSlugs in full mode, from the scoped
+//    runs' exit codes in scoped mode).
 // 2. ^PASS is evidence, not a gate — except through the verdict rule
 //    below. Two real tier-1 sections print no line starting with
 //    PASS (bra112 ends "BRA112 PASS: ...", layering ends "LAYERING
@@ -199,7 +207,10 @@ export interface SuiteSectionResult {
 export interface SuiteResult {
   mode: string;
   tier: number;
-  /** Marker files under .done (one per section that ran). */
+  /** Section logs under logs/ (one per section that ran, pass or
+   * fail — defect 6: a log exists for every section that ran, but a
+   * marker exists only for a passing section, so the log count is
+   * the ran count and the marker count is the passed count). */
   sectionsRan: number;
   /** Narrow-rule OK total across the section logs. */
   totalOk: number;
@@ -208,6 +219,13 @@ export interface SuiteResult {
   sections: SuiteSectionResult[];
   /** Every section exited 0 AND showed a verdict in its log. */
   allPassed: boolean;
+  /** Slugs the tier-1 run itself recorded as failed (from
+   * report-tier1.json's failedSlugs in full mode, from the scoped
+   * runs' exit codes in scoped mode). Optional: callers that build
+   * a SuiteResult without running the suite (merge.ts builds its
+   * own suite and names failures via failedSectionLabels instead)
+   * leave it absent. */
+  failedSlugs?: string[];
   /** Sections skipped via resume (must be 0 — a resumed run proves nothing). */
   skippedViaResume: number;
   /** The driver's printed PASS line (full mode only). */
@@ -360,10 +378,47 @@ export function parseTier1Aggregation(text: string): {
         perSection.length +
         " section logs but sectionsRan is " +
         sectionsRan +
-        " (a marker without a log, or vice versa)",
+        " (the aggregation's per-section lines do not match its log count)",
     );
   }
   return { sectionsRan, totalOk, passLines, perSection };
+}
+
+/** Parse report-tier1.json (run.sh's combiner output) and return its
+ * failedSlugs. Pure — unit-tested directly. Returns [] when the text
+ * is not a JSON object with a failedSlugs string array (a missing or
+ * malformed report is not an error here — the caller falls back to
+ * the aggregation-derived list). The combiner writes the report even
+ * when the tier-1 fails, so a failed run's slugs are available. */
+export function parseReportTier1FailedSlugs(text: string): string[] {
+  try {
+    const parsed: unknown = JSON.parse(text);
+    if (typeof parsed !== "object" || parsed === null) return [];
+    const slugs = (parsed as { failedSlugs?: unknown }).failedSlugs;
+    if (!Array.isArray(slugs)) return [];
+    const out: string[] = [];
+    for (const s of slugs) if (typeof s === "string") out.push(s);
+    return out;
+  } catch {
+    return [];
+  }
+}
+
+/** The failed slugs from the aggregation's per-section lines: the
+ * sections with no verdict (no " OK:" line and no PASS line). Pure —
+ * unit-tested directly. This is the fallback when report-tier1.json
+ * is absent (scoped runs never write it) — it names every section
+ * that did not show a verdict, which includes a no-verdict pass as
+ * well as a failure, so callers that know the exit codes (the scoped
+ * loop) prefer those. */
+export function failedSlugsFromAggregation(
+  perSection: Array<{ slug: string; ok: number; passLines: number }>,
+): string[] {
+  const out: string[] = [];
+  for (const s of perSection) {
+    if (s.ok === 0 && s.passLines === 0) out.push(s.slug);
+  }
+  return out;
 }
 
 /** Diff-confinement check: changed vs claimed. Pure — unit-tested directly. */
@@ -492,6 +547,10 @@ export function buildVerifyReport(args: {
         " OK, allPassed=false",
     );
   }
+  const failedSlugs = args.suite.failedSlugs ?? [];
+  if (failedSlugs.length > 0) {
+    notes.push("suite failed sections: " + failedSlugs.join(", "));
+  }
   if (args.suite.mode === "full" && args.suite.skippedViaResume !== 0) {
     notes.push(
       "suite skipped " + args.suite.skippedViaResume + " sections via resume — a resumed run proves nothing",
@@ -528,7 +587,14 @@ export function buildVerifyReport(args: {
  * on-disk section logs and prints the line-based format
  * parseTier1Aggregation reads. The big outputs stay on disk; only
  * the counts cross the trap boundary. Exported for the merge workflow
- * (BRA-159), so there is one aggregation rule in the repo. */
+ * (BRA-159), so there is one aggregation rule in the repo.
+ * sectionsRan counts section LOGS (defect 6): a log exists for every
+ * section that ran, pass or fail, but a .done marker exists only for
+ * a passing section — counting markers made a failed section appear
+ * in the per-section lines but not in sectionsRan, so the parse
+ * threw and the failure was masked instead of reported. The doneDir
+ * parameter is retained for the shared call site (merge.ts passes
+ * both dirs) but no longer determines the count. */
 export function tier1AggregationScript(logDir: string, doneDir: string): string {
   return (
     'd="' +
@@ -536,15 +602,14 @@ export function tier1AggregationScript(logDir: string, doneDir: string): string 
     '"; l="' +
     logDir +
     '"; ' +
-    'echo "sectionsRan=$(ls "$d" | wc -l | tr -d \' \')"; ' +
-    't=0; p=0; ' +
+    't=0; p=0; n=0; ' +
     'for f in "$l"/*.log; do [ -f "$f" ] || continue; ' +
     's=$(basename "$f" .log); ' +
     'o=$(grep -c \' OK:\' "$f" || true); ' +
     'q=$(grep -c \'^PASS\' "$f" || true); ' +
-    't=$((t + o)); p=$((p + q)); ' +
+    't=$((t + o)); p=$((p + q)); n=$((n + 1)); ' +
     'echo "$s $o $q"; done; ' +
-    'echo "totalOk=$t"; echo "passLines=$p"'
+    'echo "sectionsRan=$n"; echo "totalOk=$t"; echo "passLines=$p"'
   );
 }
 
@@ -720,6 +785,11 @@ export default function verifyFix(input: VerifyFixInput): VerifyReport {
   const suiteStarted = Date.now();
   let suiteAllPassed = true;
   let summaryLine = "";
+  // Scoped failures, named by exit code: a scoped run whose section
+  // exits non-zero failed (defect 6 — scoped runs never write
+  // report-tier1.json, so the exit codes are the authoritative
+  // failed-slug source in scoped mode).
+  const scopedFailedSlugs: string[] = [];
   if (!scoped) {
     const r = exec({
       cmd: "/bin/sh",
@@ -754,7 +824,10 @@ export default function verifyFix(input: VerifyFixInput): VerifyReport {
         ],
         cwd: appsDir,
       });
-      if (r.exitCode !== 0) suiteAllPassed = false;
+      if (r.exitCode !== 0) {
+        suiteAllPassed = false;
+        scopedFailedSlugs.push(onlySections[i]);
+      }
     }
   }
   const logDir = scoped
@@ -780,6 +853,27 @@ export default function verifyFix(input: VerifyFixInput): VerifyReport {
     if (!verdictPresent) suiteAllPassed = false;
     suiteSections.push({ slug: s.slug, ok: s.ok, passLines: s.passLines, verdictPresent });
   }
+  // The failed slugs, named for the report (defect 6): a failed
+  // section has a log but no marker, so the aggregation (which counts
+  // logs) includes it — and the report must name it, not just imply
+  // it via allPassed=false. Full mode reads report-tier1.json
+  // (run.sh's combiner writes it even when the tier-1 fails); scoped
+  // mode has no report-tier1.json (direct mode never writes it), so
+  // the scoped runs' exit codes name the failures. Either way the
+  // fallback is the aggregation's no-verdict sections.
+  let failedSlugs: string[] = [];
+  if (!scoped) {
+    const reportPath =
+      input.resumeDir + "/workflow/tier" + tier + "/report-tier" + tier + ".json";
+    const cat = exec({ cmd: "cat", args: [reportPath] });
+    if (cat.exitCode === 0) {
+      failedSlugs = parseReportTier1FailedSlugs(cat.stdout ?? "");
+    } else {
+      failedSlugs = failedSlugsFromAggregation(aggParsed.perSection);
+    }
+  } else {
+    failedSlugs = scopedFailedSlugs;
+  }
   let skippedViaResume = 0;
   let summaryMatchesIndependent = true;
   if (!scoped) {
@@ -801,6 +895,7 @@ export default function verifyFix(input: VerifyFixInput): VerifyReport {
     passLines: aggParsed.passLines,
     sections: suiteSections,
     allPassed: suiteAllPassed,
+    failedSlugs,
     skippedViaResume,
     summaryLine,
     summaryMatchesIndependent,

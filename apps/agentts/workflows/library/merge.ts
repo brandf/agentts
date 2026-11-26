@@ -1295,6 +1295,73 @@ export function reconcileResumeCounts(args: {
   return args.resumedPre + (args.resumedPost - args.resumedPre) === args.sectionsRan;
 }
 
+/** The post-run tier-1 summary reconciliation (defect 7, M3, Shape A):
+ * decide whether the tier-1 summary matches the independent log
+ * counts, and carry the summary's skippedViaResume forward for the
+ * suite. Pure — unit-tested directly. The checks, in order: a missing
+ * summary fails; fresh (driven chunks) + resumed (reused chunks) must
+ * equal the aggregation's marker count; the summary's OK total must
+ * equal the aggregation's OK total; the post-run journal must be
+ * valid, and its counts must reconcile with the pre-run count.
+ * Deliberately NOT checked here: the old
+ * `skippedViaResume !== 0 && resumedPre === 0` rule. run.sh skips a
+ * section only when it has a journal row (rc=0) + a `.done` marker —
+ * the same proof the carryForwardResume branch uses — so the
+ * summary's skipped count IS verified by the journal, and the
+ * post-run journal validation + the sectionsRan+skipped check above
+ * already prove the skips are verified. The `resumedPre === 0`
+ * condition was a pre-run proxy that is false for an engine-repaired
+ * fresh-dir run (the pre-check did not re-run, so `resumedPre` is 0
+ * even though the skips are verified) — it fired on a genuine resume
+ * and failed a clean tier-1. A summary that claims skips with an
+ * INVALID journal still fails here (the journal check below), so the
+ * genuinely-unverified shape is still caught. */
+export function reconcileTier1Summary(args: {
+  effectiveSummary: { sectionsRan: number; skippedViaResume: number; ok: number } | null;
+  aggSectionsRan: number;
+  aggTotalOk: number;
+  journalAfter: ResumeJournalResult;
+  resumedPre: number;
+}): { summaryMatchesIndependent: boolean; skippedViaResume: number } {
+  let summaryMatchesIndependent = true;
+  let skippedViaResume = 0;
+  if (args.effectiveSummary === null) {
+    summaryMatchesIndependent = false;
+  } else {
+    skippedViaResume = args.effectiveSummary.skippedViaResume;
+    // Fresh (driven chunks) + resumed (reused chunks) == total markers.
+    if (args.effectiveSummary.sectionsRan + args.effectiveSummary.skippedViaResume !== args.aggSectionsRan) summaryMatchesIndependent = false;
+    if (args.effectiveSummary.ok !== args.aggTotalOk) summaryMatchesIndependent = false;
+  }
+  if (args.journalAfter.status !== "valid") summaryMatchesIndependent = false;
+  else if (!reconcileResumeCounts({ resumedPre: args.resumedPre, resumedPost: args.journalAfter.resumed, sectionsRan: args.aggSectionsRan })) summaryMatchesIndependent = false;
+  return { summaryMatchesIndependent, skippedViaResume };
+}
+
+/** The report's resumedSections (defect 7, M3, Shape A as amended):
+ * max(pin, skippedViaResume) when the full tier-1 ran, else the pin.
+ * The two numbers measure different things: skippedViaResume (the
+ * tier-1 summary's skipped count) is the CHUNK-level count — how many
+ * chunks were reused via their report.json; resumedPre (the pin) is
+ * the JOURNAL-level count — how many sections the carried-forward
+ * journal already has (verified pre-run). Defect 6's re-drive is the
+ * proof: its tier-1 ran all 73 sections fresh (skippedViaResume 0 —
+ * no chunk was reused, chunk-0's report was missing after the kill)
+ * while the pin recorded 26 (the carried-forward journal's verified
+ * count) — the unamended formula (resumedSections = skippedViaResume)
+ * would record 0 for a run that carried 26 sections forward. When a
+ * pin exists, the skipped sections are a subset of the pinned
+ * sections (a chunk reused via its report has its sections in the
+ * carried-forward journal), so max() does not double-count. Pure —
+ * unit-tested directly. */
+export function resumedSectionsForReport(args: {
+  resumedPre: number;
+  skippedViaResume: number;
+  tier1Ran: boolean;
+}): number {
+  return args.tier1Ran ? Math.max(args.resumedPre, args.skippedViaResume) : args.resumedPre;
+}
+
 /** The failed-sections script: extract the slugs run.sh reports as
  * failed from a tier-1 output file — the workflow driver's
  * `FAILED: a, b` line, falling back to the section runner's
@@ -2052,19 +2119,15 @@ export default function mergeCopy(input: MergeCopyInput): MergeReport {
         effectiveSummaryLine = summaryPin.summary.summaryLine;
       }
     }
-    if (effectiveSummary === null) {
-      summaryMatchesIndependent = false;
-    } else {
-      skippedViaResume = effectiveSummary.skippedViaResume;
-      // Fresh (driven chunks) + resumed (reused chunks) == total markers.
-      if (effectiveSummary.sectionsRan + effectiveSummary.skippedViaResume !== aggParsed.sectionsRan) summaryMatchesIndependent = false;
-      if (effectiveSummary.ok !== aggParsed.totalOk) summaryMatchesIndependent = false;
-      // An unverified resume still fails exactly as before: sections
-      // skipped via resume with nothing verified pre-run prove nothing.
-      if (effectiveSummary.skippedViaResume !== 0 && resumedPre === 0) summaryMatchesIndependent = false;
-    }
-    if (journalAfter.status !== "valid") summaryMatchesIndependent = false;
-    else if (!reconcileResumeCounts({ resumedPre, resumedPost: journalAfter.resumed, sectionsRan: aggParsed.sectionsRan })) summaryMatchesIndependent = false;
+    const reconciled = reconcileTier1Summary({
+      effectiveSummary,
+      aggSectionsRan: aggParsed.sectionsRan,
+      aggTotalOk: aggParsed.totalOk,
+      journalAfter,
+      resumedPre,
+    });
+    skippedViaResume = reconciled.skippedViaResume;
+    summaryMatchesIndependent = reconciled.summaryMatchesIndependent;
     suite = {
       mode: "full",
       tier,
@@ -2112,7 +2175,13 @@ export default function mergeCopy(input: MergeCopyInput): MergeReport {
     typecheck,
     suite,
     baseline,
-    resumedSections: resumedPre,
+    // Shape A as amended (defect 7, M3): resumedSections is
+    // max(pin, skippedViaResume) when the full tier-1 ran — see
+    // resumedSectionsForReport for why the two numbers measure
+    // different things (chunk-level vs journal-level) and why max()
+    // does not double-count. When the tier-1 did not run (the suite
+    // is skipped), fall back to resumedPre (0, unchanged).
+    resumedSections: resumedSectionsForReport({ resumedPre, skippedViaResume: suite.skippedViaResume, tier1Ran: suite.mode === "full" }),
     resumeFallback,
     failedSectionLabels,
     manifestCopiedAt,
